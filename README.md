@@ -1,96 +1,262 @@
-> 小方工作室 · 出品 ｜ Float IDE ｜ Float Script 桌面编辑器 ｜ MIT
+> 小方工作室 · 出品 ｜ Float IDE ｜ CW Script 桌面编辑器 ｜ MIT
 
 # Float IDE
 
-**Float Script 的桌面编辑器。** Float Script（简称 Float）是小方工作室自研的编程语言，从「代码世界」的 CW Script 演化而来：保留简单直接的运行模型，把语法整理得更接近 Python。
+**CW Script（代码世界）的桌面 IDE。** 把网页版的 `CW Script IDE` 做成桌面软件：语言与运行模型保持原样，界面重做，高亮、大纲、诊断与调试建立在真正的词法、语法、语义分析之上，而不是正则匹配。
 
-## 一句话立论
+## 一、它是什么
 
-> IDE 的高亮、折叠、大纲、跳转、引用、重命名、诊断，全部建立在真正的词法分析、语法分析与语义分析之上，不是正则匹配。
+- **语言是 CW Script。** 本仓库的 `language/catalog/core.json` 把「CW Script 去掉舞台相关指令」后的核心子集记作 **Float Script**，并明确标注：**语法与 CW Script 保持一致，未做改写**。扩展名仍是 `.cw`。
+- **形态是桌面 IDE。** 交互原型是 `reference/original/CW Script IDE.html`——一个单文件 HTML 的完整 IDE，已包含资源管理器、语法高亮、大纲、自动补全、断点与单步调试、变量监视、控制台 / 时间线、模拟提交、导出 NEX。
+- **工具链在 `tools/`。** Eclipse IDE for DSL Developers 2026-09（含 Xtext 2.44、LSP4E、tm4e）与 JDK 21，用于实现语言服务与桌面 IDE。**`tools/` 是本地工具链，不入库。**
 
-正则做不到的事：
+## 二、语言速查
 
-| 能力 | 正则方案 | 基于 AST 的方案 |
-| --- | --- | --- |
-| 高亮 | 关键字表逐行匹配，字符串与注释里的关键字会被误染色 | 先分词，字符串与注释天然不会被当成关键字 |
-| 跳转定义 | 只能全局文本搜索，同名变量与字符串字面量都会命中 | 从标识符节点反查符号表，只认真正的定义与引用 |
-| 重命名 | 全局替换会误伤字符串、注释与局部同名变量 | 改在语法树上再回写源码，作用域外不受影响 |
-| 错误定位 | 只能提示「这一行有怪字符」 | 给出期望符号、实际问题与精确行列 |
+### 文件与排版
 
-## 语言速览
-
-| 项 | 内容 |
+| 项 | 规则 |
 | --- | --- |
-| 名称 | Float Script |
-| 版本 | 0.1.0 |
-| 扩展名 | `.cw` |
-| 编码 / 换行 | UTF-8 / LF |
-| 缩进 | 4 个空格；子语句缩进必须严格大于父语句 |
-| 注释 | `#`（旧代码的 `//` 仍可解析） |
-| 类型 | `int` `float` `str` `bool` `list` `dict` `any`，可省略，仅作校验 |
-| 标识符 | 沿用 CW Script 规则，支持中文 |
-| 语句结束 | 换行；分号可选，仅为兼容旧代码 |
+| 名称 | Float Script（CW Script 的核心子集） |
+| 扩展名 / 编码 / 换行 | `.cw` / UTF-8 / LF |
+| 行注释 | `// 文本` |
+| 整行跳过 | `-- 任意文本`（不是注释节点，直接跳过） |
+| 分号 | 行尾 `;` 可选，匹配后忽略 |
+| 花括号 | `{ }` 可选，块是否存在只由缩进决定 |
+| 缩进 | 子语句必须比父语句更深；缩进回退到父级或更浅即结束当前块 |
+| 空行 | 忽略，不生成 AST 节点 |
+| 分支合并 | 只有 `} elif (条件) {` / `} else {` 与上一行同行书写，才合并为 `if_elif_else` |
+| 类型 | `int` `float` `str` `bool` `list` `dict`（没有 `any`，也没有 `none`） |
+
+### 控制
 
 ```cw
-# Float Script 0.1 — 你好，浮点
-
-name: str = input("你叫什么名字？")
-print("你好，" + name)
-
-count: int = 0
-for i in range(3):
-    count += 1
-    print("第 " + str(count) + " 次")
+repeat(10)
+for i in range(10)
+for i = 1 to 10
+forever
+main loop
+while (条件)
+if (条件)
+elif (条件)
+else
+break
+out                 // 跳出当前块，等价 break
+balo                // 跳过本轮，等价 continue
+if out(条件)        // 条件成立时跳出当前块
+wait 0.5
+wait(表达式)
+wait until(条件)
+stop all
+stop now
+stop script
 ```
 
-### 关键字
+- `repeat`、`for i in range` 的计数都从 0 开始，只接受数字字面量。
+- 单独的 `if` 不写条件时按 `true` 处理。
+- `for_range` 的循环计数**没有**写入 `sb.vars['i']`，循环体内不要依赖变量 `i`。
 
-`if` `elif` `else` `while` `for` `in` `range` `break` `continue` `return` `def` `import` `del` `and` `or` `not` `true` `false` `none`
+### 变量
 
-### 内建
+```cw
+int count = 0
+float ratio = 0.5
+str name = "小方"
+bool ready = true
 
-`len` `str` `int` `float` `bool` `sqrt` `abs` `floor` `ceil` `round` `random` `randint` `range` `print` `input` `sleep` `wait_until` `exit`
+name = 表达式          // 右值走完整表达式求值
+count++
+count--
+count += 1             // 复合赋值原版只接受数字字面量
+count -= 1
+count *= 2
+count /= 2
+count %= 2
+```
 
-列表、字典、字符串各有常用方法，例如 `list.append()`、`dict.keys()`、`str.split()`。
+声明语句的初始化值只走字面量解析：数字、字符串、`true` / `false`、`[]`、`{}`、变量名、`ans`，**不会求值表达式**。需要表达式时，先声明，再用 `name = 表达式` 赋值。
 
-## 相对 CW Script 的变化
+### 函数
 
-- 语法 Python 化：`def` 定义函数、`for ... in range()` 循环、`#` 注释
-- 新增 `continue`、一元负号、列表与字典字面量、成员方法调用、默认参数
-- `+=` 等复合赋值的右侧可以是任意表达式
-- `function bool` / `function repo` 改为装饰器 `@bool` / `@repo`
-- 舞台、角色、画笔、外观、碰撞、克隆、鼠标、联机指令从核心剥离，归档为 `stage` 扩展，未来以扩展包提供
-- 旧写法保留在 `legacy` 迁移层，只用于旧代码兼容，不进入新代码
+```cw
+function hello()
+function bool isReady()
+function repo load()
+fn bye()
+Function foo()
+f bar()
+```
 
-## 仓库结构
+- `bool` / `repo` 是函数修饰符，不是装饰器。
+- 带参定义写作 `function greet(name)`；`f(param) {` 定义的是固定名为 `_f` 的函数，且只支持一个参数。
+- 文本解析层目前只打通**无参调用** `name()`，带参调用尚未打通。
+
+### 输入输出与运行时
+
+```cw
+print("文本")
+print(表达式)
+ask "你叫什么名字？"
+str name = ans
+time read
+time reset
+```
+
+### 列表
+
+```cw
+list nums
+add 3 to nums
+del nums 0
+insert 1 to nums at 0
+replace nums 0 with 9
+read nums 1
+len nums
+listin(1, nums)
+```
+
+列表指令的下标只接受数字字面量。`read` 的结果写入 `__last_read`，`len` 写入 `__last_len`，`listin` 写入 `__last_cmp`。
+
+### 字典
+
+```cw
+dict scores
+dict scores key "小明" = 90
+dict scores read "小明"
+dict scores del "小明"
+dictallkey(scores)
+dictallval(scores)
+dictin(scores, "小明")
+```
+
+`dict read` / `dictallkey` / `dictallval` 的结果写入 `__last_read`，`dictin` 写入 `__last_cmp`。
+
+### 数学、比较、逻辑、字符串
+
+| 类别 | 指令 | 结果变量 |
+| --- | --- | --- |
+| 数学 | `add(a,b)` `sub` `mul` `div` `mod` `pow` `rand` `sqrt` `abs` `floor` `ceil` `round` | `__last_calc` |
+| 比较 | `lt(a,b)` `eq(a,b)` `gt(a,b)` | `__last_cmp` |
+| 逻辑 | `and(a,b)` `or(a,b)` `not(a)` | `__last_cmp` |
+| 字符串 | `join(a,b)` `char(s,i)` `strlen(s)` | `__last_str` |
+| 包含 | `contain(s,sub)` | `__last_cmp` |
+
+### 特殊变量
+
+| 变量 | 写入者 |
+| --- | --- |
+| `ans` | `ask` 的回答 |
+| `__last_calc` | 全部 `math_*` 指令 |
+| `__last_cmp` | `cmp_*` / `logic_*` / `listin` / `dictin` / `contain` |
+| `__last_read` | `list read` / `dict read` / `dictallkey` / `dictallval` |
+| `__last_len` | `len` |
+| `__last_str` | `join` / `char` / `strlen` |
+| `__last_time` | `time read` |
+| `__last_ans` | `ans` |
+
+运算指令**不返回值**，结果写进这些隐式变量。
+
+### 表达式
+
+表达式由手写的 Pratt Parser（`safeEvalExpr`）求值，支持整数、小数、单双引号字符串、`true` / `false`。
+
+| 优先级 | 运算符 |
+| --- | --- |
+| 10 | `\|\|` |
+| 15 | `&&` |
+| 20 | `\|` |
+| 25 | `^` |
+| 30 | `&` |
+| 35 | `==` `!=` `===` `!==` |
+| 40 | `<` `>` `<=` `>=` |
+| 45 | `<<` `>>` |
+| 50 | `+` `-` |
+| 60 | `*` `/` `%` |
+| 70 | `**`（右结合） |
+
+一元运算符：`-` `!` `~`；下标：`列表[下标]`；可调用：`Math.*`、`sin` `cos` `tan` `asin` `acos` `atan` `atan2` `sqrt` `abs` `floor` `ceil` `round` `log` `exp` `pow` `min` `max` `random` `join` `char` `strlen` `contain` `len`。
+
+**表达式层不支持：**
+
+- `and` / `or` / `not` 关键字（会被当成标识符）
+- 把 `lt` / `eq` / `gt` / `add` / `sub` / `mul` / `div` / `mod` / `pow` 等指令名当函数调用
+- 成员方法调用，例如 `name.append(...)`
+
+条件表达式请使用 `> < >= <= == != && || !`。
+
+### 模块与注释
+
+```cw
+import "file.ext"     // 路径含 . 时按文件导入
+import "folder"       // 路径不含 . 时按文件夹导入
+
+// 普通注释
+// ─ 组开始 ─          供大纲折叠
+// ─ 组结束 ─
+-- 整行跳过
+```
+
+未识别的文本会生成 `unknown` 节点，并给出近似指令提示。
+
+## 三、样例
+
+仓库内四份样例就是语言现状的最好说明：
+
+| 文件 | 内容 |
+| --- | --- |
+| `language/samples/01_hello.cw` | `ask` / `ans` / `print` / `repeat` |
+| `language/samples/02_control.cw` | `repeat` / `for i in range` / `if_elif_else` / `while` / `out` / `balo` |
+| `language/samples/03_collections.cw` | 列表与字典，以及 `__last_read` / `__last_len` / `__last_cmp` |
+| `language/samples/04_functions.cw` | `function` / `fn` / `function bool` / 无参调用 |
+
+```cw
+// 01 你好 —— Float Script
+
+ask "你叫什么名字？"
+str name = ans
+print("你好，")
+print(name)
+
+int count = 0
+repeat(3) {
+    count++
+    print(count)
+}
+```
+
+## 四、仓库结构
 
 | 路径 | 内容 |
 | --- | --- |
-| `language/catalog/core.json` | 语言核心目录：类型、关键字、优先级、AST 构造、内建函数、容器方法 |
-| `language/catalog/stage.json` | 舞台扩展（已归档，核心不加载） |
-| `language/catalog/legacy.json` | CW Script 兼容层与迁移对照 |
-| `language/samples/` | 四份 `.cw` 样例：你好、控制流、集合、函数 |
-| `reference/original/` | 「代码世界」原始页面与 CW Script IDE，只读参考 |
-| `tools/` | Eclipse DSL + JDK 21 本地工具链，不入库 |
+| `language/catalog/core.json` | 语言核心目录：排版规则、类型、特殊变量、全部 AST 构造、表达式优先级与限制 |
+| `language/catalog/stage.json` | 舞台扩展归档：移动、外观、画笔、造型、克隆、鼠标、碰撞、事件、联机、变量面板 |
+| `language/samples/` | 四份 `.cw` 样例 |
+| `reference/original/` | 「代码世界」原始页面与 `CW Script IDE.html`，只读参考 |
+| `tools/` | Eclipse DSL 与 JDK 21 本地工具链，不入库 |
 
-## 路线
+`stage.json` 的定位是：舞台、角色、画笔、外观、碰撞、克隆、鼠标与联机指令已从核心剔除，Float 核心不加载该扩展，未来以可实时更新的扩展包提供。
 
-1. 冻结语言规范
-2. 词法 / 语法 / 语义分析
-3. 编辑器能力：高亮、折叠、大纲、跳转定义、查找引用、重命名、诊断
-4. 打包与分发
+## 五、原型里已有的 IDE 能力
 
-## 边界
+`reference/original/CW Script IDE.html` 是一个可直接打开的完整原型：
 
-- 不带任何 AI 功能
-- 不做账号体系，不登录、不联网校验
-- 永不自动更新
-- 全中文界面
-- 完全免费
+- 资源管理器、大纲、变量监视
+- 自研语法高亮与行号栏
+- 自动补全、断点、条件断点
+- 运行 / 调试 / 继续 / 单步跳过 / 单步进入 / 单步跳出
+- 控制台与时间线
+- 「提交」按钮与「导出为 NEX」
+- 菜单：文件、编辑、查看、运行、终端、帮助
 
-## 许可
+## 六、边界
 
-MIT，非营利，小方工作室出品。
+- 语言核心不加载舞台扩展；舞台能力归入 `stage` 扩展。
+- 当前文本解析层只支持无参函数调用。
+- 声明语句的初始化值不求值表达式。
+- `and` / `or` / `not` 不是关键字。
+
+## 七、许可
+
+MIT，小方工作室出品。
 
 ---
 
