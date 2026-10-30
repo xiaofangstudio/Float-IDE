@@ -1,0 +1,33 @@
+# ===== 下载的 IDE 运行时（Eclipse / JDK，约 1.9G，不进仓库；走 Releases）=====
+tools/
+
+# ===== 参考副本（不入库）=====
+reference/
+
+# ===== 构建 / 依赖产物 =====
+scaffold/node_modules/
+scaffold/dist/
+scaffold/src-tauri/target/
+scaffold/src-tauri/gen/
+
+# ===== 运行时二进制（ffmpeg 约 154M，不进仓库；走 Releases）=====
+scaffold/src-tauri/ffmpeg/
+
+# ===== 无头验证缓存 / Edge profile / 截图 =====
+scaffold/.d[0-9]*/
+scaffold/.ec[0-9]*/
+scaffold/.ep[0-9]*/
+scaffold/.edgepr*/
+scaffold/.edgeprof*/
+_check-*.png
+_selftest-dom.html
+
+# ===== 本地 / 工具 =====
+.workbuddy/
+*.lnk
+*.local
+
+# ===== 系统 =====
+.DS_Store
+Thumbs.db
+desktop.ini

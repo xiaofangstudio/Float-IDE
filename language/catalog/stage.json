@@ -1,0 +1,134 @@
+{
+  "$schema": "float-language-extension/1",
+  "extension": "stage",
+  "name": "Float Stage",
+  "status": "archived",
+  "description": "从 CW Script 核心中剔除的舞台、角色、画笔、外观、碰撞、克隆、鼠标与联机指令。Float 核心不加载本扩展；未来以官网可实时更新的扩展包提供。",
+  "source": "代码世界-任务.html / parseLine()",
+  "groups": [
+    {
+      "group": "motion",
+      "label": "移动与坐标",
+      "commands": [
+        { "ast": "clear", "syntax": "clear()" },
+        { "ast": "move", "syntax": "walk(n) / move(n)" },
+        { "ast": "jump", "syntax": "jump()" },
+        { "ast": "rotright", "syntax": "rotright(deg)" },
+        { "ast": "rotleft", "syntax": "rotleft(deg)" },
+        { "ast": "dir", "syntax": "dir(deg)" },
+        { "ast": "gotoxy", "syntax": "gotoxy(x, y)" },
+        { "ast": "setx", "syntax": "setx(x)" },
+        { "ast": "sety", "syntax": "sety(y)" },
+        { "ast": "addx", "syntax": "addx(dx)" },
+        { "ast": "addy", "syntax": "addy(dy)" }
+      ]
+    },
+    {
+      "group": "looks",
+      "label": "外观与尺寸",
+      "commands": [
+        { "ast": "show", "syntax": "show() / show" },
+        { "ast": "hide", "syntax": "hide() / hide" },
+        { "ast": "setsizepct", "syntax": "setsizepct(pct)" },
+        { "ast": "addsizepct", "syntax": "addsizepct(pct)" },
+        { "ast": "setbrightness", "syntax": "setbrightness(n)" },
+        { "ast": "setcolor", "syntax": "setcolor(\"#rrggbb\")" },
+        { "ast": "addcolor", "syntax": "addcolor(n)" },
+        { "ast": "setalpha", "syntax": "setalpha(n)" }
+      ]
+    },
+    {
+      "group": "pen",
+      "label": "画笔",
+      "commands": [
+        { "ast": "pendown", "syntax": "pendown" },
+        { "ast": "penup", "syntax": "penup" },
+        { "ast": "clearpen", "syntax": "clearpen" },
+        { "ast": "pencolor", "syntax": "pencolor(\"#rrggbb\")" },
+        { "ast": "pensize", "syntax": "pensize(n)" },
+        { "ast": "stamp", "syntax": "stamp" }
+      ]
+    },
+    {
+      "group": "costume",
+      "label": "造型与翻转",
+      "commands": [
+        { "ast": "switchcost", "syntax": "switchcost(\"name\")" },
+        { "ast": "nextcost", "syntax": "nextcost" },
+        { "ast": "prevcost", "syntax": "prevcost" },
+        { "ast": "costnum", "syntax": "costnum(name)" },
+        { "ast": "dirsprite", "syntax": "dirsprite(\"name\")" },
+        { "ast": "flipx", "syntax": "flipx" },
+        { "ast": "flipy", "syntax": "flipy" },
+        { "ast": "setflipx", "syntax": "setflipx(true|false)" },
+        { "ast": "setflipy", "syntax": "setflipy(true|false)" },
+        { "ast": "flip_mode", "syntax": "flipmode(mode)" }
+      ]
+    },
+    {
+      "group": "clone",
+      "label": "克隆",
+      "commands": [
+        { "ast": "clone", "syntax": "clone() / clone" },
+        { "ast": "clone_del_all", "syntax": "delclones()" },
+        { "ast": "on_clone", "syntax": "onclone {" },
+        { "ast": "clone_limit", "syntax": "clonelimit(n) {" }
+      ]
+    },
+    {
+      "group": "sensing",
+      "label": "鼠标与坐标读取",
+      "commands": [
+        { "ast": "mouse_x", "syntax": "mousex" },
+        { "ast": "mouse_y", "syntax": "mousey" },
+        { "ast": "sprite_x", "syntax": "spritex" },
+        { "ast": "sprite_y", "syntax": "spritey" },
+        { "ast": "mouse_hit", "syntax": "mousehit(\"name\")" },
+        { "ast": "mouse_dist", "syntax": "mousedist(\"name\")" },
+        { "ast": "mouse_down", "syntax": "mousedown()" },
+        { "ast": "mouse_down_on", "syntax": "mousedown(\"name\")" },
+        { "ast": "mouse_down_sprite", "syntax": "mousedown_sprite(\"name\")" }
+      ]
+    },
+    {
+      "group": "collision",
+      "label": "碰撞检测",
+      "commands": [
+        { "ast": "edgehit", "syntax": "edgehit {" },
+        { "ast": "hit_sprite", "syntax": "hit(\"name\") {" },
+        { "ast": "hit_color", "syntax": "hit color(\"#rrggbb\") {" },
+        { "ast": "hit_colors", "syntax": "hit colors(\"#a\", \"#b\") {" }
+      ]
+    },
+    {
+      "group": "event",
+      "label": "舞台事件",
+      "commands": [
+        { "ast": "click_flag", "syntax": "click flag { / main() {" },
+        { "ast": "click_sprite", "syntax": "click sprite(\"name\") {" },
+        { "ast": "click_pause", "syntax": "click pause {" },
+        { "ast": "click_stop", "syntax": "click stop {" },
+        { "ast": "click_key", "syntax": "click key(\"a\") {" },
+        { "ast": "on_code_change", "syntax": "on code change {" },
+        { "ast": "time_trigger", "syntax": "time trigger(n) {" },
+        { "ast": "var_trigger", "syntax": "var trigger(name) {" }
+      ]
+    },
+    {
+      "group": "network",
+      "label": "联机广播",
+      "commands": [
+        { "ast": "sendbc", "syntax": "sendbc(\"msg\")" },
+        { "ast": "sendbc_wait", "syntax": "sendbc wait(\"msg\")" },
+        { "ast": "onbc", "syntax": "onbc(\"msg\") {" }
+      ]
+    },
+    {
+      "group": "ui",
+      "label": "变量面板",
+      "commands": [
+        { "ast": "var_display", "syntax": "showvar name true|false" }
+      ]
+    }
+  ]
+}

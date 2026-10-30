@@ -1,0 +1,10 @@
+node_modules
+dist
+src-tauri/target
+src-tauri/gen
+*.local
+
+# 无头验证遗留
+.edgeprof*/
+_selftest-dom.html
+_check-*.png

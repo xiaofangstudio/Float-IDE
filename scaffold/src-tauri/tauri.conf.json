@@ -1,0 +1,51 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Float IDE",
+  "version": "0.10.0",
+  "identifier": "com.xiaofangstudio.floatide",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1430",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Float IDE",
+        "width": 1560,
+        "height": 940,
+        "minWidth": 1120,
+        "minHeight": 680,
+        "resizable": true,
+        "center": true,
+        "decorations": false,
+        "fullscreen": false,
+        "transparent": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "msi"
+    ],
+    "publisher": "小方工作室",
+    "icon": [
+      "icons/icon.ico"
+    ],
+    "copyright": "© 2026 小方工作室",
+    "resources": [],
+    "windows": {
+      "wix": {
+        "language": [
+          "zh-CN"
+        ]
+      }
+    }
+  }
+}

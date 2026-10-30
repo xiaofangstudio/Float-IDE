@@ -1,0 +1,794 @@
+{
+  "$schema": "float-language-catalog/1",
+  "name": "Float Script",
+  "shortName": "Float",
+  "version": "0.4.0",
+  "basedOn": "CW Script（代码世界）",
+  "status": "CW Script 核心语言 + 0.4 扩展：异常处理、方法链、多返回值；界面按 PyCharm 新 UI 重做",
+  "fileExtension": ".cw",
+  "encoding": "UTF-8",
+  "lineEnding": "LF",
+  "layout": {
+    "mode": "line",
+    "lineComment": "//",
+    "lineSkip": "--",
+    "semicolon": "行尾 ; 可选，匹配后忽略",
+    "braces": "{ } 可选；块是否存在只由缩进决定",
+    "indent": "子语句缩进必须严格大于父语句；缩进回退到父级或更浅即结束当前块",
+    "blankLine": "空行忽略，不生成 AST 节点",
+    "branchMerge": "else / elif 与上一块同级缩进即可；} else { / } elif (…) { 同行书写也识别"
+  },
+  "types": [
+    "int",
+    "float",
+    "str",
+    "bool",
+    "list",
+    "dict"
+  ],
+  "specialVariables": [
+    {
+      "name": "ans",
+      "writtenBy": "ask",
+      "note": "ask 的回答；ask 之后可直接当值使用"
+    },
+    {
+      "name": "__last_calc",
+      "writtenBy": "math_add / math_sub / math_mul / math_div / math_mod / math_pow / math_rand / math_sqrt / math_abs / math_floor / math_ceil / math_round"
+    },
+    {
+      "name": "__last_cmp",
+      "writtenBy": "cmp_lt / cmp_eq / cmp_gt / logic_and / logic_or / logic_not / list_in / dict_in / str_contain"
+    },
+    {
+      "name": "__last_read",
+      "writtenBy": "list_read / dict_read / dict_allkey / dict_allval"
+    },
+    {
+      "name": "__last_len",
+      "writtenBy": "list_len"
+    },
+    {
+      "name": "__last_str",
+      "writtenBy": "str_join / str_char / str_len"
+    },
+    {
+      "name": "__last_time",
+      "writtenBy": "time_read"
+    },
+    {
+      "name": "__last_ans",
+      "writtenBy": "ans"
+    }
+  ],
+  "constructs": [
+    {
+      "ast": "for_range",
+      "category": "control",
+      "syntax": "for i in range(n)\nfor i in range(a, b)\nfor i in range(a, b, step)\nrepeat(n)",
+      "body": true,
+      "notes": "0.2 起 n 可以是任意表达式（变量、算式、函数调用）。循环变量名任意，且真正进入作用域，嵌套循环互不干扰"
+    },
+    {
+      "ast": "for_to",
+      "category": "control",
+      "syntax": "for i = 1 to 10\nfor i = 10 to 1 step -1",
+      "body": true,
+      "notes": "含两端；左侧起点可以是表达式"
+    },
+    {
+      "ast": "for_in",
+      "category": "control",
+      "syntax": "for x in 列表\nfor ch in \"字符串\"\nfor k in 字典\nfor k, v in 字典",
+      "body": true,
+      "notes": "列表/字符串给元素；字典默认给键，双变量形式给键与值"
+    },
+    {
+      "ast": "main_loop",
+      "category": "control",
+      "syntax": "forever\nmain loop",
+      "body": true
+    },
+    {
+      "ast": "if_block",
+      "category": "control",
+      "syntax": "if (条件)\nif",
+      "body": true,
+      "notes": "省略条件按 true 处理"
+    },
+    {
+      "ast": "elif_block",
+      "category": "control",
+      "syntax": "elif (条件)",
+      "body": true
+    },
+    {
+      "ast": "else",
+      "category": "control",
+      "syntax": "else",
+      "body": true
+    },
+    {
+      "ast": "if_elif_else",
+      "category": "control",
+      "syntax": "} elif (条件) {\n} else {",
+      "body": true,
+      "notes": "分支行与上一个 } 同行书写时合并为同一条 if 语句"
+    },
+    {
+      "ast": "while_block",
+      "category": "control",
+      "syntax": "while (条件)",
+      "body": true
+    },
+    {
+      "ast": "break",
+      "category": "control",
+      "syntax": "break\nout",
+      "body": false,
+      "notes": "跳出当前循环"
+    },
+    {
+      "ast": "continue",
+      "category": "control",
+      "syntax": "balo\ncontinue",
+      "body": false
+    },
+    {
+      "ast": "wait_to",
+      "category": "control",
+      "syntax": "wait until(条件)",
+      "body": true,
+      "notes": "条件为假时重复执行块，成立后继续"
+    },
+    {
+      "ast": "if_out",
+      "category": "control",
+      "syntax": "if out(条件)",
+      "body": false
+    },
+    {
+      "ast": "wait",
+      "category": "control",
+      "syntax": "wait 0.5\nwait(表达式)",
+      "body": false
+    },
+    {
+      "ast": "stop",
+      "category": "control",
+      "syntax": "stop all\nstop now\nstop script",
+      "body": false
+    },
+    {
+      "ast": "return",
+      "category": "function",
+      "syntax": "return 表达式\nreturn",
+      "body": false
+    },
+    {
+      "ast": "var_decl",
+      "category": "variable",
+      "syntax": "int name = 表达式\nstr name = \"文本\"\nPerson p = new Person(…)\nlist xs = [1, 2]\nlist name",
+      "body": false,
+      "notes": "0.2 起初始化值走完整表达式求值（0.1.0 只接受字面量）。类型名只作标注，不做强制校验"
+    },
+    {
+      "ast": "var_assign",
+      "category": "variable",
+      "syntax": "name = 表达式\np.field = 值\nxs[0] = 值\nd[\"键\"] = 值",
+      "body": false,
+      "notes": "支持变量、成员、下标三种赋值目标"
+    },
+    {
+      "ast": "var_compound",
+      "category": "variable",
+      "syntax": "name += / -= / *= /= /= %= **= 表达式",
+      "body": false
+    },
+    {
+      "ast": "var_inc",
+      "category": "variable",
+      "syntax": "name++",
+      "body": false
+    },
+    {
+      "ast": "var_dec",
+      "category": "variable",
+      "syntax": "name--",
+      "body": false
+    },
+    {
+      "ast": "func_def",
+      "category": "function",
+      "syntax": "function name(a, b = 默认值)\nfunction bool name()\nfn name()\nf name()",
+      "body": true,
+      "notes": "0.2 起支持多参数、默认值、递归与返回值；函数在顶层先注册，允许先用后定义"
+    },
+    {
+      "ast": "func_call",
+      "category": "function",
+      "syntax": "name()\nname(a, b)\nx = name(a) + 1\nprint(name(a))",
+      "body": false,
+      "notes": "0.2 起带参调用可用，且可出现在任意表达式位置"
+    },
+    {
+      "ast": "class_def",
+      "category": "class",
+      "syntax": "class 名称\nclass 名称 extends 父类",
+      "body": true,
+      "notes": "类体内写字段与方法；init 为构造方法，super(…) 调父类 init"
+    },
+    {
+      "ast": "field_decl",
+      "category": "class",
+      "syntax": "str name\nint hp = 100\nhp = 100",
+      "body": false
+    },
+    {
+      "ast": "method_def",
+      "category": "class",
+      "syntax": "function 方法名(参数)",
+      "body": true
+    },
+    {
+      "ast": "new",
+      "category": "class",
+      "syntax": "new 类名(参数)",
+      "body": false
+    },
+    {
+      "ast": "self",
+      "category": "class",
+      "syntax": "self / self.字段 / 裸名字段",
+      "body": false,
+      "notes": "方法内字段可裸名读写，也可以用 self 显式指定"
+    },
+    {
+      "ast": "member_access",
+      "category": "class",
+      "syntax": "obj.字段\nobj.方法(…)",
+      "body": false
+    },
+    {
+      "ast": "member_assign",
+      "category": "class",
+      "syntax": "obj.字段 = 值\nobj.字段 += 值",
+      "body": false
+    },
+    {
+      "ast": "print",
+      "category": "io",
+      "syntax": "print(\"文本\")\nprint(值, 值, …)",
+      "body": false
+    },
+    {
+      "ast": "ask",
+      "category": "io",
+      "syntax": "ask \"问题\"",
+      "body": false
+    },
+    {
+      "ast": "ans",
+      "category": "io",
+      "syntax": "ans",
+      "body": false,
+      "notes": "把上一次 ask 的回答写入 __last_ans"
+    },
+    {
+      "ast": "time_read",
+      "category": "runtime",
+      "syntax": "time read",
+      "body": false,
+      "notes": "结果写入 __last_time"
+    },
+    {
+      "ast": "time_res",
+      "category": "runtime",
+      "syntax": "time reset",
+      "body": false
+    },
+    {
+      "ast": "import_file",
+      "category": "module",
+      "syntax": "import \"file.ext\"",
+      "body": false
+    },
+    {
+      "ast": "import_folder",
+      "category": "module",
+      "syntax": "import \"folder\"",
+      "body": false
+    },
+    {
+      "ast": "list_new",
+      "category": "list",
+      "syntax": "list name\nlist name = [1, 2]",
+      "body": false
+    },
+    {
+      "ast": "list_add",
+      "category": "list",
+      "syntax": "add 值 to name",
+      "body": false,
+      "notes": "值可以是表达式"
+    },
+    {
+      "ast": "list_del",
+      "category": "list",
+      "syntax": "del name 下标",
+      "body": false
+    },
+    {
+      "ast": "list_insert",
+      "category": "list",
+      "syntax": "insert 值 to name at 下标",
+      "body": false
+    },
+    {
+      "ast": "list_rep",
+      "category": "list",
+      "syntax": "replace name 下标 with 值",
+      "body": false
+    },
+    {
+      "ast": "list_read",
+      "category": "list",
+      "syntax": "read name 下标",
+      "body": false,
+      "notes": "结果写入 __last_read"
+    },
+    {
+      "ast": "list_len",
+      "category": "list",
+      "syntax": "len name",
+      "body": false,
+      "notes": "结果写入 __last_len"
+    },
+    {
+      "ast": "list_in",
+      "category": "list",
+      "syntax": "listin(值, name)",
+      "body": false,
+      "notes": "结果写入 __last_cmp"
+    },
+    {
+      "ast": "dict_new",
+      "category": "dict",
+      "syntax": "dict name\ndict name = {\"键\": 值}",
+      "body": false
+    },
+    {
+      "ast": "dict_set",
+      "category": "dict",
+      "syntax": "dict name key 键 = 值",
+      "body": false
+    },
+    {
+      "ast": "dict_read",
+      "category": "dict",
+      "syntax": "dict name read 键",
+      "body": false,
+      "notes": "结果写入 __last_read"
+    },
+    {
+      "ast": "dict_del",
+      "category": "dict",
+      "syntax": "dict name del 键",
+      "body": false
+    },
+    {
+      "ast": "dict_allkey",
+      "category": "dict",
+      "syntax": "dictallkey(name)",
+      "body": false,
+      "notes": "结果写入 __last_read"
+    },
+    {
+      "ast": "dict_allval",
+      "category": "dict",
+      "syntax": "dictallval(name)",
+      "body": false,
+      "notes": "结果写入 __last_read"
+    },
+    {
+      "ast": "dict_in",
+      "category": "dict",
+      "syntax": "dictin(name, 键)",
+      "body": false,
+      "notes": "结果写入 __last_cmp"
+    },
+    {
+      "ast": "math_add",
+      "category": "math",
+      "syntax": "add(a, b)",
+      "result": "__last_calc",
+      "body": false
+    },
+    {
+      "ast": "math_sub",
+      "category": "math",
+      "syntax": "sub(a, b)",
+      "result": "__last_calc",
+      "body": false
+    },
+    {
+      "ast": "math_mul",
+      "category": "math",
+      "syntax": "mul(a, b)",
+      "result": "__last_calc",
+      "body": false
+    },
+    {
+      "ast": "math_div",
+      "category": "math",
+      "syntax": "div(a, b)",
+      "result": "__last_calc",
+      "body": false
+    },
+    {
+      "ast": "math_mod",
+      "category": "math",
+      "syntax": "mod(a, b)",
+      "result": "__last_calc",
+      "body": false
+    },
+    {
+      "ast": "math_pow",
+      "category": "math",
+      "syntax": "pow(a, b)",
+      "result": "__last_calc",
+      "body": false
+    },
+    {
+      "ast": "math_rand",
+      "category": "math",
+      "syntax": "rand(a, b)",
+      "result": "__last_calc",
+      "body": false
+    },
+    {
+      "ast": "math_sqrt",
+      "category": "math",
+      "syntax": "sqrt(a)",
+      "result": "__last_calc",
+      "body": false
+    },
+    {
+      "ast": "math_abs",
+      "category": "math",
+      "syntax": "abs(a)",
+      "result": "__last_calc",
+      "body": false
+    },
+    {
+      "ast": "math_floor",
+      "category": "math",
+      "syntax": "floor(a)",
+      "result": "__last_calc",
+      "body": false
+    },
+    {
+      "ast": "math_ceil",
+      "category": "math",
+      "syntax": "ceil(a)",
+      "result": "__last_calc",
+      "body": false
+    },
+    {
+      "ast": "math_round",
+      "category": "math",
+      "syntax": "round(a)",
+      "result": "__last_calc",
+      "body": false
+    },
+    {
+      "ast": "cmp_lt",
+      "category": "compare",
+      "syntax": "lt(a, b)",
+      "result": "__last_cmp",
+      "body": false
+    },
+    {
+      "ast": "cmp_eq",
+      "category": "compare",
+      "syntax": "eq(a, b)",
+      "result": "__last_cmp",
+      "body": false
+    },
+    {
+      "ast": "cmp_gt",
+      "category": "compare",
+      "syntax": "gt(a, b)",
+      "result": "__last_cmp",
+      "body": false
+    },
+    {
+      "ast": "logic_and",
+      "category": "logic",
+      "syntax": "and(a, b)",
+      "result": "__last_cmp",
+      "body": false
+    },
+    {
+      "ast": "logic_or",
+      "category": "logic",
+      "syntax": "or(a, b)",
+      "result": "__last_cmp",
+      "body": false
+    },
+    {
+      "ast": "logic_not",
+      "category": "logic",
+      "syntax": "not(a)",
+      "result": "__last_cmp",
+      "body": false
+    },
+    {
+      "ast": "str_join",
+      "category": "string",
+      "syntax": "join(a, b, …)",
+      "result": "__last_str",
+      "body": false
+    },
+    {
+      "ast": "str_char",
+      "category": "string",
+      "syntax": "char(s, i)",
+      "result": "__last_str",
+      "body": false
+    },
+    {
+      "ast": "str_len",
+      "category": "string",
+      "syntax": "strlen(s)",
+      "result": "__last_str",
+      "body": false
+    },
+    {
+      "ast": "str_contain",
+      "category": "string",
+      "syntax": "contain(s, sub)",
+      "result": "__last_cmp",
+      "body": false
+    },
+    {
+      "ast": "comment",
+      "category": "trivia",
+      "syntax": "// 文本",
+      "body": false
+    },
+    {
+      "ast": "group_start",
+      "category": "trivia",
+      "syntax": "// ─ 组名 ─",
+      "body": false,
+      "notes": "供大纲折叠，不参与执行"
+    },
+    {
+      "ast": "line_skip",
+      "category": "trivia",
+      "syntax": "-- 任意文本",
+      "body": false,
+      "notes": "整行跳过，不生成 AST 节点"
+    },
+    {
+      "ast": "unknown",
+      "category": "diagnostic",
+      "syntax": "任意未识别文本",
+      "body": false,
+      "notes": "生成 unknown 节点并给出近似指令提示，编辑器打红波浪线"
+    },
+    {
+      "ast": "try",
+      "category": "control",
+      "syntax": "try\ncatch e\nfinally",
+      "body": true,
+      "notes": "catch 变量是字典：e.message / e.line / e.file；finally 无论成功失败都会执行"
+    },
+    {
+      "ast": "throw",
+      "category": "control",
+      "syntax": "throw 值",
+      "body": false,
+      "notes": "抛字符串或 {message: …} 字典；未捕获的错误打印后终止脚本"
+    },
+    {
+      "ast": "destructure",
+      "category": "variable",
+      "syntax": "a, b = f()\nint a, int b = f()",
+      "body": false,
+      "notes": "多返回值用列表承载，右边元素少于左边会报错"
+    },
+    {
+      "ast": "multi_return",
+      "category": "function",
+      "syntax": "return a, b",
+      "body": false,
+      "notes": "等价于 return [a, b]"
+    }
+  ],
+  "expressions": {
+    "evaluator": "src/lang/parse.ts（手写 Pratt 解析器）+ src/lang/interp.ts（求值）",
+    "usedBy": "赋值右值 / 变量声明 / print / wait / if & while 条件 / for 参数 / 函数与方法的调用与返回",
+    "literals": [
+      "整数",
+      "小数",
+      "科学计数法",
+      "十六进制 0x1F",
+      "单双引号字符串（支持 \\n \\t 等转义）",
+      "true / false",
+      "null / nil / none",
+      "列表 [1, 2]",
+      "字典 {\"k\": 1}"
+    ],
+    "operators": [
+      {
+        "operators": [
+          "||"
+        ],
+        "precedence": 10,
+        "assoc": "left"
+      },
+      {
+        "operators": [
+          "&&"
+        ],
+        "precedence": 15,
+        "assoc": "left"
+      },
+      {
+        "operators": [
+          "|"
+        ],
+        "precedence": 20,
+        "assoc": "left"
+      },
+      {
+        "operators": [
+          "^"
+        ],
+        "precedence": 25,
+        "assoc": "left"
+      },
+      {
+        "operators": [
+          "&"
+        ],
+        "precedence": 30,
+        "assoc": "left"
+      },
+      {
+        "operators": [
+          "==",
+          "!=",
+          "===",
+          "!=="
+        ],
+        "precedence": 35,
+        "assoc": "left"
+      },
+      {
+        "operators": [
+          "<",
+          ">",
+          "<=",
+          ">="
+        ],
+        "precedence": 40,
+        "assoc": "left"
+      },
+      {
+        "operators": [
+          "<<",
+          ">>"
+        ],
+        "precedence": 45,
+        "assoc": "left"
+      },
+      {
+        "operators": [
+          "+",
+          "-"
+        ],
+        "precedence": 50,
+        "assoc": "left"
+      },
+      {
+        "operators": [
+          "*",
+          "/",
+          "%"
+        ],
+        "precedence": 60,
+        "assoc": "left"
+      },
+      {
+        "operators": [
+          "**"
+        ],
+        "precedence": 70,
+        "assoc": "right"
+      }
+    ],
+    "unary": [
+      "-",
+      "+",
+      "!",
+      "~"
+    ],
+    "postfix": [
+      "下标 xs[i]",
+      "成员 obj.field",
+      "调用 f(…) / obj.method(…)",
+      "方法链 s.trim().upper()"
+    ],
+    "callable": [
+      "数学：add sub mul div mod pow rand random sqrt abs floor ceil round sin cos tan asin acos atan atan2 log exp min max",
+      "比较：lt gt eq listin dictin contain",
+      "逻辑：and or not",
+      "字符串：join char strlen upper lower trim split indexof substr",
+      "集合：len range dictallkey dictallval",
+      "转换：int float str bool",
+      "类型：type"
+    ],
+    "methods": {
+      "string": [
+        "upper",
+        "lower",
+        "trim",
+        "split",
+        "replace",
+        "find",
+        "contains",
+        "starts_with",
+        "ends_with",
+        "substr",
+        "repeat",
+        "chars",
+        "to_int",
+        "to_float",
+        "len"
+      ],
+      "list": [
+        "push",
+        "pop",
+        "insert",
+        "remove",
+        "index_of",
+        "contains",
+        "join",
+        "sort",
+        "reverse",
+        "slice",
+        "sum",
+        "clear",
+        "len"
+      ],
+      "dict": [
+        "keys",
+        "values",
+        "items",
+        "has",
+        "remove",
+        "get",
+        "set",
+        "len"
+      ]
+    }
+  },
+  "runtimeNotes": [
+    "独立成行书写的内建调用（如 add(a, b)）仍把结果写入对应 __last_* 变量；写在表达式里只作普通取值",
+    "函数级作用域：函数内声明的变量是局部变量，读取时向全局回溯；赋值优先改已有变量，没有则建在当前作用域",
+    "类的方法里可以直接用字段名，也可写 self.字段；方法之间可以用裸名互调",
+    "子类覆盖 init 时用 super(…) 调父类 init；不写 init 则沿用父类",
+    "for 的循环变量在每轮重新绑定，循环体内可以正常引用",
+    "死循环保护：单次运行 200 万步，单个循环 100 万次迭代，超限报错而不是卡死"
+  ],
+  "compatibility": [
+    "0.1.0 的所有写法仍然有效：变量声明、指令行、__last_*、out / balo、if/elif/else、import",
+    "0.2 起 var_decl 允许表达式；带参函数调用已打通；类与对象是新增能力，原版 CW Script 中没有"
+  ],
+  "extensions": {
+    "stage": "stage.json"
+  }
+}

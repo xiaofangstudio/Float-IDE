@@ -1,0 +1,36 @@
+{
+  "name": "float-ide",
+  "version": "0.10.0",
+  "description": "Float Script 专用 IDE：代码世界（CW Script 系）语言的写作与调试",
+  "author": "小方工作室",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "tauri": "tauri",
+    "test:all": "npm run test:lang && npm run test:index && npm run test:stress",
+    "test:lang": "esbuild tests/lang.test.ts --bundle --platform=node --format=esm --external:@tauri-apps/* --outfile=tests/.build.mjs --log-level=warning && node tests/.build.mjs",
+    "test:index": "esbuild tests/index.test.ts --bundle --platform=node --format=esm --external:@tauri-apps/* --outfile=tests/.idx.mjs --log-level=warning && node tests/.idx.mjs",
+    "test:stress": "esbuild tests/stress.ts --bundle --platform=node --format=esm --external:@tauri-apps/* --outfile=tests/.stress.mjs --log-level=warning && node tests/.stress.mjs",
+    "bench:lang": "esbuild tests/bench.ts --bundle --platform=node --format=esm --external:@tauri-apps/* --outfile=tests/.bench.mjs --log-level=warning && node tests/.bench.mjs"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "monaco-editor": "^0.52.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.3",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10"
+  }
+}

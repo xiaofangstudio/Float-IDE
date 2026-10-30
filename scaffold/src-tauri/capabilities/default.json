@@ -1,0 +1,17 @@
+{
+  "identifier": "default",
+  "description": "Float IDE 主窗口权限：自绘标题栏需要窗口控制，缩放热区需要 start-resize-dragging",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-minimize",
+    "core:window:allow-maximize",
+    "core:window:allow-unmaximize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-is-maximized",
+    "core:window:allow-close",
+    "core:window:allow-start-resize-dragging",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-focus"
+  ]
+}
