@@ -17,6 +17,9 @@ export type ConsoleLine = { kind: 'out' | 'err' | 'info'; text: string; ts: numb
 
 export type VarRow = { name: string; type: string; value: string };
 
+/** 「报告」面板的一条：脚本里 `报告 xxx` 写过来的 */
+export type ReportRow = { text: string; line: number; ts: number };
+
 /** 问题面板 / 状态栏用的诊断条目 */
 export type ProblemItem = {
   severity: 'error' | 'warning' | 'info';

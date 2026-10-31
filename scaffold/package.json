@@ -1,6 +1,6 @@
 {
   "name": "float-ide",
-  "version": "0.12.0",
+  "version": "0.15.0",
   "description": "CW Script 专用 IDE：写脚本、调试、跑起来",
   "author": "小方工作室",
   "license": "MIT",

@@ -14,7 +14,7 @@
 import type { Expr, Param, Program, Stmt, Target, TypeName } from './ast';
 import { builtinList, getBuiltin } from './builtins';
 import {
-  cloneVal, deepEq, dict, fmtVal, isDict, isInstance, isList, toNum, toStr, truthy,
+  cloneVal, deepEq, dict, fmtVal, isDict, isInstance, isList, toNum, toStr, truthy, typeName,
   type Val
 } from './values';
 import { callBuiltinMethod, MethodError } from './methods';
@@ -72,6 +72,8 @@ export class CompiledRuntime {
   steps = 0;
   t0 = typeof performance !== 'undefined' ? performance.now() : 0;
   out: (line: string) => void = () => {};
+  /** 报告通道：进右侧「报告」面板，不进控制台 */
+  rep: (line: string, sourceLine: number) => void = () => {};
   private stack: string[] = [];
 
   /** 编译通道也要拦无限递归：否则用户只会看到一句「Maximum call stack size exceeded」，
@@ -108,6 +110,16 @@ export class CompiledRuntime {
 
   print(parts: Val[]): void {
     this.out(parts.map((p) => toStr(p)).join(' '));
+  }
+
+  /** 报告：不带参数时报告当前所有变量（"现在都有什么"） */
+  report(parts: Val[]): void {
+    if (parts.length === 0) {
+      const rows = Object.entries(this.v).map(([k, v]) => `  ${k} = ${toStr(v)}（${typeName(v)}）`);
+      this.rep(rows.length ? `当前变量：\n${rows.join('\n')}` : '当前变量：（还没有）', this.ln);
+      return;
+    }
+    this.rep(parts.map((p) => toStr(p)).join(' '), this.ln);
   }
 
   timeRead(): number { return (performance.now() - this.t0) / 1000; }
@@ -302,6 +314,15 @@ export const O = {
   },
 
   get(obj: Val, idx: Val): Val {
+    if (isPtr(obj)) {
+      if (obj.freed) throw new RuntimeError('这块内存已经 free 了，不能再读', 0);
+      const n = toNum(idx);
+      if (n === null) throw new RuntimeError(`指针下标必须是数字，得到 ${fmtVal(idx)}`, 0);
+      const i = Math.trunc(n);
+      const real = i < 0 ? obj.buf.length + i : i;
+      if (real < 0 || real >= obj.buf.length) throw new RuntimeError(`下标 ${i} 超出范围（长度 ${obj.buf.length}）`, 0);
+      return obj.buf[real];
+    }
     if (Array.isArray(obj)) {
       const n = toNum(idx);
       if (n === null) throw new RuntimeError(`列表下标必须是数字，得到 ${fmtVal(idx)}`, 0);
@@ -731,6 +752,10 @@ ${body}
 
       case 'print':
         return `${ln}$.print([${s.args.map((a) => genExpr(a, ctx)).join(', ')}]);\n`;
+
+      case 'report':
+        // 报告走同一个运行时，只是换个回调：进右侧「报告」面板
+        return `${ln}$.report([${s.args.map((a) => genExpr(a, ctx)).join(', ')}]);\n`;
 
       case 'ask': {
         const q = genExpr(s.question, ctx);

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../core/tauri';
 import { Runner, type CtlState, type OutLine } from '../lang/interp';
-import type { ConsoleLine, ProblemItem, ProjectMeta, VarRow } from '../core/types';
+import type { ConsoleLine, ProblemItem, ProjectMeta, VarRow, ReportRow } from '../core/types';
 import { analyze } from '../lang/analyze';
 import { setPluginContributions } from '../lang/floatlang';
 import { EditorPane, type EditorHandle, type DocTab } from '../ide/EditorPane';
@@ -58,9 +58,11 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
   const [execMode, setExecMode] = useState<'编译执行' | '解释执行'>('编译执行');
   const [activeName, setActiveName] = useState('');
   const [activePath, setActivePath] = useState<string | null>(null);
-  const [tabRequest, setTabRequest] = useState<{ tab: 'outline' | 'vars' | 'problems'; seq: number }>({ tab: 'outline', seq: 0 });
+  const [tabRequest, setTabRequest] = useState<{ tab: 'outline' | 'vars' | 'problems' | 'report'; seq: number }>({ tab: 'outline', seq: 0 });
   const [cursor, setCursor] = useState<{ line: number; col: number }>({ line: 1, col: 1 });
   const [problems, setProblems] = useState<ProblemItem[]>([]);
+  /** 报告面板：脚本里 `报告 xxx` 写出来的内容 */
+  const [reports, setReports] = useState<ReportRow[]>([]);
   const [runProblems, setRunProblems] = useState<ProblemItem[]>([]);
   /* 可拖动布局（记住上次的位置） */
   const [layout, setLayout] = useState(() => {
@@ -117,6 +119,14 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
     return out.sort((a, b) => (a.severity === b.severity ? a.line - b.line : a.severity === 'error' ? -1 : 1));
   }, [problems, runProblems]);
   const errorCount = allProblems.filter((p) => p.severity === 'error').length;
+  /* 一出现新的错误就把「问题」面板顶到前面：别让人自己去找哪儿错了 */
+  const lastErrRef = useRef(0);
+  useEffect(() => {
+    if (errorCount > lastErrRef.current) {
+      setTabRequest((t) => ({ tab: 'problems', seq: t.seq + 1 }));
+    }
+    lastErrRef.current = errorCount;
+  }, [errorCount]);
   const warnCount = allProblems.filter((p) => p.severity === 'warning').length;
 
   const runnerRef = useRef<Runner | null>(null);
@@ -310,9 +320,16 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
       }
       setLines([]);
       setRunProblems([]);
+      setReports([]);
       setExecMode(mode === 'debug' ? '解释执行' : '编译执行');
       const runner = new Runner(normEntry, {
         output: (l) => { if (alive()) pushLine(l); },
+        report: (text, line) => {
+          if (!alive()) return;
+          setReports((rs) => [...rs.slice(-200), { text, line, ts: Date.now() }]);
+          // 有报告就把它顶到前面，跟问题面板一个待遇
+          setTabRequest((t) => ({ tab: 'report', seq: t.seq + 1 }));
+        },
         onError: (info) => { if (!alive()) return; setRunProblems((prev2) => [...prev2, {
           severity: 'error', message: info.message, file: info.file, line: info.line, col: 1, from: 'run'
         }]); },
@@ -954,7 +971,9 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
           width={layout.rightW}
           tabRequest={tabRequest}
           problems={allProblems}
-          onOpenProblem={(p) => bus.current.editor?.revealLine(p.file, p.line)}
+          reports={reports}
+          onClearReports={() => setReports([])}
+          onOpenProblem={(p) => bus.current.editor?.revealLine(p.file, p.line, p.col)}
         />
       </div>
 

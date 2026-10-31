@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { extractOutline } from '../lang/floatlang';
-import type { ProblemItem, VarRow } from '../core/types';
+import type { ProblemItem, ReportRow, VarRow } from '../core/types';
 
 /* 右侧面板：大纲（组标记 / 函数 / 顶层变量）+ 变量查看器（调试快照）。 */
 
@@ -12,14 +12,32 @@ type Props = {
   running: boolean;
   width?: number;
   /** 外部请求切换标签（Alt+3 / 菜单 / 状态栏） */
-  tabRequest?: { tab: 'outline' | 'vars' | 'problems'; seq: number };
+  tabRequest?: { tab: 'outline' | 'vars' | 'problems' | 'report'; seq: number };
   /** 问题面板数据 */
   problems?: ProblemItem[];
+  /** 报告面板：脚本里 `报告 xxx` 写给这里 */
+  reports?: ReportRow[];
+  onClearReports?: () => void;
   onOpenProblem?: (p: ProblemItem) => void;
 };
 
-export function SidePanels({ source, file, onReveal, vars, running, width, tabRequest, problems, onOpenProblem }: Props) {
-  const [tab, setTab] = useState<'outline' | 'vars' | 'problems'>('outline');
+/** 问题面板顶部：几错几警，一眼看到"有活要干" */
+function ProblemHeader({ items }: { items: ProblemItem[] }) {
+  const errs = items.filter((i) => i.severity === 'error').length;
+  const warns = items.filter((i) => i.severity === 'warning').length;
+  const infos = items.filter((i) => i.severity === 'info').length;
+  if (items.length === 0) return null;
+  return (
+    <div className="prob-head">
+      {errs > 0 && <span className="prob-count err">{errs} 个错误</span>}
+      {warns > 0 && <span className="prob-count warn">{warns} 个警告</span>}
+      {infos > 0 && <span className="prob-count info">{infos} 条提示</span>}
+    </div>
+  );
+}
+
+export function SidePanels({ source, file, onReveal, vars, running, width, tabRequest, problems, onOpenProblem, reports, onClearReports }: Props) {
+  const [tab, setTab] = useState<'outline' | 'vars' | 'problems' | 'report'>('outline');
   const outline = useMemo(() => extractOutline(source), [source]);
   // 变量分成两组：脚本自己的变量，和语言自带的特殊变量（ans / __last_*）
   const isSpecial = (n: string): boolean => n === 'ans' || n.startsWith('__');
@@ -35,6 +53,9 @@ export function SidePanels({ source, file, onReveal, vars, running, width, tabRe
       <div className="sp-tabs">
         <div className={`sp-tab ${tab === 'outline' ? 'active' : ''}`} onClick={() => setTab('outline')}>大纲</div>
         <div className={`sp-tab ${tab === 'vars' ? 'active' : ''}`} onClick={() => setTab('vars')}>变量</div>
+        <div className={`sp-tab ${tab === 'report' ? 'active' : ''}`} onClick={() => setTab('report')}>
+          报告{(reports?.length ?? 0) > 0 ? ` ${reports?.length}` : ''}
+        </div>
         <div className={`sp-tab ${tab === 'problems' ? 'active' : ''}`} onClick={() => setTab('problems')}>
           问题{(problems?.length ?? 0) > 0 ? ` ${problems?.length}` : ''}
         </div>
@@ -70,14 +91,60 @@ export function SidePanels({ source, file, onReveal, vars, running, width, tabRe
           </>
         ) : tab === 'problems' ? (
           <>
-            {(problems?.length ?? 0) === 0 && <div className="muted">没有发现问题。语法错误、未定义变量、运行时报错都会出现在这里。</div>}
-            {problems?.map((p, i) => (
-              <div key={`${p.file}:${p.line}:${i}`} className={`prob-item ${p.severity}`} onClick={() => onOpenProblem?.(p)}>
-                <span className="prob-dot" />
-                <span className="prob-main">
-                  <b>{p.message}</b>
-                  <i>{p.file.split(/[\\/]/).pop()} · 第 {p.line} 行{p.from === 'run' ? ' · 运行' : ''}</i>
-                </span>
+            <ProblemHeader items={problems ?? []} />
+            {(problems?.length ?? 0) === 0 && (
+              <div className="muted" style={{ lineHeight: 1.7 }}>
+                没有发现问题。语法错误、没定义的变量、运行时报错都会出现在这里，
+                点一条就跳到出错的那一行。
+              </div>
+            )}
+            {problems?.map((p, i) => {
+              const srcTag = p.from === 'run' ? '运行' : p.code?.startsWith('undefined') ? '语义' : '语法';
+              return (
+                <div
+                  key={`${p.file}:${p.line}:${p.col}:${i}`}
+                  className={`prob-item ${p.severity}`}
+                  onClick={() => onOpenProblem?.(p)}
+                  title="点击跳到这一行"
+                >
+                  <span className="prob-dot" />
+                  <span className="prob-main">
+                    {/* 原因 / 什么问题 */}
+                    <b>{p.message}</b>
+                    {/* 第几行、第几列、哪个文件、哪一类 */}
+                    <i>
+                      第 {p.line} 行
+                      {p.col > 0 ? ` 第 ${p.col} 列` : ''}
+                      {' · '}
+                      {p.file.split(/[\\/]/).pop()}
+                      <span className="prob-tag">{srcTag}</span>
+                    </i>
+                  </span>
+                </div>
+              );
+            })}
+          </>
+        ) : tab === 'report' ? (
+          <>
+            <div className="prob-head">
+              {(reports?.length ?? 0) > 0 && (
+                <span className="prob-count info">{reports?.length} 条报告</span>
+              )}
+              {(reports?.length ?? 0) > 0 && (
+                <button className="status-link" onClick={() => onClearReports?.()}>清空</button>
+              )}
+            </div>
+            {(reports?.length ?? 0) === 0 && (
+              <div className="muted" style={{ lineHeight: 1.7 }}>
+                脚本里写 <code className="inline">报告 值1, 值2</code> 就会出现在这里（写法跟 print 一样）。
+                <br />
+                只写一个 <code className="inline">报告</code> 不带内容，会报告当前所有变量。
+              </div>
+            )}
+            {reports?.map((r, i) => (
+              <div className="report-item" key={i} onClick={() => r.line > 0 && onReveal(r.line)} title={r.line > 0 ? `跳到第 ${r.line} 行` : ''}>
+                {r.line > 0 && <span className="report-line">第 {r.line} 行</span>}
+                <pre className="report-text">{r.text}</pre>
               </div>
             ))}
           </>

@@ -44,6 +44,8 @@ export type Yield =
 
 export type Hook = {
   output: (l: OutLine) => void;
+  /** 报告：写进右侧「报告」面板，不进控制台 */
+  report?: (text: string, line: number) => void;
   onPaused: (node: Stmt | null, vars: VarsSnapshot) => void;
   onDone: () => void;
   onState: (s: CtlState) => void;
@@ -361,6 +363,7 @@ export class Runner {
         for (const [k, v] of Object.entries(SPECIAL_DEFAULTS)) rt.v[k] = v;
         rt.file = entry;
         rt.out = (line) => this.hook.output({ kind: 'out', text: line });
+        rt.rep = (line, srcLine) => this.hook.report?.(line, srcLine);
         this.crt = rt;
         this.gen = unit.main(rt) as unknown as SigGen;
         this.hook.output({ kind: 'info', text: '运行开始（编译执行）' });
@@ -624,6 +627,23 @@ export class Runner {
         const parts: string[] = [];
         for (const a of s.args) parts.push(toStr(yield* this.evalExpr(a, env)));
         this.hook.output({ kind: 'out', text: parts.join(' ') });
+        return 'normal';
+      }
+
+      case 'report': {
+        yield { kind: 'stmt', node: s, depth };
+        if (s.args.length === 0) {
+          // 不给参数就报告"现在都有什么"：把当前所有变量列一遍
+          const snap = this.varsSnapshot();
+          const body = snap.length
+            ? snap.map((v) => `  ${v.name} = ${v.value}（${v.type}）`).join('\n')
+            : '  （还没有任何变量）';
+          this.hook.report?.(`当前变量：\n${body}`, s.line ?? 0);
+        } else {
+          const parts: string[] = [];
+          for (const a of s.args) parts.push(toStr(yield* this.evalExpr(a, env)));
+          this.hook.report?.(parts.join(' '), s.line ?? 0);
+        }
         return 'normal';
       }
 
@@ -1174,6 +1194,15 @@ export class Runner {
   }
 
   private indexGet(obj: Val, idx: Val, e: Span | Expr): Val {
+    if (isPtr(obj)) {
+      if (obj.freed) throw new FloatError('这块内存已经 free 了，不能再读', spanOf(e));
+      const n = toNum(idx);
+      if (n === null) throw new FloatError(`指针下标必须是数字，得到 ${fmtVal(idx)}`, spanOf(e));
+      const i = Math.trunc(n);
+      const real = i < 0 ? obj.buf.length + i : i;
+      if (real < 0 || real >= obj.buf.length) throw new FloatError(`下标 ${i} 超出范围（长度 ${obj.buf.length}）`, spanOf(e));
+      return obj.buf[real];
+    }
     if (isList(obj)) {
       const n = toNum(idx);
       if (n === null) throw new FloatError(`列表下标必须是数字，得到 ${fmtVal(idx)}`, spanOf(e));
@@ -1261,6 +1290,16 @@ export class Runner {
     }
     const obj = yield* this.evalExpr(t.obj, env);
     const idx = yield* this.evalExpr(t.index, env);
+    if (isPtr(obj)) {
+      if (obj.freed) throw new FloatError('这块内存已经 free 了，不能再写', s);
+      const n = toNum(idx);
+      if (n === null) throw new FloatError('指针下标必须是数字', s);
+      const i = Math.trunc(n);
+      const real = i < 0 ? obj.buf.length + i : i;
+      if (real < 0 || real >= obj.buf.length) throw new FloatError(`下标 ${i} 超出范围（长度 ${obj.buf.length}）`, s);
+      obj.buf[real] = cloneVal(next);
+      return 'normal';
+    }
     if (isList(obj)) {
       const n = toNum(idx);
       if (n === null) throw new FloatError('列表下标必须是数字', s);

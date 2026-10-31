@@ -7,6 +7,8 @@ import { Runner, type OutLine, type VarsSnapshot } from '../src/lang/interp';
 
 export type RunResult = {
   out: string[];
+  /** `报告 xxx` 的内容 */
+  rep: string[];
   err: string[];
   info: string[];
   vars: VarsSnapshot;
@@ -24,6 +26,7 @@ export async function run(src: string, opts: Opts = {}): Promise<RunResult> {
   };
 
   const out: string[] = [];
+  const rep: string[] = [];
   const err: string[] = [];
   const info: string[] = [];
   const answers = [...(opts.answers ?? [])];
@@ -40,6 +43,7 @@ export async function run(src: string, opts: Opts = {}): Promise<RunResult> {
 
   runner = new Runner(file, {
     output: record,
+    report: (text) => rep.push(text),
     onState: () => {},
     onPaused: () => {
       setTimeout(() => {
@@ -59,7 +63,11 @@ export async function run(src: string, opts: Opts = {}): Promise<RunResult> {
   await Promise.race([done, timeout]);
 
   const r = runner as Runner;
-  return { out, err, info, vars: r.varsSnapshot(), state: r.state };
+  return {
+    out,
+    rep,
+    err,
+    info, vars: r.varsSnapshot(), state: r.state };
 }
 
 /** 调试模式测试：记录每次暂停的行号，按 actions 逐步推进 */
@@ -76,6 +84,7 @@ export async function debugTrace(
 
   const lines: number[] = [];
   const out: string[] = [];
+  const rep: string[] = [];
   const err: string[] = [];
   let acts = [...actions];
   let runner: Runner | null = null;

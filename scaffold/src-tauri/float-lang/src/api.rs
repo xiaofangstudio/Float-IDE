@@ -5,7 +5,18 @@
 use crate::bytecode;
 use crate::error::{FloatError, FResult};
 use crate::parser;
+use crate::sema;
 use crate::vm::{RunOutcome, Vm};
+
+/// 只做静态检查（不运行）：给 IDE 的「问题」面板用。
+pub fn analyze_source(src: &str) -> Vec<sema::Diag> {
+    let prog = parser::parse_program("main.cw", src);
+    if !prog.errors.is_empty() {
+        // 语法都没过就别做语义分析了，免得报一堆假的
+        return Vec::new();
+    }
+    sema::analyze(&prog)
+}
 
 /// 编译并运行一段 CW Script 源码。
 ///

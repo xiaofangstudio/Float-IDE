@@ -22,7 +22,19 @@ async function t(name: string, src: string, expect: string[], opts: { answers?: 
   if (r.err.length) eq(`${name}（不该报错）`, r.err, []);
 }
 
+async function rep_(name: string, src: string, expect: string[]): Promise<void> {
+  const r = await run(src, {});
+  eq(name, r.rep, expect);
+}
+
 async function main(): Promise<void> {
+  /* ── 报告通道 ── */
+  await t('报告不进控制台', `报告 "只是报告"\nprint("这句才进控制台")\n`, ['这句才进控制台']);
+  await rep_('报告写进报告面板', `报告 "甲", 1\n报告 "乙"\n`, ['甲 1', '乙']);
+  await rep_('报告不带参数会列当前变量', `int 金币 = 5\n报告\n`, [
+    '当前变量：\n  金币 = 5（int）'
+  ]);
+
   /* ── 表达式 ── */
   await t('表达式优先级', `
 int a = 2

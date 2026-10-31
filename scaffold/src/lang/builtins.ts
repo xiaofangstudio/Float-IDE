@@ -6,7 +6,7 @@
  *    —— 靠 writes 字段决定写哪个特殊变量。
  */
 
-import { dict, fmtVal, isDict, isInstance, isList, toNum, toStr, truthy, type Val } from './values';
+import { dict, fmtVal, isDict, isInstance, isList, toNum, toStr, truthy, type Val, isPtr, allocPtr, typeName } from './values';
 
 export type BuiltinSpec = {
   name: string;
@@ -120,7 +120,22 @@ const REGISTRY: BuiltinSpec[] = [
     if (typeof v === 'string') return v.length;
     if (isDict(v)) return v.map.size;
     if (isInstance(v)) return v.fields.size;
+    if (isPtr(v)) return v.buf.length;
     return toStr(v).length;
+  } }),
+  spec({ name: 'alloc', sig: 'alloc(格子数)', category: '内存', doc: '手动申请一段内存，返回指针；用完必须 free（严格模式）', min: 1, max: 1, fn: (a) => {
+    const n = Math.trunc(num(a[0], 'alloc'));
+    if (n < 0) bad(`alloc 要一个不小于 0 的格子数，实际是 ${n}`);
+    if (n > 10_000_000) bad(`alloc 一次要了 ${n} 格，太多了（上限 1000 万格）`);
+    return allocPtr(n);
+  } }),
+  spec({ name: 'free', sig: 'free(指针)', category: '内存', doc: '归还手动申请的内存；归还后再访问会报错', min: 1, max: 1, fn: (a) => {
+    const p = a[0];
+    if (!isPtr(p)) throw new Error(`free 要一个指针，实际是 ${typeName(p)}`);
+    if (p.freed) throw new Error('这块内存已经 free 过了，不用再 free 一次');
+    p.freed = true;
+    p.buf.length = 0;
+    return null;
   } }),
   spec({ name: 'range', sig: 'range(n) / range(a, b) / range(a, b, step)', category: '通用', doc: '生成数字列表，常用在 for 里', min: 1, max: 3, fn: (a) => {
     let from = 0;

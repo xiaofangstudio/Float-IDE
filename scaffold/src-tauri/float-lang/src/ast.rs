@@ -192,6 +192,8 @@ pub enum StmtKind {
     },
     ExprStmt(Expr),
     Print(Vec<Expr>),
+    /// 报告：写法跟 print 一样，但走「报告」通道（IDE 右侧面板），不进控制台
+    Report(Vec<Expr>),
     /// ask "问题" —— 把回答写进 ans / __last_ans
     Ask(Option<Expr>),
     If {

@@ -4,13 +4,9 @@
 
 int courage = 0
 int clues = 0
-str name = "你"
 
 fn line(who, text)
     print(join(who, "：", text))
-
-fn pause_hint()
-    print("")
 
 print("========================================")
 print("  末班地铁")

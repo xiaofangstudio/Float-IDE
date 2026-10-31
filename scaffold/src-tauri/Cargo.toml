@@ -1,6 +1,6 @@
 [package]
 name = "floatide"
-version = "0.12.0"
+version = "0.15.0"
 description = "Float Script 专用 IDE：代码世界（CW Script 系）语言的写作与调试"
 authors = ["小方工作室"]
 license = "MIT"

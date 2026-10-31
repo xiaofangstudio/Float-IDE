@@ -21,13 +21,16 @@ export type ClassDef = {
 
 export type DictVal = { kind: 'dict'; map: Map<string, Val> };
 
+/** 手动分配的指针：buf 是格子，freed 之后任何访问都报错 */
+export type PtrVal = { kind: 'ptr'; buf: Val[]; freed: boolean };
+
 export type Instance = {
   kind: 'instance';
   cls: ClassDef;
   fields: Map<string, Val>;
 };
 
-export type Val = number | string | boolean | null | Val[] | DictVal | Instance | CInstLike;
+export type Val = number | string | boolean | null | Val[] | DictVal | Instance | CInstLike | PtrVal;
 
 /** 编译通道的实例（结构判定，避免与 codegen.ts 循环依赖） */
 export type CInstLike = {
@@ -46,6 +49,11 @@ export const dict = (entries?: [string, Val][]): DictVal => ({
 
 export const instance = (cls: ClassDef): Instance => ({ kind: 'instance', cls, fields: new Map() });
 
+export const isPtr = (v: Val): v is PtrVal => typeof v === 'object' && v !== null && (v as PtrVal).kind === 'ptr';
+
+/** 申请 n 个格子（初值 null） */
+export const allocPtr = (n: number): PtrVal => ({ kind: 'ptr', buf: new Array(n).fill(null), freed: false });
+
 export const isDict = (v: Val): v is DictVal => typeof v === 'object' && v !== null && (v as DictVal).kind === 'dict';
 export const isInstance = (v: Val): v is Instance => typeof v === 'object' && v !== null && (v as Instance).kind === 'instance';
 export const isList = (v: Val): v is Val[] => Array.isArray(v);
@@ -55,6 +63,7 @@ export function typeName(v: Val): string {
   if (Array.isArray(v)) return 'list';
   if (isDict(v)) return 'dict';
   if (isInstance(v) || isCInstLike(v)) return 'class';
+  if (isPtr(v)) return 'ptr';
   if (typeof v === 'number') return Number.isInteger(v) ? 'int' : 'float';
   if (typeof v === 'boolean') return 'bool';
   return 'str';
@@ -79,6 +88,9 @@ export function fmtVal(v: Val, seen: Set<object> = new Set(), depth = 0): string
   if (typeof v === 'number') {
     if (!Number.isFinite(v)) return String(v);
     return Number.isInteger(v) ? String(v) : String(Number(v.toFixed(10)));
+  }
+  if (isPtr(v)) {
+    return v.freed ? `<ptr ${v.buf.length} 已释放>` : `<ptr ${v.buf.length}>`;
   }
   const isBox = Array.isArray(v) || isDict(v) || isInstance(v) || isCInstLike(v);
   if (isBox) {
@@ -121,6 +133,7 @@ export function truthy(v: Val): boolean {
   if (typeof v === 'string') return v !== '';
   if (Array.isArray(v)) return v.length > 0;
   if (isDict(v)) return v.map.size > 0;
+  if (isPtr(v)) return !v.freed;
   return true;
 }
 

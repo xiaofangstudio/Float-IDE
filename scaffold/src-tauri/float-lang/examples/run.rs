@@ -55,6 +55,14 @@ fn main() {
     match vm.run() {
         Ok(o) => {
             print!("{}", o.output);
+            if !o.reports.is_empty() {
+                println!("\n── 报告 ──");
+                for r in &o.reports {
+                    for line in r.lines() {
+                        println!("{}", line);
+                    }
+                }
+            }
             eprintln!("—— 用时 {:.2} ms", t.elapsed().as_secs_f64() * 1000.0);
         }
         Err(e) => {

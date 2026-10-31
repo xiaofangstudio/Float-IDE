@@ -1,6 +1,6 @@
 # Float IDE
 
-> 小方工作室出品 ｜ Windows 桌面 ｜ MIT ｜ 完全免费 ｜ 当前版本 0.11.0
+> 小方工作室出品 ｜ Windows 桌面 ｜ MIT ｜ 完全免费 ｜ 当前版本 0.15.0
 
 **代码世界脚本工作室：给 CW Script（CW Script）一个正经的 IDE。**
 
@@ -9,6 +9,14 @@
 0.2 把语言内核整个换掉了——不再是"一行一条正则"，而是 **词法 → AST → 解释器** 三层。所以 `for` 的次数能写变量、函数能有参数和返回值、类能继承。
 
 ---
+
+## 0.15 这次改了什么（静态检查 + 双内核对齐）
+
+- 🛡️ **新增语义分析器**：`float-lang/src/sema.rs`——写错在运行前就报，配 `examples/check.rs` 独立检查入口
+- 🦀 **Rust VM 内核继续深化**：bytecode / vm / parser / ast 全套迭代，正确性测试扩充
+- 🔁 **双内核对齐**：TS 解释器（ast / builtins / codegen / interp / parse / values）与 Rust VM 同步演进，跑同一套测试
+- 🎮 **示例第 13 个：指针游戏**（`13_pointer_game.cw`）——配合指针语义的完整小游戏示例
+- 🧰 **IDE 侧打磨**：模板 / 类型 / 编辑器 / 插件面板 / 工作台与样式继续过一遍，测试基建（harness / build 脚本）增强
 
 ## 0.11 这次改了什么（语言内核 Rust 化）
 

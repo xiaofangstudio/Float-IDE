@@ -44,6 +44,10 @@ var init_tauri = __esm({
       projectExportZip: (projectDir, outPath) => invoke("project_export_zip", { projectDir, outPath }),
       projectImportZip: (zipPath, destDir) => invoke("project_import_zip", { zipPath, destDir }),
       pickFolder: (title) => invoke("pick_folder", { title }),
+      /** 选单个文件（.cw 之类）。"打开"以前只能选文件夹，所以根本看不到脚本文件 */
+      pickOpenFile: (title, exts = ["cw"]) => invoke("pick_open_file", { title, exts }),
+      /** 启动参数里带进来的路径（双击 .cw 打开时） */
+      startupPath: () => invoke("startup_path"),
       pickSaveFile: (title, defaultName, ext) => invoke("pick_save_file", { title, defaultName, ext }),
       openPath: (path) => invoke("open_path", { path }),
       pickImage: (title) => invoke("pick_image", { title }),
@@ -88,13 +92,13 @@ __export(templates_exports, {
 function files(entry, name, main2) {
   return { "project.json": projectJson(entry, name), [entry]: main2 };
 }
-var projectJson, TPL_BLANK, TPL_STARTER, TPL_ADVANCED, TPL_CLASS, TEMPLATES;
+var projectJson, TPL_BLANK, TPL_STARTER, TPL_ADVANCED, TPL_CLASS, TPL_POINTER_GAME, TEMPLATES;
 var init_templates = __esm({
   "src/core/templates.ts"() {
     "use strict";
     projectJson = (entry, name) => JSON.stringify({ name, entry, version: "0.2.0", kind: "float" }, null, 2) + "\n";
-    TPL_BLANK = `// main.cw \u2014\u2014 \u4ECE\u8FD9\u91CC\u5F00\u59CB\u5199\u4F60\u7684 Float \u811A\u672C
-print("\u4F60\u597D\uFF0CFloat\uFF01")
+    TPL_BLANK = `// main.cw \u2014\u2014 \u4ECE\u8FD9\u91CC\u5F00\u59CB\u5199\u4F60\u7684 CW Script
+print("\u4F60\u597D\uFF0CCW Script\uFF01")
 `;
     TPL_STARTER = `// \u2500 \u5165\u95E8\u793A\u4F8B\uFF1A\u53D8\u91CF / \u6761\u4EF6 / \u5FAA\u73AF \u2500
 
@@ -217,11 +221,101 @@ list team = [wizard, hero]
 for p in team
     print(join(p.name, " \u8FD8\u6D3B\u7740\u5417\uFF1A", p.alive()))
 `;
+    TPL_POINTER_GAME = `// \u2500 \u6307\u9488\u5C0F\u6E38\u620F\uFF1A\u7FFB\u724C\u6D88\u6D88\u4E50 \u2500
+// \u724C\u684C\u7528 alloc \u7533\u8BF7\uFF1A\u6BCF\u5F20\u724C\u5360\u4E24\u683C\uFF08\u7B2C 0 \u683C\u662F\u724C\u9762\uFF0C\u7B2C 1 \u683C\u662F"\u7FFB\u5F00\u6CA1\u6709"\uFF09\u3002
+// \u624B\u52A8\u5185\u5B58\u662F\u4E25\u683C\u6A21\u5F0F\uFF1A\u7A0B\u5E8F\u7ED3\u675F\u524D\u5FC5\u987B free\uFF0C\u5FD8\u4E86\u8FD8\u5C31\u4F1A\u62A5\u9519\u3002
+
+list \u56FE\u6848 = ["\u82F9\u679C", "\u82F9\u679C", "\u661F\u661F", "\u661F\u661F", "\u6708\u4EAE", "\u6708\u4EAE", "\u4E91\u6735", "\u4E91\u6735"]
+int \u5F20\u6570 = len(\u56FE\u6848)
+
+// \u6D17\u724C
+for i in range(\u5F20\u6570 - 1)
+    int j = rand(i, \u5F20\u6570 - 1)
+    str t = \u56FE\u6848[i]
+    \u56FE\u6848[i] = \u56FE\u6848[j]
+    \u56FE\u6848[j] = t
+
+// \u724C\u684C
+ptr \u724C\u684C = alloc(\u5F20\u6570 * 2)
+for i in range(\u5F20\u6570)
+    \u724C\u684C[i * 2] = \u56FE\u6848[i]
+    \u724C\u684C[i * 2 + 1] = false
+
+fn \u663E\u793A()
+    str line = "  "
+    for i in range(\u5F20\u6570)
+        if (\u724C\u684C[i * 2 + 1])
+            line += join(" ", \u724C\u684C[i * 2], " ")
+        else
+            line += join(" [", i + 1, "] ")
+    print(line)
+
+fn \u8BFB\u724C(prompt)
+    ask prompt
+    str raw = trim(ans)
+    if (raw == "")
+        return 0
+    return int(raw)
+
+int \u8FD8\u5269 = \u5F20\u6570
+int \u8F6E\u6570 = 0
+print("========================================")
+print("  \u7FFB\u724C\u6D88\u6D88\u4E50\uFF1A\u7FFB\u4E24\u5F20\u4E00\u6837\u7684\u5C31\u6D88\u6389")
+print("  \u76F4\u63A5\u56DE\u8F66 = \u4E0D\u73A9\u4E86")
+print("========================================")
+\u62A5\u544A "\u6E38\u620F\u5F00\u59CB\uFF0C\u5171 4 \u5BF9\u724C"
+
+while (\u8FD8\u5269 > 0)
+    \u8F6E\u6570++
+    print("")
+    print(join("\u7B2C ", \u8F6E\u6570, " \u8F6E\uFF0C\u8FD8\u5269 ", \u8FD8\u5269, " \u5F20"))
+    \u663E\u793A()
+
+    int a = \u8BFB\u724C("\u7FFB\u7B2C\u51E0\u5F20\uFF1F")
+    if (a == 0)
+        print("\u4E0B\u6B21\u518D\u73A9\u3002")
+        break
+    int b = \u8BFB\u724C("\u518D\u7FFB\u7B2C\u51E0\u5F20\uFF1F")
+    if (b == 0)
+        print("\u4E0B\u6B21\u518D\u73A9\u3002")
+        break
+
+    if (a < 1 || a > \u5F20\u6570 || b < 1 || b > \u5F20\u6570 || a == b)
+        print("\u8FD9\u4E24\u5F20\u4E0D\u884C\uFF0C\u91CD\u6765\u4E00\u8F6E\u3002")
+        continue
+    if (\u724C\u684C[(a - 1) * 2 + 1] || \u724C\u684C[(b - 1) * 2 + 1])
+        print("\u5DF2\u7ECF\u7FFB\u5F00\u8FC7\u4E86\uFF0C\u91CD\u6765\u4E00\u8F6E\u3002")
+        continue
+
+    \u724C\u684C[(a - 1) * 2 + 1] = true
+    \u724C\u684C[(b - 1) * 2 + 1] = true
+    \u663E\u793A()
+
+    str \u7532 = \u724C\u684C[(a - 1) * 2]
+    str \u4E59 = \u724C\u684C[(b - 1) * 2]
+    if (\u7532 == \u4E59)
+        \u8FD8\u5269 -= 2
+        print(join("  \u4E24\u5F20\u90FD\u662F\u300C", \u7532, "\u300D\uFF0C\u6D88\u6389\uFF01"))
+        \u62A5\u544A join("\u7B2C ", \u8F6E\u6570, " \u8F6E\u6D88\u6389\u4E00\u5BF9\uFF1A", \u7532, "\uFF08\u8FD8\u5269 ", \u8FD8\u5269, " \u5F20\uFF09")
+    else
+        \u724C\u684C[(a - 1) * 2 + 1] = false
+        \u724C\u684C[(b - 1) * 2 + 1] = false
+        print(join("  \u662F\u300C", \u7532, "\u300D\u548C\u300C", \u4E59, "\u300D\uFF0C\u4E0D\u4E00\u6837\uFF0C\u7FFB\u56DE\u53BB\u3002"))
+
+// \u7528\u5B8C\u4E86\u5FC5\u987B\u8FD8
+free(\u724C\u684C)
+if (\u8FD8\u5269 == 0)
+    print(join("\u5168\u90E8\u6D88\u5B8C\uFF0C\u4E00\u5171 ", \u8F6E\u6570, " \u8F6E\u3002"))
+    \u62A5\u544A join("\u901A\u5173\uFF1A", \u8F6E\u6570, " \u8F6E")
+else
+    \u62A5\u544A "\u9000\u51FA\u6E38\u620F"
+`;
     TEMPLATES = [
-      { id: "blank", name: "\u7A7A\u767D\u5DE5\u7A0B", desc: "\u53EA\u542B main.cw \u4E0E project.json\uFF0C\u4E00\u5F20\u767D\u7EB8", files: files("main.cw", "Float \u5DE5\u7A0B", TPL_BLANK) },
-      { id: "starter", name: "\u5165\u95E8\u793A\u4F8B", desc: "\u53D8\u91CF / \u6761\u4EF6 / \u5FAA\u73AF / \u5217\u8868\uFF0C\u5341\u884C\u770B\u61C2 Float", files: files("main.cw", "Float \u5165\u95E8", TPL_STARTER) },
-      { id: "advanced", name: "\u8FDB\u9636\u793A\u4F8B", desc: "\u51FD\u6570 / \u96C6\u5408 / \u5B57\u5178 / \u8BA1\u65F6\uFF0C\u5199\u6CD5\u901F\u67E5", files: files("main.cw", "Float \u8FDB\u9636", TPL_ADVANCED) },
-      { id: "class", name: "\u7C7B\u4E0E\u5BF9\u8C61", desc: "\u5B57\u6BB5 / \u65B9\u6CD5 / \u7EE7\u627F / super\uFF0C\u9762\u5411\u5BF9\u8C61\u8D77\u6B65", files: files("main.cw", "Float \u7C7B\u793A\u4F8B", TPL_CLASS) }
+      { id: "blank", name: "\u7A7A\u767D\u5DE5\u7A0B", desc: "\u53EA\u542B main.cw \u4E0E project.json\uFF0C\u4E00\u5F20\u767D\u7EB8", files: files("main.cw", "CW \u5DE5\u7A0B", TPL_BLANK) },
+      { id: "starter", name: "\u5165\u95E8\u793A\u4F8B", desc: "\u53D8\u91CF / \u6761\u4EF6 / \u5FAA\u73AF / \u5217\u8868\uFF0C\u5341\u884C\u770B\u61C2 CW Script", files: files("main.cw", "CW \u5165\u95E8", TPL_STARTER) },
+      { id: "advanced", name: "\u8FDB\u9636\u793A\u4F8B", desc: "\u51FD\u6570 / \u96C6\u5408 / \u5B57\u5178 / \u8BA1\u65F6\uFF0C\u5199\u6CD5\u901F\u67E5", files: files("main.cw", "CW \u8FDB\u9636", TPL_ADVANCED) },
+      { id: "class", name: "\u7C7B\u4E0E\u5BF9\u8C61", desc: "\u5B57\u6BB5 / \u65B9\u6CD5 / \u7EE7\u627F / super\uFF0C\u9762\u5411\u5BF9\u8C61\u8D77\u6B65", files: files("main.cw", "CW \u7C7B\u793A\u4F8B", TPL_CLASS) },
+      { id: "pointer", name: "\u6307\u9488\u5C0F\u6E38\u620F", desc: "alloc \u624B\u52A8\u5185\u5B58 + \u62A5\u544A\u9762\u677F\uFF0C\u7FFB\u724C\u6D88\u6D88\u4E50", files: files("main.cw", "\u6307\u9488\u7FFB\u724C", TPL_POINTER_GAME) }
     ];
   }
 });
@@ -585,7 +679,14 @@ var ExprParser = class _ExprParser {
       const close = this.expect("}", "\u5B57\u5178\u7ED3\u675F }");
       return { k: "dict", entries, ...this.span(t2, close) };
     }
-    throw new ParseError(`\u8FD9\u91CC\u5E94\u8BE5\u662F\u4E00\u4E2A\u503C\uFF0C\u5B9E\u9645\u662F${describeTok(t2)}`, t2, "value");
+    if (t2.k === "eof") {
+      throw new ParseError("\u8FD9\u884C\u8FD8\u6CA1\u5199\u5B8C\uFF1A\u5C11\u4E86\u4E00\u4E2A\u503C\uFF0C\u53EF\u80FD\u662F\u62EC\u53F7\u6CA1\u5173\u3001\u6216\u8005\u6F0F\u4E86\u53F3\u534A\u8FB9", t2, "value");
+    }
+    throw new ParseError(
+      `\u8FD9\u91CC\u5E94\u8BE5\u586B\u4E00\u4E2A\u503C\uFF08\u6570\u5B57\u3001\u5B57\u7B26\u4E32\u3001\u53D8\u91CF\u90FD\u884C\uFF09\uFF0C\u73B0\u5728\u662F${describeTok(t2)}`,
+      t2,
+      "value"
+    );
   }
   /** 字符串字面量 → 支持 {变量/表达式} 插值，编译成字符串拼接 */
   stringNode(t2) {
@@ -916,6 +1017,9 @@ function parseProgram(file, src) {
           return parseAsk(ln, toks);
         case "print":
           return parsePrint(ln, toks);
+        case "\u62A5\u544A":
+        case "report":
+          return parseReport(ln, toks);
         case "import":
           return parseImport(ln, toks);
         case "time":
@@ -1199,6 +1303,13 @@ function parseProgram(file, src) {
     const rest = toks.slice(1);
     const question = rest.length ? parserFor(rest[0].v === "(" ? rest.slice(1, rest[rest.length - 1]?.v === ")" ? -1 : void 0) : rest).parseAll() : { k: "str", v: "", ...stmtSpan(ln) };
     return { k: "ask", question, ...stmtSpan(ln) };
+  };
+  const parseReport = (ln, toks) => {
+    i++;
+    const p = parserFor(toks.slice(1));
+    const args = p.at("(") ? p.parseArgs() : p.parseAllList();
+    if (!p.atEnd()) throw new ParseError("\u62A5\u544A \u540E\u9762\u591A\u4E86\u5185\u5BB9", p.cur, "report");
+    return { k: "report", args, ...stmtSpan(ln) };
   };
   const parsePrint = (ln, toks) => {
     i++;
@@ -1910,6 +2021,9 @@ var CompiledRuntime = class {
   t0 = typeof performance !== "undefined" ? performance.now() : 0;
   out = () => {
   };
+  /** 报告通道：进右侧「报告」面板，不进控制台 */
+  rep = () => {
+  };
   stack = [];
   /** 编译通道也要拦无限递归：否则用户只会看到一句「Maximum call stack size exceeded」，
    *  既没有行列号也不知道是哪一层出问题。和解释通道用同一个上限与同一套措辞。 */
@@ -1945,6 +2059,16 @@ var CompiledRuntime = class {
   }
   print(parts) {
     this.out(parts.map((p) => toStr(p)).join(" "));
+  }
+  /** 报告：不带参数时报告当前所有变量（"现在都有什么"） */
+  report(parts) {
+    if (parts.length === 0) {
+      const rows = Object.entries(this.v).map(([k, v]) => `  ${k} = ${toStr(v)}\uFF08${typeName(v)}\uFF09`);
+      this.rep(rows.length ? `\u5F53\u524D\u53D8\u91CF\uFF1A
+${rows.join("\n")}` : "\u5F53\u524D\u53D8\u91CF\uFF1A\uFF08\u8FD8\u6CA1\u6709\uFF09", this.ln);
+      return;
+    }
+    this.rep(parts.map((p) => toStr(p)).join(" "), this.ln);
   }
   timeRead() {
     return (performance.now() - this.t0) / 1e3;
@@ -2332,6 +2456,7 @@ var O = {
 };
 var CompileError = class extends Error {
 };
+var warnedFallback = false;
 var BUILTINS_REF = {};
 for (const b of builtinList()) BUILTINS_REF[b.name] = (...args) => b.fn(args);
 var VALUES_REF = { toStr, dict };
@@ -2408,8 +2533,9 @@ ${body}
     const main2 = factory(BUILTINS_REF, O, VALUES_REF);
     return { main: main2, functions: fnNames.size, src };
   } catch (e) {
-    if (!(e instanceof CompileError)) {
-      console.warn("[Float \u7F16\u8BD1\u5668] \u9000\u56DE\u89E3\u91CA\u6A21\u5F0F\uFF1A" + (e instanceof Error ? e.message : String(e)));
+    if (!(e instanceof CompileError) && !warnedFallback) {
+      warnedFallback = true;
+      console.warn("[Float \u7F16\u8BD1\u5668] \u9000\u56DE\u89E3\u91CA\u6A21\u5F0F\uFF08\u53EA\u63D0\u793A\u4E00\u6B21\uFF09\uFF1A" + (e instanceof Error ? e.message : String(e)));
     }
     return null;
   }
@@ -2575,6 +2701,9 @@ return null;
       }
       case "print":
         return `${ln}$.print([${s.args.map((a) => genExpr(a, ctx)).join(", ")}]);
+`;
+      case "report":
+        return `${ln}$.report([${s.args.map((a) => genExpr(a, ctx)).join(", ")}]);
 `;
       case "ask": {
         const q = genExpr(s.question, ctx);
@@ -3211,6 +3340,7 @@ var Runner = class {
         for (const [k, v] of Object.entries(SPECIAL_DEFAULTS)) rt.v[k] = v;
         rt.file = entry;
         rt.out = (line) => this.hook.output({ kind: "out", text: line });
+        rt.rep = (line, srcLine) => this.hook.report?.(line, srcLine);
         this.crt = rt;
         this.gen = unit.main(rt);
         this.hook.output({ kind: "info", text: "\u8FD0\u884C\u5F00\u59CB\uFF08\u7F16\u8BD1\u6267\u884C\uFF09" });
@@ -3443,6 +3573,20 @@ var Runner = class {
         const parts = [];
         for (const a of s.args) parts.push(toStr(yield* this.evalExpr(a, env)));
         this.hook.output({ kind: "out", text: parts.join(" ") });
+        return "normal";
+      }
+      case "report": {
+        yield { kind: "stmt", node: s, depth };
+        if (s.args.length === 0) {
+          const snap = this.varsSnapshot();
+          const body = snap.length ? snap.map((v) => `  ${v.name} = ${v.value}\uFF08${v.type}\uFF09`).join("\n") : "  \uFF08\u8FD8\u6CA1\u6709\u4EFB\u4F55\u53D8\u91CF\uFF09";
+          this.hook.report?.(`\u5F53\u524D\u53D8\u91CF\uFF1A
+${body}`, s.line ?? 0);
+        } else {
+          const parts = [];
+          for (const a of s.args) parts.push(toStr(yield* this.evalExpr(a, env)));
+          this.hook.report?.(parts.join(" "), s.line ?? 0);
+        }
         return "normal";
       }
       case "ask": {
@@ -4239,6 +4383,7 @@ async function run(src, opts = {}) {
     setTimeout: (fn, ms) => setTimeout(fn, ms)
   };
   const out = [];
+  const rep = [];
   const err = [];
   const info = [];
   const answers = [...opts.answers ?? []];
@@ -4255,6 +4400,7 @@ async function run(src, opts = {}) {
   };
   runner = new Runner(file, {
     output: record,
+    report: (text) => rep.push(text),
     onState: () => {
     },
     onPaused: () => {
@@ -4272,7 +4418,14 @@ async function run(src, opts = {}) {
   const timeout = new Promise((resolve) => setTimeout(resolve, opts.timeoutMs ?? 5e3));
   await Promise.race([done, timeout]);
   const r = runner;
-  return { out, err, info, vars: r.varsSnapshot(), state: r.state };
+  return {
+    out,
+    rep,
+    err,
+    info,
+    vars: r.varsSnapshot(),
+    state: r.state
+  };
 }
 async function debugTrace(src, actions, opts = {}) {
   const file = "main.cw";
@@ -4282,6 +4435,7 @@ async function debugTrace(src, actions, opts = {}) {
   };
   const lines = [];
   const out = [];
+  const rep = [];
   const err = [];
   let acts = [...actions];
   let runner = null;
@@ -4714,7 +4868,22 @@ async function t(name, src, expect, opts = {}) {
   eq(name, r.out, expect);
   if (r.err.length) eq(`${name}\uFF08\u4E0D\u8BE5\u62A5\u9519\uFF09`, r.err, []);
 }
+async function rep_(name, src, expect) {
+  const r = await run(src, {});
+  eq(name, r.rep, expect);
+}
 async function main() {
+  await t("\u62A5\u544A\u4E0D\u8FDB\u63A7\u5236\u53F0", `\u62A5\u544A "\u53EA\u662F\u62A5\u544A"
+print("\u8FD9\u53E5\u624D\u8FDB\u63A7\u5236\u53F0")
+`, ["\u8FD9\u53E5\u624D\u8FDB\u63A7\u5236\u53F0"]);
+  await rep_("\u62A5\u544A\u5199\u8FDB\u62A5\u544A\u9762\u677F", `\u62A5\u544A "\u7532", 1
+\u62A5\u544A "\u4E59"
+`, ["\u7532 1", "\u4E59"]);
+  await rep_("\u62A5\u544A\u4E0D\u5E26\u53C2\u6570\u4F1A\u5217\u5F53\u524D\u53D8\u91CF", `int \u91D1\u5E01 = 5
+\u62A5\u544A
+`, [
+    "\u5F53\u524D\u53D8\u91CF\uFF1A\n  \u91D1\u5E01 = 5\uFF08int\uFF09"
+  ]);
   await t("\u8868\u8FBE\u5F0F\u4F18\u5148\u7EA7", `
 int a = 2
 int b = 3

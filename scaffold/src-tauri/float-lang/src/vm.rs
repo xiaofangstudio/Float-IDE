@@ -54,6 +54,15 @@ struct Frame {
     argc: u8,
 }
 
+/// 手动内存的登记：alloc 记一笔，free 划掉，程序结束时对账。
+/// 用户要求"跟 Rust 一样严格"：申请了没还，就不让程序正常结束。
+struct AllocRec {
+    id: usize,
+    line: u32,
+    cells: usize,
+    freed: bool,
+}
+
 /// 调用点的内联缓存：记住上次在这里调到的是哪个函数对象，
 /// 命中就不必再去读 UserFn 里的 entry/nlocals/nparams（省一次解引用）。
 /// 函数对象换了（重新赋值）时指针对不上，自动回落并刷新。
@@ -66,8 +75,35 @@ struct CallIc {
     fn_id: u16,
 }
 
+/// 迭代源。以前是直接把整个列表 clone 一份再遍历——百万元素就是百万次复制。
+/// 现在只留个引用，按需取第 i 个。
+enum IterSrc {
+    List(crate::value::ListRef),
+    Dict(crate::value::DictRef),
+    Ptr(crate::value::PtrRef),
+    Owned(Vec<Value>),
+}
+
+impl IterSrc {
+    fn get(&self, i: usize) -> Option<Value> {
+        match self {
+            IterSrc::List(l) => l.borrow().get(i).cloned(),
+            IterSrc::Owned(v) => v.get(i).cloned(),
+            IterSrc::Dict(d) => {
+                let d = d.borrow();
+                d.keys().get(i).map(|k| Value::string(k.to_string()))
+            }
+            IterSrc::Ptr(p) => {
+                let m = p.borrow();
+                if m.freed { None } else { m.buf.get(i).cloned() }
+            }
+        }
+    }
+}
+
 struct IterState {
-    items: Vec<Value>,
+    src: IterSrc,
+    len: usize,
     pos: usize,
 }
 
@@ -114,6 +150,8 @@ impl Drop for SpSync {
 #[derive(Debug)]
 pub struct RunOutcome {
     pub output: String,
+    /// `报告 xxx` 的内容（IDE 右侧面板用）
+    pub reports: Vec<String>,
     pub value: Value,
     pub steps: u64,
 }
@@ -127,6 +165,10 @@ pub struct Vm {
     ranges: Vec<RangeLoop>,
     /// 每个指令位置一格调用缓存
     call_ic: Vec<CallIc>,
+    /// 手动内存对账表
+    allocs: Vec<AllocRec>,
+    /// 报告通道：`报告 xxx` 写这里，和 print 分开走
+    reports: Vec<String>,
     out: String,
     steps: u64,
     max_steps: u64,
@@ -147,6 +189,8 @@ impl Vm {
             iters: Vec::new(),
             ranges: Vec::new(),
             call_ic: vec![CallIc::default(); chunk_len],
+            allocs: Vec::new(),
+            reports: Vec::new(),
             out: String::new(),
             steps: 0,
             max_steps: DEFAULT_MAX_STEPS,
@@ -157,6 +201,54 @@ impl Vm {
 
     pub fn set_max_steps(&mut self, n: u64) {
         self.max_steps = n;
+    }
+
+    /// alloc 之后登记一笔（记下是哪一行要的、要了几格）
+    fn note_alloc(&mut self, v: &Value, ip: usize) {
+        if let Value::Ptr(p) = v {
+            let id = Rc::as_ptr(p) as usize;
+            let cells = p.borrow().buf.len();
+            let line = self.line_of(ip);
+            self.allocs.push(AllocRec { id, line, cells, freed: false });
+        }
+    }
+
+    /// free 之后划掉
+    fn note_free(&mut self, v: &Value) {
+        if let Value::Ptr(p) = v {
+            let id = Rc::as_ptr(p) as usize;
+            if let Some(r) = self.allocs.iter_mut().find(|r| r.id == id && !r.freed) {
+                r.freed = true;
+            }
+        }
+    }
+
+    /// 程序结束时对账：还有没 free 的就报错，不让它"正常跑完"
+    fn check_leaks(&self) -> Result<(), FloatError> {
+        let mut leaks: Vec<&AllocRec> = self.allocs.iter().filter(|r| !r.freed).collect();
+        if leaks.is_empty() {
+            return Ok(());
+        }
+        let n = leaks.len();
+        leaks.sort_by_key(|r| r.line);
+        let mut msg = String::new();
+        if n == 1 {
+            let r = leaks[0];
+            msg.push_str(&format!(
+                "第 {} 行申请的 {} 格内存还没有 free",
+                r.line, r.cells
+            ));
+        } else {
+            msg.push_str(&format!("有 {} 块手动申请的内存没有 free：", n));
+            for r in leaks.iter().take(4) {
+                msg.push_str(&format!("\n    第 {} 行申请了 {} 格", r.line, r.cells));
+            }
+            if n > 4 {
+                msg.push_str(&format!("\n    ……还有 {} 块", n - 4));
+            }
+        }
+        msg.push_str("\n  手动申请的内存必须自己还回去；不想管内存就别用 alloc，用列表就行。");
+        Ok(()).and(Err(FloatError::new(msg, Span::new(&self.chunk.file, 1, 1, 1))))
     }
 
     /// 取走目前累积的输出（出错时也想知道跑到哪了）
@@ -232,6 +324,8 @@ impl Vm {
         self.frames.clear();
         self.iters.clear();
         self.ranges.clear();
+        self.allocs.clear();
+        self.reports.clear();
         self.out.clear();
         self.steps = 0;
         self.input_pos = 0;
@@ -260,6 +354,8 @@ impl Vm {
         // 安全性：ip 只会来自编译期生成的跳转目标 / 返回地址，全部落在 code 内。
         let code = self.chunk.code.as_ptr();
         let ncode = self.chunk.code.len();
+        // 调用缓存也用裸指针：热路径上不能有 Vec 的边界检查
+        let icp = self.call_ic.as_mut_ptr();
         let kptr = self.chunk.consts.as_ptr();
         let klen = self.chunk.consts.len();
 
@@ -723,6 +819,14 @@ impl Vm {
                             Ok(v) => v,
                             Err(m) => return Err(self.err_at(ip, m)),
                         };
+                        // 手动内存要记账：alloc 记一笔，free 划掉
+                        if name == "alloc" {
+                            self.note_alloc(&v, ip);
+                        } else if name == "free" {
+                            if let Some(a) = args.first() {
+                                self.note_free(a);
+                            }
+                        }
                         std::ptr::write(sptr.add(sp), v);
                         sp += 1;
                     } else if matches!(&*sptr.add(callee_idx), Value::Func(_)) {
@@ -731,7 +835,7 @@ impl Vm {
                             Value::Func(f) => Rc::as_ptr(f) as usize,
                             _ => 0,
                         };
-                        let ic = self.call_ic[site];
+                        let ic = *icp.add(site);
                         let (fid, entry, nlocals, nparams) = if fp != 0 && ic.fp == fp {
                             (ic.fn_id, ic.entry as usize, ic.nlocals as usize, ic.nparams as usize)
                         } else {
@@ -739,7 +843,7 @@ impl Vm {
                                 Value::Func(f) => (f.id, f.entry, f.nlocals, f.params.len()),
                                 _ => unreachable!(),
                             };
-                            self.call_ic[site] = CallIc {
+                            *icp.add(site) = CallIc {
                                 fp,
                                 entry: entry as u32,
                                 nlocals: nlocals as u32,
@@ -810,6 +914,9 @@ impl Vm {
                         Ok(v) => v,
                         Err(m) => return Err(self.err_at(ip, m)),
                     };
+                    if &*name == "free" {
+                        self.note_free(&recv);
+                    }
                     std::ptr::write(sptr.add(sp), v);
                     sp += 1;
                 }
@@ -823,8 +930,11 @@ impl Vm {
                             ip = rip;
                         }
                         FrameExit::Top => {
+                            // 顶层结束 = 程序跑完。手动内存没还对上账就不算跑完。
+                            self.check_leaks()?;
                             return Ok(RunOutcome {
                                 output: std::mem::take(&mut self.out),
+                                reports: std::mem::take(&mut self.reports),
                                 value: v,
                                 steps: self.steps,
                             })
@@ -846,8 +956,11 @@ impl Vm {
                             ip = rip;
                         }
                         FrameExit::Top => {
+                            // 顶层结束 = 程序跑完。手动内存没还对上账就不算跑完。
+                            self.check_leaks()?;
                             return Ok(RunOutcome {
                                 output: std::mem::take(&mut self.out),
+                                reports: std::mem::take(&mut self.reports),
                                 value: v,
                                 steps: self.steps,
                             })
@@ -881,6 +994,14 @@ impl Vm {
                             Ok(v) => v,
                             Err(m) => return Err(self.err_at(ip, m)),
                         };
+                        // 手动内存要记账：alloc 记一笔，free 划掉
+                        if name == "alloc" {
+                            self.note_alloc(&v, ip);
+                        } else if name == "free" {
+                            if let Some(a) = args.first() {
+                                self.note_free(a);
+                            }
+                        }
                         std::ptr::write(sptr.add(sp), v);
                         sp += 1;
                     } else if kind == 1 {
@@ -889,7 +1010,7 @@ impl Vm {
                             Value::Func(f) => Rc::as_ptr(f) as usize,
                             _ => 0,
                         };
-                        let ic = self.call_ic[site];
+                        let ic = *icp.add(site);
                         let (fid, entry, nlocals, nparams) = if fp != 0 && ic.fp == fp {
                             (ic.fn_id, ic.entry as usize, ic.nlocals as usize, ic.nparams as usize)
                         } else {
@@ -897,7 +1018,7 @@ impl Vm {
                                 Value::Func(f) => (f.id, f.entry, f.nlocals, f.params.len()),
                                 _ => unreachable!(),
                             };
-                            self.call_ic[site] = CallIc {
+                            *icp.add(site) = CallIc {
                                 fp,
                                 entry: entry as u32,
                                 nlocals: nlocals as u32,
@@ -1032,6 +1153,37 @@ impl Vm {
                     std::ptr::write(sptr.add(sp), Value::string(line));
                     sp += 1;
                 }
+                Op::Report(n) => {
+                    let cnt = n as usize;
+                    if cnt == 0 {
+                        // 不带参数 = 报告"现在都有什么"
+                        let mut lines = Vec::new();
+                        for (i, g) in self.globals.iter().enumerate() {
+                            let name = self.chunk.global_names.get(i).map(|x| x.to_string()).unwrap_or_default();
+                            if name.is_empty() {
+                                continue;
+                            }
+                            lines.push(format!("  {} = {}（{}）", name, g.to_display(), g.type_name()));
+                        }
+                        let body = if lines.is_empty() {
+                            "当前变量：（还没有）".to_string()
+                        } else {
+                            format!("当前变量：\n{}", lines.join("\n"))
+                        };
+                        self.reports.push(body);
+                    } else {
+                        let at = sp.saturating_sub(cnt);
+                        let items = take_tail(sptr, &mut sp, at);
+                        let mut line = String::new();
+                        for (i, v) in items.iter().enumerate() {
+                            if i > 0 {
+                                line.push(' ');
+                            }
+                            line.push_str(&v.to_display());
+                        }
+                        self.reports.push(line);
+                    }
+                }
                 Op::Print(n) => {
                     let n = n as usize;
                     let at = sp.saturating_sub(n);
@@ -1151,17 +1303,17 @@ impl Vm {
                 Op::IterInit => {
                     sp -= 1;
                     let it = std::ptr::read(sptr.add(sp));
-                    let items = match iter_items(&it) {
+                    let (src, len) = match iter_source(&it) {
                         Ok(v) => v,
                         Err(m) => return Err(self.err_at(ip, m)),
                     };
-                    self.iters.push(IterState { items, pos: 0 });
+                    self.iters.push(IterState { src, len, pos: 0 });
                 }
                 Op::IterNext(target) => {
                     let mut got: Option<Value> = None;
                     if let Some(st) = self.iters.last_mut() {
-                        if st.pos < st.items.len() {
-                            got = Some(st.items[st.pos].clone());
+                        if st.pos < st.len {
+                            got = st.src.get(st.pos);
                             st.pos += 1;
                         }
                     }
@@ -1534,20 +1686,30 @@ fn member_set(obj: &Value, name: &str, val: Value) -> Result<(), String> {
     }
 }
 
-fn iter_items(v: &Value) -> Result<Vec<Value>, String> {
+/// 建迭代源：列表/字典/指针只留引用，字符串拆成字符（本来就小）
+fn iter_source(v: &Value) -> Result<(IterSrc, usize), String> {
     match v {
-        Value::List(l) => Ok(l.borrow().clone()),
-        Value::Str(s) => Ok(s.chars().map(|c| Value::string(c.to_string())).collect()),
+        Value::List(l) => {
+            let n = l.borrow().len();
+            Ok((IterSrc::List(Rc::clone(l)), n))
+        }
+        Value::Str(s) => {
+            let chars: Vec<Value> = s.chars().map(|c| Value::string(c.to_string())).collect();
+            let n = chars.len();
+            Ok((IterSrc::Owned(chars), n))
+        }
         Value::Dict(d) => {
-            let d = d.borrow();
-            Ok(d.keys().iter().map(|k| Value::string(k.to_string())).collect())
+            let n = d.borrow().len();
+            Ok((IterSrc::Dict(Rc::clone(d)), n))
         }
         Value::Ptr(p) => {
             let m = p.borrow();
             if m.freed {
                 return Err("这块内存已经 free 了，不能再遍历".into());
             }
-            Ok(m.buf.clone())
+            let n = m.buf.len();
+            drop(m);
+            Ok((IterSrc::Ptr(Rc::clone(p)), n))
         }
         other => Err(format!("{} 不能用于 for 遍历", other.to_display())),
     }

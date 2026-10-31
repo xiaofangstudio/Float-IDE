@@ -44,6 +44,7 @@ export const INSTRUCTIONS: InstDoc[] = [
 
   /* 输入输出 */
   { name: 'print', args: 'print(值, 值, …)', desc: '输出到控制台，多个值用空格隔开', category: '输入输出' },
+  { name: '报告', args: '报告 值, 值 … / 报告', desc: '写进右侧「报告」面板（写法跟 print 一样）；不写内容就报告当前所有变量', category: '输入输出' },
   { name: 'ask', args: 'ask "问题"', desc: '向用户提问，回答存进 ans 与 __last_ans', category: '输入输出' },
 
   /* 集合 */
@@ -84,7 +85,7 @@ export const KEYWORDS: string[] = [
   'wait', 'until', 'out', 'break', 'balo', 'continue', 'stop', 'all', 'now', 'script', 'return',
   'function', 'fn', 'Function', 'class', 'extends', 'new', 'self', 'this', 'super',
   'int', 'float', 'str', 'bool', 'list', 'dict', 'var',
-  'print', 'ask', 'ans', 'import', 'time', 'read', 'reset', 'key', 'del', 'insert', 'replace',
+  'print', '报告', 'report', 'ask', 'ans', 'import', 'time', 'read', 'reset', 'key', 'del', 'insert', 'replace',
   'with', 'at', 'add', 'len', 'range', 'true', 'false', 'null', 'nil'
 ];
 

@@ -103,6 +103,8 @@ pub enum Op {
     Print(u16),
     /// 读一行输入，压栈（没有输入时给空串）
     Ask,
+    /// 报告：弹出 n 个值，拼成一行写进「报告」通道（0 个 = 报告当前所有变量）
+    Report(u16),
 
     IterInit,
     /// 迭代器取下一个：取到压栈，取完跳到目标
@@ -120,6 +122,8 @@ pub struct Chunk {
     pub names: Vec<Rc<str>>,
     /// 函数名表：报错的调用链靠它取名字（帧里只存编号）
     pub fn_names: Vec<Rc<str>>,
+    /// 全局槽位 → 变量名（`报告` 不带参数时要列出来）
+    pub global_names: Vec<Rc<str>>,
     pub n_globals: u16,
     pub file: Rc<str>,
 }
@@ -330,6 +334,13 @@ impl Compiler {
         for s in &prog.body {
             self.stmt(s);
         }
+        // 先把 槽号 → 名字 反过来存一份，运行时的"报告当前变量"要用
+        let mut global_names = vec![Rc::from(""); self.scopes[0].next as usize];
+        for (name, slot) in self.scopes[0].vars.iter() {
+            if (*slot as usize) < global_names.len() {
+                global_names[*slot as usize] = Rc::clone(name);
+            }
+        }
         self.emit(Op::Nil);
         self.emit(Op::Return);
         Chunk {
@@ -338,6 +349,7 @@ impl Compiler {
             consts: std::mem::take(&mut self.consts),
             names: std::mem::take(&mut self.names),
             fn_names: std::mem::take(&mut self.fn_names),
+            global_names,
             n_globals: self.scopes[0].next,
             file: Rc::clone(&self.file),
         }
@@ -438,6 +450,12 @@ impl Compiler {
                     self.expr(a);
                 }
                 self.emit(Op::Print(args.len() as u16));
+            }
+            StmtKind::Report(args) => {
+                for a in args {
+                    self.expr(a);
+                }
+                self.emit(Op::Report(args.len() as u16));
             }
             StmtKind::Ask(prompt) => {
                 // 有提示就先打出来（控制台风格），再读一行写进 ans / __last_ans

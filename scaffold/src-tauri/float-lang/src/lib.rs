@@ -23,6 +23,7 @@ pub mod bytecode;
 pub mod error;
 pub mod packages;
 pub mod parser;
+pub mod sema;
 pub mod token;
 pub mod value;
 pub mod vm;

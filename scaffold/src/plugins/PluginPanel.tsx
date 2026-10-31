@@ -185,7 +185,7 @@ export function PluginPanel({ host, onChanged, onClose, embedded }: Props) {
     "name": "SQL 助手",
     "version": "1.0.0",
     "publisher": "数据组",
-    "description": "把选中的 SQL 格式化成一段 Float 脚本",
+    "description": "把选中的 SQL 格式化成一段 CW Script",
     "tags": ["sql", "format"],
     "localPath": "D:/team/plugins/float.sql-helper"
   }

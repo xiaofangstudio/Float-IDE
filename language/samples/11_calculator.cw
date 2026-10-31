@@ -44,8 +44,6 @@ while (true)
         print("要输入两个数，中间用空格分开。")
         continue
 
-    float a = float(parts[0])
-    float b = float(parts[1])
     int ai = int(parts[0])
     int bi = int(parts[1])
 

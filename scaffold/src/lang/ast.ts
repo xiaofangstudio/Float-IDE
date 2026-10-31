@@ -69,6 +69,8 @@ export type Stmt =
   | ({ k: 'incdec'; target: Target; delta: 1 | -1; prefix: boolean } & Span)
   | ({ k: 'expr'; expr: Expr } & Span)
   | ({ k: 'print'; args: Expr[] } & Span)
+  /** 报告：和 print 写法一样，但输出到右侧「报告」面板，不进控制台 */
+  | ({ k: 'report'; args: Expr[] } & Span)
   | ({ k: 'ask'; question: Expr } & Span)
   | ({ k: 'if'; branches: IfBranch[]; elseBody: Stmt[] | null } & Span)
   | ({ k: 'while'; cond: Expr; body: Stmt[] } & Span)

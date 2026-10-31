@@ -356,7 +356,7 @@ fn 深度递归被拦住且不崩进程() {
 #[test]
 fn 申请指针并读写() {
     assert_out(
-        "ptr p = alloc(3)\np[0] = 10\np[1] = p[0] * 2\nprint(p[0], p[1], len(p))\n",
+        "ptr p = alloc(3)\np[0] = 10\np[1] = p[0] * 2\nprint(p[0], p[1], len(p))\nfree(p)\n",
         &["10 20 3"],
     );
 }
@@ -364,7 +364,7 @@ fn 申请指针并读写() {
 #[test]
 fn 指针和自动内存可以混着用() {
     assert_out(
-        "list xs = [1, 2]\nptr p = alloc(2)\np[0] = xs\np[1] = \"袋子\"\nprint(p[0], p[1], xs)\n",
+        "list xs = [1, 2]\nptr p = alloc(2)\np[0] = xs\np[1] = \"袋子\"\nprint(p[0], p[1], xs)\nfree(p)\n",
         &["[1, 2] 袋子 [1, 2]"],
     );
 }
@@ -372,7 +372,7 @@ fn 指针和自动内存可以混着用() {
 #[test]
 fn 指针能当集合遍历() {
     assert_out(
-        "ptr p = alloc(3)\nfor i in range(3)\n    p[i] = i\nint s = 0\nfor v in p\n    s += v\nprint(s)\n",
+        "ptr p = alloc(3)\nfor i in range(3)\n    p[i] = i\nint s = 0\nfor v in p\n    s += v\nprint(s)\nfree(p)\n",
         &["3"],
     );
 }
@@ -380,7 +380,7 @@ fn 指针能当集合遍历() {
 #[test]
 fn 指针传参改的是同一块() {
     assert_out(
-        "fn fill(p, v)\n    for i in range(len(p))\n        p[i] = v\nptr p = alloc(2)\nfill(p, 7)\nprint(p[0], p[1])\n",
+        "fn fill(p, v)\n    for i in range(len(p))\n        p[i] = v\nptr p = alloc(2)\nfill(p, 7)\nprint(p[0], p[1])\nfree(p)\n",
         &["7 7"],
     );
 }
@@ -404,12 +404,25 @@ fn 指针越界会报错() {
 }
 
 #[test]
-fn 忘了释放也不会漏_没人引用就回收() {
-    // 语言层面看不出泄漏，但至少不能崩，也不能影响后面的代码
+fn 忘了释放就不让跑完() {
+    // 手动内存按 Rust 的规矩：申请了必须还，漏一个就不算正常结束
+    let e = run_source("ptr t = alloc(10)\nt[0] = 1\nprint(\"跑完\")\n").unwrap_err();
+    assert!(e.message.contains("还没有 free"), "实际：{}", e.message);
+    assert!(e.message.contains("第 1 行"), "要指出是哪一行申请的：{}", e.message);
+}
+
+#[test]
+fn 循环里申请又释放是合法的() {
     assert_out(
-        "for i in range(100)\n    ptr t = alloc(10)\n    t[0] = i\nprint(\"跑完\")\n",
+        "for i in range(100)\n    ptr t = alloc(10)\n    t[0] = i\n    free(t)\nprint(\"跑完\")\n",
         &["跑完"],
     );
+}
+
+#[test]
+fn 漏了好几块会一次性列出来() {
+    let e = run_source("ptr a = alloc(1)\nptr b = alloc(2)\n").unwrap_err();
+    assert!(e.message.contains("2 块"), "实际：{}", e.message);
 }
 
 /* ─────────────── 默认参数与中文报错 ─────────────── */

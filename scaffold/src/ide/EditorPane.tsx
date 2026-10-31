@@ -150,7 +150,7 @@ export type EditorHandle = {
   saveFile: (path: string) => Promise<boolean>;
   /** 直接用新内容覆盖某个已打开文件的缓冲区 */
   setContent: (path: string, text: string) => void;
-  revealLine: (path: string, line: number) => void;
+  revealLine: (path: string, line: number, col?: number) => void;
   dirtyCount: () => number;
   getValue: (path: string) => string | null;
   refreshBpDecor: () => void;
@@ -656,8 +656,18 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
     void api.fsStat(path).then((st) => { if (st.exists) versionRef.current.set(path, st.mtimeMs); }).catch(() => {});
   }, []);
 
-  const revealLine = useCallback((path: string, line: number): void => {
-    void openFile(path).then(() => edRef.current?.revealLineInCenter(line));
+  const revealLine = useCallback((path: string, line: number, col?: number): void => {
+    void openFile(path).then(() => {
+      const ed = edRef.current;
+      const m = ed?.getModel();
+      if (!ed || !m) return;
+      ed.revealLineInCenter(line);
+      ed.setPosition({ lineNumber: line, column: Math.max(1, col ?? 1) });
+      // 选中整行：点问题列表里的一条，眼睛立刻能落到那一行
+      const len = (m.getLineContent(line) ?? '').length;
+      ed.setSelection(new monaco.Range(line, 1, line, len + 1));
+      ed.focus();
+    });
   }, [openFile]);
 
   useEffect(() => {

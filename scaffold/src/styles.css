@@ -114,7 +114,7 @@ button { font-family: inherit; }
 
 .btn {
   background: var(--bg3); color: var(--txt); border: 1px solid var(--line2);
-  border-radius: 4px; padding: 5px 12px; font-size: 13px; cursor: pointer;
+  border-radius: 4px; padding: 5px 12px; font-size: 13px; cursor: var(--cur-hand);
   transition: background .15s, border-color .15s;
 }
 .btn:hover { background: var(--bg4); border-color: #b7cbe4; }
@@ -160,7 +160,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 .welcome-act {
   display: flex; align-items: center; gap: 10px; padding: 11px 14px;
   background: var(--bg2); color: var(--txt); border: 1px solid var(--line2); border-radius: 6px;
-  font-size: 14px; cursor: pointer; transition: border-color .15s, background .15s; text-align: left;
+  font-size: 14px; cursor: var(--cur-hand); transition: border-color .15s, background .15s; text-align: left;
 }
 .welcome-act:hover { background: var(--bg3); border-color: #b7cbe4; }
 .welcome-act.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
@@ -171,7 +171,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 .tpl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px; }
 .tpl-card {
   background: var(--bg2); border: 1px solid var(--line); border-radius: 6px; overflow: hidden;
-  cursor: pointer; transition: transform .15s, border-color .15s;
+  cursor: var(--cur-hand); transition: transform .15s, border-color .15s;
 }
 .tpl-card:hover { transform: translateY(-3px); border-color: var(--accent); }
 .tpl-thumb { height: 112px; display: flex; align-items: center; justify-content: center; background: #e8f1fc; border-bottom: 1px solid var(--line); }
@@ -180,7 +180,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 .recent-list { overflow-y: auto; flex: 1; padding-bottom: 8px; min-height: 0; }
 .recent-item {
   display: flex; justify-content: space-between; align-items: center; gap: 10px;
-  padding: 9px 12px; border-radius: 6px; cursor: pointer; border: 1px solid transparent;
+  padding: 9px 12px; border-radius: 6px; cursor: var(--cur-hand); border: 1px solid transparent;
 }
 .recent-item:hover { background: var(--bg2); border-color: var(--line); }
 .recent-name { font-weight: 600; }
@@ -192,7 +192,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 .npd-tpls { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 16px; }
 .npd-tpl {
   background: var(--bg3); border: 1px solid var(--line); border-radius: 6px; overflow: hidden;
-  cursor: pointer; transition: border-color .12s; padding-bottom: 8px;
+  cursor: var(--cur-hand); transition: border-color .12s; padding-bottom: 8px;
 }
 .npd-tpl:hover { border-color: var(--line2); }
 .npd-tpl.active { border-color: var(--accent); background: #e3f0fd; }
@@ -218,7 +218,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 .rail { width: 44px; flex: none; background: var(--bg2); border-right: 1px solid var(--line); display: flex; flex-direction: column; align-items: center; padding-top: 8px; gap: 4px; }
 .rail-btn {
   width: 36px; height: 36px; border: none; border-radius: 6px; background: transparent;
-  color: var(--txt3); cursor: pointer; display: flex; align-items: center; justify-content: center;
+  color: var(--txt3); cursor: var(--cur-hand); display: flex; align-items: center; justify-content: center;
 }
 .rail-btn:hover { color: var(--txt); background: var(--bg3); }
 .rail-btn { position: relative; }
@@ -241,14 +241,14 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 .explorer-body { flex: 1; overflow-y: auto; padding: 0 4px 8px; font-size: 13px; }
 .tree-item {
   display: flex; align-items: center; gap: 6px; padding: 3.5px 8px; border-radius: 6px;
-  cursor: pointer; color: var(--txt2); font-size: 13px; white-space: nowrap; overflow: hidden;
+  cursor: var(--cur-hand); color: var(--txt2); font-size: 13px; white-space: nowrap; overflow: hidden;
 }
 .tree-item:hover { background: var(--bg3); }
 .ctx-menu {
   position: fixed; z-index: 90; min-width: 140px; background: var(--bg3);
   border: 1px solid var(--line2); border-radius: 6px; padding: 5px; box-shadow: 0 8px 28px rgba(23, 43, 77, .18);
 }
-.ctx-item { padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 12.5px; color: var(--txt2); }
+.ctx-item { padding: 6px 10px; border-radius: 6px; cursor: var(--cur-hand); font-size: 12.5px; color: var(--txt2); }
 .ctx-item:hover { background: var(--bg4); color: var(--txt); }
 .ctx-item.danger { color: var(--danger); }
 .ctx-item.danger:hover { background: rgba(216, 69, 60, .1); }
@@ -260,7 +260,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
   overflow-x: auto; min-height: 34px; align-items: flex-end;
 }
 .tree-tab {
-  padding: 6px 12px; font-size: 12px; color: var(--txt2); cursor: pointer;
+  padding: 6px 12px; font-size: 12px; color: var(--txt2); cursor: var(--cur-hand);
   border: 1px solid transparent; border-bottom: none; border-radius: 6px 6px 0 0; white-space: nowrap;
   display: flex; align-items: center; gap: 5px;
 }
@@ -279,7 +279,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 
 /* Git 面板 */
 .git-branch {
-  display: flex; align-items: center; gap: 6px; padding: 6px 10px; cursor: pointer;
+  display: flex; align-items: center; gap: 6px; padding: 6px 10px; cursor: var(--cur-hand);
   font-size: 12.5px; color: var(--txt); background: var(--bg3); border-radius: 6px; margin: 0 6px 6px; flex: none;
 }
 .git-branch:hover { background: var(--bg4); }
@@ -287,11 +287,11 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 .git-commit { padding: 0 6px 8px; flex: none; display: flex; flex-direction: column; gap: 6px; }
 .git-msg-input { width: 100%; resize: none; }
 .git-sec { font-size: 11.5px; color: var(--txt3); letter-spacing: 1px; padding: 8px 6px 4px; flex: none; display: flex; align-items: center; gap: 5px; }
-.git-sec.clickable { cursor: pointer; }
+.git-sec.clickable { cursor: var(--cur-hand); }
 .git-sec.clickable:hover { color: var(--txt2); }
 .git-row {
   display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-radius: 6px;
-  cursor: pointer; font-size: 12.5px; color: var(--txt2); white-space: nowrap; overflow: hidden;
+  cursor: var(--cur-hand); font-size: 12.5px; color: var(--txt2); white-space: nowrap; overflow: hidden;
 }
 .git-row:hover { background: var(--bg3); color: var(--txt); }
 .git-badge {
@@ -301,7 +301,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 .git-path { overflow: hidden; text-overflow: ellipsis; }
 .git-actions { display: flex; gap: 2px; margin-left: auto; flex: none; }
 .git-list { padding-bottom: 4px; }
-.git-log-row { padding: 4px 6px; border-radius: 6px; cursor: pointer; font-size: 12px; color: var(--txt2); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.git-log-row { padding: 4px 6px; border-radius: 6px; cursor: var(--cur-hand); font-size: 12px; color: var(--txt2); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .git-log-row:hover { background: var(--bg3); color: var(--txt); }
 .git-hash { color: var(--accent2); font-family: Consolas, monospace; margin-right: 6px; }
 .git-subject { color: var(--txt); }
@@ -323,7 +323,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 .term-label { font-size: 11.5px; color: var(--txt3); letter-spacing: 1px; margin-right: 6px; }
 .term-tab {
   display: flex; align-items: center; gap: 5px; padding: 4px 10px; font-size: 12px;
-  color: var(--txt2); cursor: pointer; border-radius: 6px; border: 1px solid transparent;
+  color: var(--txt2); cursor: var(--cur-hand); border-radius: 6px; border: 1px solid transparent;
 }
 .term-tab:hover { background: var(--bg3); }
 .term-tab.active { background: var(--bg3); border-color: var(--line2); color: var(--txt); }
@@ -341,7 +341,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 .tc { font-variant-numeric: tabular-nums; color: var(--txt2); font-size: 12px; min-width: 150px; }
 .icon-btn {
   width: 32px; height: 32px; display: inline-flex; align-items: center; justify-content: center;
-  border-radius: 6px; cursor: pointer; color: var(--txt2); border: 1px solid transparent; background: transparent;
+  border-radius: 6px; cursor: var(--cur-hand); color: var(--txt2); border: 1px solid transparent; background: transparent;
   font-size: 14px; padding: 0;
 }
 .icon-btn:hover { background: var(--bg3); color: var(--txt); }
@@ -371,7 +371,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
   background: var(--s1);
 }
 .sp-tabs { display: flex; border-bottom: 1px solid var(--line); flex: none; }
-.sp-tab { flex: 1; text-align: center; padding: 9px 0; font-size: 12.5px; color: var(--txt2); cursor: pointer; border-bottom: 2px solid transparent; }
+.sp-tab { flex: 1; text-align: center; padding: 9px 0; font-size: 12.5px; color: var(--txt2); cursor: var(--cur-hand); border-bottom: 2px solid transparent; }
 .sp-tab.active { color: var(--txt); border-bottom-color: var(--accent); }
 
 /* 变量面板：上面是脚本自己的变量，分割线下面是特殊变量 */
@@ -385,7 +385,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 .sp-body { flex: 1; overflow-y: auto; padding: 8px 10px; font-size: 12.5px; line-height: 1.65; }
 .kv { display: flex; justify-content: space-between; padding: 3px 0; color: var(--txt2); }
 .kv b { color: var(--txt); font-weight: 600; }
-.skill-item { padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; margin-bottom: 8px; cursor: pointer; }
+.skill-item { padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; margin-bottom: 8px; cursor: var(--cur-hand); }
 .skill-item:hover { border-color: var(--accent); }
 .skill-name { font-weight: 700; }
 .skill-desc { color: var(--txt2); font-size: 11.5px; }
@@ -405,7 +405,7 @@ code.inline { background: var(--bg3); padding: 1px 5px; border-radius: 4px; font
 .palette-list { max-height: 380px; overflow-y: auto; padding: 6px; }
 .palette-item {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  padding: 9px 12px; border-radius: 6px; cursor: pointer; font-size: 13px; color: var(--txt2);
+  padding: 9px 12px; border-radius: 6px; cursor: var(--cur-hand); font-size: 13px; color: var(--txt2);
 }
 .palette-item.active { background: var(--accent); color: #fff; }
 .palette-item.active .palette-hint { color: rgba(255, 255, 255, .8); }
@@ -447,7 +447,7 @@ code.inline { background: var(--bg3); padding: 1px 5px; border-radius: 4px; font
 }
 
 /* 大纲 */
-.outline-item { display: flex; align-items: center; gap: 7px; padding: 3px 8px; border-radius: 6px; cursor: pointer; color: var(--txt2); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.outline-item { display: flex; align-items: center; gap: 7px; padding: 3px 8px; border-radius: 6px; cursor: var(--cur-hand); color: var(--txt2); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .outline-item:hover { background: var(--bg3); color: var(--txt); }
 .outline-item.group { color: var(--accent); font-weight: 600; }
 .outline-item.func { color: var(--txt); }
@@ -582,13 +582,13 @@ body.resizing, body.resizing * { cursor: inherit !important; user-select: none !
 .tb-right { display: flex; align-items: center; gap: 4px; }
 .tb-link {
   display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--txt2);
-  background: transparent; border: none; padding: 5px 9px; border-radius: 6px; cursor: pointer;
+  background: transparent; border: none; padding: 5px 9px; border-radius: 6px; cursor: var(--cur-hand);
 }
 .tb-link:hover { background: rgba(31, 143, 232, .1); color: var(--accent); }
 .tb-win { display: flex; margin-left: 4px; }
 .tb-winbtn {
   width: 38px; height: 28px; border: none; background: transparent; color: var(--txt2);
-  display: flex; align-items: center; justify-content: center; cursor: pointer; border-radius: 6px;
+  display: flex; align-items: center; justify-content: center; cursor: var(--cur-hand); border-radius: 6px;
 }
 .tb-winbtn:hover { background: rgba(16, 32, 54, .08); }
 .tb-winbtn.close:hover { background: #e5484d; color: #fff; }
@@ -603,7 +603,7 @@ body.resizing, body.resizing * { cursor: inherit !important; user-select: none !
 .tool {
   min-width: 30px; height: 28px; padding: 0 6px; display: flex; align-items: center; justify-content: center; gap: 5px;
   border: none; border-radius: 6px; background: transparent; color: var(--txt2);
-  font-size: 12px; cursor: pointer; transition: background .14s, color .14s;
+  font-size: 12px; cursor: var(--cur-hand); transition: background .14s, color .14s;
 }
 .tool:hover:not(:disabled) { background: #fff; color: var(--txt); box-shadow: var(--shadow-sm); }
 .tool:disabled { opacity: .32; cursor: default; }
@@ -634,7 +634,7 @@ body.resizing, body.resizing * { cursor: inherit !important; user-select: none !
 .wc-acts { display: flex; flex-direction: column; gap: 1px; padding: 0 8px; }
 .wc-act {
   display: flex; align-items: center; gap: 9px; padding: 9px 10px; border: none; background: transparent;
-  border-radius: 6px; font-size: 13px; color: var(--txt); cursor: pointer; text-align: left;
+  border-radius: 6px; font-size: 13px; color: var(--txt); cursor: var(--cur-hand); text-align: left;
 }
 .wc-act:hover { background: rgba(31, 143, 232, .1); color: var(--accent); }
 .wc-search {
@@ -646,7 +646,7 @@ body.resizing, body.resizing * { cursor: inherit !important; user-select: none !
   font-size: 12.5px; color: var(--txt); font-family: inherit;
 }
 .wc-recents { flex: 1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 2px; }
-.wc-recent { display: flex; align-items: center; gap: 9px; padding: 8px 9px; border-radius: 6px; cursor: pointer; }
+.wc-recent { display: flex; align-items: center; gap: 9px; padding: 8px 9px; border-radius: 6px; cursor: var(--cur-hand); }
 .wc-recent:hover { background: rgba(31, 143, 232, .1); }
 .wc-recent-icon {
   width: 27px; height: 27px; flex: none; border-radius: 6px; color: var(--accent);
@@ -675,7 +675,7 @@ body.resizing, body.resizing * { cursor: inherit !important; user-select: none !
 .wc-card {
   display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 16px 10px 14px;
   border-radius: 6px; border: 1px solid rgba(197, 212, 234, .6);
-  background: var(--s2); cursor: pointer;
+  background: var(--s2); cursor: var(--cur-hand);
   transition: border-color .12s ease;
 }
 .wc-card:hover { border-color: var(--a2); }
@@ -706,7 +706,7 @@ body.resizing, body.resizing * { cursor: inherit !important; user-select: none !
   display: flex; align-items: center; justify-content: space-between;
   padding: 13px 16px; border-bottom: 1px solid var(--line); font-weight: 600; font-size: 13.5px;
 }
-.iconbtn { border: none; background: transparent; color: var(--txt3); cursor: pointer; font-size: 13px; padding: 4px 8px; border-radius: 6px; }
+.iconbtn { border: none; background: transparent; color: var(--txt3); cursor: var(--cur-hand); font-size: 13px; padding: 4px 8px; border-radius: 6px; }
 .iconbtn:hover { background: var(--bg4); color: var(--txt); }
 .dlg-body { padding: 16px; overflow-y: auto; }
 .dlg-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); }
@@ -761,7 +761,7 @@ body.resizing, body.resizing * { cursor: inherit !important; user-select: none !
 .menu { position: relative; }
 .menu-btn {
   border: none; background: transparent; font-size: 12.5px; color: var(--txt2);
-  padding: 4px 10px; border-radius: 6px; cursor: pointer; font-family: inherit;
+  padding: 4px 10px; border-radius: 6px; cursor: var(--cur-hand); font-family: inherit;
 }
 .menu-btn:hover, .menu-btn.on { background: #fff; color: var(--txt); box-shadow: var(--shadow-sm); }
 .menu-pop {
@@ -773,7 +773,7 @@ body.resizing, body.resizing * { cursor: inherit !important; user-select: none !
 .menu-item {
   display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 18px;
   padding: 7px 10px; border: none; background: transparent; border-radius: 6px;
-  font-size: 12.5px; color: var(--txt); cursor: pointer; text-align: left; font-family: inherit;
+  font-size: 12.5px; color: var(--txt); cursor: var(--cur-hand); text-align: left; font-family: inherit;
 }
 .menu-item:hover:not(:disabled) { background: rgba(31, 143, 232, .12); color: var(--accent); }
 .menu-item:disabled { opacity: .38; cursor: default; }
@@ -809,12 +809,12 @@ body.resizing, body.resizing * { cursor: inherit !important; user-select: none !
 .seg { display: inline-flex; background: var(--s3); border: 1px solid var(--line2); border-radius: 6px; padding: 2px; gap: 2px; }
 .seg button {
   border: none; background: transparent; font-size: 12px; color: var(--txt2);
-  padding: 5px 11px; border-radius: 6px; cursor: pointer; font-family: inherit;
+  padding: 5px 11px; border-radius: 6px; cursor: var(--cur-hand); font-family: inherit;
 }
 .seg button.on { background: #fff; color: var(--accent); box-shadow: var(--shadow-sm); font-weight: 600; }
 .switch {
   width: 42px; height: 23px; border-radius: 6px; border: 1px solid var(--line2);
-  background: rgba(220, 232, 245, .9); position: relative; cursor: pointer; padding: 0;
+  background: rgba(220, 232, 245, .9); position: relative; cursor: var(--cur-hand); padding: 0;
 }
 .switch span {
   position: absolute; top: 2px; left: 2px; width: 17px; height: 17px; border-radius: 50%;
@@ -825,7 +825,7 @@ body.resizing, body.resizing * { cursor: inherit !important; user-select: none !
 
 /* ── 问题面板 ── */
 .prob-item {
-  display: flex; gap: 8px; padding: 7px 8px; border-radius: 6px; cursor: pointer; align-items: flex-start;
+  display: flex; gap: 8px; padding: 7px 8px; border-radius: 6px; cursor: var(--cur-hand); align-items: flex-start;
 }
 .prob-item:hover { background: rgba(31, 143, 232, .1); }
 .prob-dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; flex: none; background: var(--danger); }
@@ -833,10 +833,35 @@ body.resizing, body.resizing * { cursor: inherit !important; user-select: none !
 .prob-item.info .prob-dot { background: var(--accent2); }
 .prob-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .prob-main b { font-size: 12.5px; font-weight: 500; color: var(--txt); line-height: 1.5; }
-.prob-main i { font-style: normal; font-size: 10.5px; color: var(--txt3); }
+.prob-main i { font-style: normal; font-size: 10.5px; color: var(--txt3); display: flex; align-items: center; gap: 6px; }
+/* 来源小徽标：语法 / 语义 / 运行 */
+.prob-tag {
+  font-size: 9.5px; padding: 0 4px; border-radius: 3px; line-height: 15px;
+  border: 1px solid var(--line); color: var(--txt3);
+}
+/* 顶部统计条 */
+.prob-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 2px 2px 8px; border-bottom: 1px solid var(--line); margin-bottom: 6px;
+}
+.prob-count { font-size: 11px; font-weight: 600; }
+.prob-count.err { color: var(--danger); }
+.prob-count.warn { color: #d08a20; }
+.prob-count.info { color: var(--accent2); }
+/* 报告面板：一段一段的卡片，看着像"记录" */
+.report-item {
+  border-left: 2px solid var(--accent-weak, #cfe3f8); padding: 4px 8px; margin-bottom: 6px;
+  border-radius: 0 6px 6px 0; cursor: var(--cur-hand);
+}
+.report-item:hover { background: rgba(31, 143, 232, .07); }
+.report-line { font-size: 10px; color: var(--txt3); display: block; margin-bottom: 2px; }
+.report-text {
+  margin: 0; font-family: var(--mono, Consolas, monospace); font-size: 12px; color: var(--txt);
+  white-space: pre-wrap; word-break: break-word; line-height: 1.55;
+}
 .status-link {
   display: inline-flex; align-items: center; gap: 5px; border: none; background: transparent;
-  font-size: 11.5px; color: var(--txt2); cursor: pointer; padding: 2px 4px; border-radius: 5px; font-family: inherit;
+  font-size: 11.5px; color: var(--txt2); cursor: var(--cur-hand); padding: 2px 4px; border-radius: 5px; font-family: inherit;
 }
 .status-link:hover { background: rgba(31, 143, 232, .12); color: var(--accent); }
 
@@ -941,7 +966,7 @@ body.resizing, body.resizing * { cursor: inherit !important; user-select: none !
 .lock-warn { background: var(--sem-warn-bg); }
 .cbtn {
   margin-left: auto; flex: none;
-  padding: 3px 10px; font-size: 12px; border-radius: 6px; cursor: pointer;
+  padding: 3px 10px; font-size: 12px; border-radius: 6px; cursor: var(--cur-hand);
   border: 1px solid var(--sem-warn-line); background: var(--s2); color: var(--txt);
 }
 .cbtn + .cbtn { margin-left: 0; }
@@ -1004,7 +1029,7 @@ body.resizing, body.resizing * { cursor: inherit !important; user-select: none !
 .quickopen-list { max-height: 44vh; overflow-y: auto; }
 .quickopen-item {
   display: flex; align-items: center; gap: 8px;
-  padding: 7px 16px; font-size: 12.5px; cursor: pointer;
+  padding: 7px 16px; font-size: 12.5px; cursor: var(--cur-hand);
 }
 .quickopen-item.on { background: var(--accent-weak, #e8f2fd); }
 .qo-name { color: var(--txt); font-weight: 500; }
@@ -1025,14 +1050,14 @@ body.resizing, body.resizing * { cursor: inherit !important; user-select: none !
   flex: none; min-width: 26px; height: 24px; padding: 0 6px;
   font-size: 11px; line-height: 1;
   border: 1px solid var(--line); border-radius: 6px;
-  background: var(--btn-bg, #fff); color: var(--txt2); cursor: pointer;
+  background: var(--btn-bg, #fff); color: var(--txt2); cursor: var(--cur-hand);
 }
 .sp-opt.on { background: var(--accent); border-color: var(--accent); color: #fff; }
 .sp-opt.wide { padding: 0 9px; }
 .sp-btn {
   flex: none; padding: 4px 10px; font-size: 11.5px;
   border: 1px solid var(--line); border-radius: 6px;
-  background: var(--btn-bg, #fff); color: var(--txt); cursor: pointer;
+  background: var(--btn-bg, #fff); color: var(--txt); cursor: var(--cur-hand);
 }
 .sp-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .sp-btn:disabled { opacity: 0.5; cursor: default; }
@@ -1048,7 +1073,7 @@ body.resizing, body.resizing * { cursor: inherit !important; user-select: none !
 .sp-group { margin-bottom: 2px; }
 .sp-file {
   display: flex; align-items: center; gap: 6px;
-  padding: 3px 10px; font-size: 12px; cursor: pointer; user-select: none;
+  padding: 3px 10px; font-size: 12px; cursor: var(--cur-hand); user-select: none;
 }
 .sp-file:hover { background: var(--hover, #f2f7fd); }
 .sp-caret { font-size: 9px; color: var(--txt2); transition: transform 0.12s; display: inline-block; }
@@ -1061,7 +1086,7 @@ body.resizing, body.resizing * { cursor: inherit !important; user-select: none !
 }
 .sp-hit {
   display: flex; gap: 8px; padding: 2px 10px 2px 24px;
-  font-size: 12px; cursor: pointer; font-family: Consolas, monospace;
+  font-size: 12px; cursor: var(--cur-hand); font-family: Consolas, monospace;
   white-space: pre; overflow: hidden;
 }
 .sp-hit:hover { background: var(--hover, #f2f7fd); }
@@ -1109,14 +1134,14 @@ body.resizing, body.resizing * { cursor: inherit !important; user-select: none !
 .pp-tabs { display: flex; gap: 2px; margin-left: 8px; }
 .pp-tabs button {
   padding: 4px 11px; font-size: 12px; border-radius: 6px;
-  border: 1px solid transparent; background: transparent; color: var(--txt2); cursor: pointer;
+  border: 1px solid transparent; background: transparent; color: var(--txt2); cursor: var(--cur-hand);
 }
 .pp-tabs button.on { background: var(--accent-weak, #e8f2fd); color: var(--accent-txt, #1264b8); font-weight: 600; }
 .pp-num { font-size: 10px; opacity: 0.7; }
 .pp-btn {
   display: inline-flex; align-items: center; gap: 4px;
   padding: 5px 11px; font-size: 12px; border-radius: 6px;
-  border: 1px solid var(--line); background: var(--btn-bg, #fff); color: var(--txt); cursor: pointer;
+  border: 1px solid var(--line); background: var(--btn-bg, #fff); color: var(--txt); cursor: var(--cur-hand);
 }
 .pp-btn:hover { filter: brightness(0.98); }
 .pp-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
@@ -1124,7 +1149,7 @@ body.resizing, body.resizing * { cursor: inherit !important; user-select: none !
 .pp-btn:disabled { opacity: 0.5; cursor: default; }
 .pp-x {
   width: 26px; height: 26px; border-radius: 6px; border: none;
-  background: transparent; color: var(--txt2); font-size: 14px; cursor: pointer;
+  background: transparent; color: var(--txt2); font-size: 14px; cursor: var(--cur-hand);
 }
 .pp-x:hover { background: var(--hover, #eef4fb); }
 
@@ -1161,13 +1186,13 @@ body.resizing, body.resizing * { cursor: inherit !important; user-select: none !
 .pp-perms { opacity: 0.8; }
 .pp-err { margin-top: 6px; font-size: 11.5px; color: var(--danger); }
 .pp-card-act { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; flex: none; }
-.pp-link { border: none; background: transparent; font-size: 11.5px; color: var(--txt2); cursor: pointer; }
+.pp-link { border: none; background: transparent; font-size: 11.5px; color: var(--txt2); cursor: var(--cur-hand); }
 .pp-link.danger:hover { color: var(--danger); }
 .pp-link:disabled { opacity: 0.4; cursor: default; }
 
 .pp-switch {
   width: 34px; height: 19px; border-radius: 6px; border: none; padding: 0;
-  background: #d6dee8; cursor: pointer; position: relative; transition: background 0.15s;
+  background: #d6dee8; cursor: var(--cur-hand); position: relative; transition: background 0.15s;
 }
 .pp-switch span {
   position: absolute; top: 2px; left: 2px; width: 15px; height: 15px;
@@ -1258,7 +1283,7 @@ body.resizing, body.resizing * { cursor: inherit !important; user-select: none !
 /* ── 视觉打磨：更接近真 IDE 的细节 ───────────────────────── */
 
 /* 状态栏可点击项 */
-.ws-status .sb-click { cursor: pointer; border-radius: 5px; padding: 1px 5px; transition: background 0.12s; }
+.ws-status .sb-click { cursor: var(--cur-hand); border-radius: 5px; padding: 1px 5px; transition: background 0.12s; }
 .ws-status .sb-click:hover { background: var(--hover, #e9f1fa); }
 
 /* 文件树：当前文件高亮（PyCharm 的选中条） */
@@ -1381,7 +1406,7 @@ body.resizing, body.resizing * { cursor: inherit !important; user-select: none !
 .tut-nav-ch {
   display: flex; align-items: center; gap: 8px; width: 100%;
   padding: 6px 8px; border: none; background: transparent; border-radius: 6px;
-  font-size: 12.5px; color: var(--txt); cursor: pointer; text-align: left;
+  font-size: 12.5px; color: var(--txt); cursor: var(--cur-hand); text-align: left;
 }
 .tut-nav-ch:hover { background: var(--hover, #eef4fb); }
 .tut-nav-ch.on { background: var(--sel, #dfeefc); color: var(--accent-txt, #0f5fa8); font-weight: 600; }
@@ -1407,7 +1432,7 @@ body.resizing, body.resizing * { cursor: inherit !important; user-select: none !
 .tut-nav-foot {
   padding: 10px; margin: 0 10px 12px; font-size: 12px;
   border: 1px solid var(--line); border-radius: 6px;
-  background: var(--btn-bg, #fff); color: var(--txt); cursor: pointer;
+  background: var(--btn-bg, #fff); color: var(--txt); cursor: var(--cur-hand);
 }
 .tut-nav-foot:hover { border-color: var(--accent); color: var(--accent-txt, #1264b8); }
 
@@ -1432,7 +1457,7 @@ body.resizing, body.resizing * { cursor: inherit !important; user-select: none !
 .tut-sec-title { font-size: 16px; font-weight: 650; margin: 0; flex: 1; }
 .tut-done {
   flex: none; padding: 3px 9px; font-size: 10.5px; border-radius: 6px;
-  border: 1px solid var(--line); background: transparent; color: var(--txt2); cursor: pointer;
+  border: 1px solid var(--line); background: transparent; color: var(--txt2); cursor: var(--cur-hand);
 }
 .tut-done.on { background: var(--sem-ok-bg); border-color: var(--sem-ok-line); color: var(--sem-ok); font-weight: 600; }
 .tut-lead { font-size: 13.5px; line-height: 1.85; color: var(--txt); margin: 0 0 10px; font-weight: 500; }
@@ -1452,7 +1477,7 @@ body.resizing, body.resizing * { cursor: inherit !important; user-select: none !
 .tut-cbtn {
   padding: 2px 8px; font-size: 10.5px; border-radius: 5px;
   border: 1px solid var(--line); background: var(--btn-bg, #fff);
-  color: var(--txt2); cursor: pointer;
+  color: var(--txt2); cursor: var(--cur-hand);
 }
 .tut-cbtn:hover { color: var(--txt); border-color: var(--accent); }
 .tut-cbtn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
@@ -1499,7 +1524,7 @@ body.resizing, body.resizing * { cursor: inherit !important; user-select: none !
 .tut-navbtn {
   padding: 7px 15px; font-size: 12.5px; border-radius: 6px;
   border: 1px solid var(--line); background: var(--btn-bg, #fff);
-  color: var(--txt); cursor: pointer;
+  color: var(--txt); cursor: var(--cur-hand);
 }
 .tut-navbtn:hover { border-color: var(--accent); color: var(--accent-txt, #1264b8); }
 .tut-navbtn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
@@ -1906,7 +1931,7 @@ input:focus, .sp-input:focus, .prompt-input:focus, .rename-input:focus {
   margin-left: auto;
   font-size: 11px !important;
   color: var(--t4) !important;
-  cursor: pointer;
+  cursor: var(--cur-hand);
 }
 .monaco-editor .suggest-details .body .header .codicon-close:hover { color: var(--t2) !important; }
 
@@ -1934,7 +1959,7 @@ input:focus, .sp-input:focus, .prompt-input:focus, .rename-input:focus {
   flex: none; display: inline-flex; align-items: center; justify-content: center;
   width: 26px; height: 22px; margin: 0 2px;
   border: none; background: transparent; color: var(--t3);
-  border-radius: 4px; cursor: pointer; align-self: center;
+  border-radius: 4px; cursor: var(--cur-hand); align-self: center;
 }
 .tab-new:hover { background: var(--s4); color: var(--t1); }
 
@@ -2008,3 +2033,10 @@ input:focus, .sp-input:focus, .prompt-input:focus, .rename-input:focus {
   margin: -2px 0 10px;
   padding-left: 2px;
 }
+
+/* ── 鼠标指针：系统主题的白色指针在白底上看不见，换成一概黑箭头 + 白描边 ── */
+:root {
+  --cur-arrow: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'><path d='M3.2 2.2l13.2 8.4-5.9 1.2-2.3 6z' fill='%23111' stroke='%23fff' stroke-width='1.6' stroke-linejoin='round'/></svg>") 3 3, default;
+  --cur-hand: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='22' height='22' viewBox='0 0 22 22'><path d='M7 11V5.6a1.3 1.3 0 012.6 0V10h.9V4.3a1.3 1.3 0 012.6 0V10h.9V5.6a1.3 1.3 0 012.6 0v7.6c0 3.6-2.2 6-5.6 6-2.2 0-3.6-.9-4.8-2.6l-2.3-3.4a1.3 1.3 0 012-1.6l1 1.1z' fill='%23111' stroke='%23fff' stroke-width='1.4' stroke-linejoin='round'/></svg>") 8 3, pointer;
+}
+html, body { cursor: var(--cur-arrow); }

@@ -173,7 +173,13 @@ class ExprParser {
       const close = this.expect('}', '字典结束 }');
       return { k: 'dict', entries, ...this.span(t, close) };
     }
-    throw new ParseError(`这里应该是一个值，实际是${describeTok(t)}`, t, 'value');
+    // 报错要"说人话"：不光说该有什么，还说要怎么改
+    if (t.k === 'eof') {
+      throw new ParseError('这行还没写完：少了一个值，可能是括号没关、或者漏了右半边', t, 'value');
+    }
+    throw new ParseError(
+      `这里应该填一个值（数字、字符串、变量都行），现在是${describeTok(t)}`, t, 'value'
+    );
   }
 
   /** 字符串字面量 → 支持 {变量/表达式} 插值，编译成字符串拼接 */
@@ -495,6 +501,9 @@ export function parseProgram(file: string, src: string): Program {
         case 'ask': return parseAsk(ln, toks);
         case 'print':
           return parsePrint(ln, toks);   // print(a) 与 print a 都走这里，括号可选
+        case '报告':
+        case 'report':
+          return parseReport(ln, toks);  // 写法跟 print 一样，输出到右侧「报告」
         case 'import': return parseImport(ln, toks);
         case 'time':
           if (toks[1]?.v === 'read') { i++; return { k: 'timeRead', ...stmtSpan(ln) }; }
@@ -784,6 +793,15 @@ export function parseProgram(file: string, src: string): Program {
       ? parserFor(rest[0].v === '(' ? rest.slice(1, rest[rest.length - 1]?.v === ')' ? -1 : undefined) : rest).parseAll()
       : ({ k: 'str', v: '', ...stmtSpan(ln) } as Expr);
     return { k: 'ask', question, ...stmtSpan(ln) };
+  };
+
+  /** 报告：写法跟 print 一样，只是输出到右侧「报告」面板 */
+  const parseReport = (ln: Line, toks: Token[]): Stmt => {
+    i++;
+    const p = parserFor(toks.slice(1));
+    const args = p.at('(') ? p.parseArgs() : p.parseAllList();
+    if (!p.atEnd()) throw new ParseError('报告 后面多了内容', p.cur, 'report');
+    return { k: 'report', args, ...stmtSpan(ln) };
   };
 
   const parsePrint = (ln: Line, toks: Token[]): Stmt => {

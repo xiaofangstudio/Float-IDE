@@ -605,6 +605,15 @@ impl Parser {
                     }
                     return Ok(Some(Stmt::new(StmtKind::Return(Some(first_e)), self.line_span(ln))));
                 }
+                "报告" | "report" => {
+                    self.pos += 1;
+                    let mut ep = ExprParser::new(&toks[1..], &self.file);
+                    let args = if ep.at("(") { ep.parse_args()? } else { ep.parse_expr_list()? };
+                    if !ep.at_end() {
+                        return Err(FloatError::new("报告 后面多了内容", self.line_span(ln)));
+                    }
+                    return Ok(Some(Stmt::new(StmtKind::Report(args), self.line_span(ln))));
+                }
                 "print" => {
                     self.pos += 1;
                     let mut ep = ExprParser::new(&toks[1..], &self.file);

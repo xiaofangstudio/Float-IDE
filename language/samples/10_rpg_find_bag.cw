@@ -19,14 +19,6 @@ fn show_places(xs)
         print(join("   ", i, ". ", p))
         i++
 
-fn idx_of(xs, target)
-    int i = 0
-    for x in xs
-        if (x == target)
-            return i
-        i++
-    return -1
-
 int secret = rand(0, len(places) - 1)
 str answer = places[secret]
 int stamina = 7
