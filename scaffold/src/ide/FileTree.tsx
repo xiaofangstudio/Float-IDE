@@ -140,20 +140,33 @@ export function FileTree({ projectDir, activePath, bus, onDirtyTree }: Props) {
 
   const renderNode = (node: TreeNode, depth: number): React.ReactNode => {
     const isOpen = expanded.has(node.path);
+    const isActive = !node.isDir && activePath
+      && node.path.replace(/\\/g, '/') === activePath.replace(/\\/g, '/');
     return (
       <React.Fragment key={node.path}>
         <div
-          className={`tree-item ${depth === 0 && node.isDir ? 'root' : ''} ${
-            !node.isDir && activePath && node.path.replace(/\\/g, '/') === activePath.replace(/\\/g, '/') ? 'active' : ''
-          }`}
-          style={{ paddingLeft: 6 + depth * 13 }}
+          className={`tree-item ${depth === 0 && node.isDir ? 'root' : ''} ${isActive ? 'active' : ''}`}
+          style={{ paddingLeft: 4 + depth * 14 }}
           onClick={() => (node.isDir ? void toggleDir(node) : void bus.current.editor?.openFile(node.path))}
           onContextMenu={(e) => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY, node }); }}
+          title={node.path}
         >
+          {/* 缩进引导线：每一层一条竖线，层级一眼可辨 */}
+          {Array.from({ length: depth }, (_, k) => (
+            <span key={k} className="ti-guide" />
+          ))}
+          {/* 展开三角：目录才有，文件位置留白对齐 */}
+          <span className={`ti-caret ${node.isDir ? '' : 'blank'} ${isOpen ? 'open' : ''}`}>
+            {node.isDir && (
+              <svg width="9" height="9" viewBox="0 0 9 9">
+                <path d="M3 1.8L6.2 4.5 3 7.2" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            )}
+          </span>
           {node.isDir
-            ? <span className="fi dir"><IconFolder size={13} /></span>
+            ? <span className={`fi dir ${isOpen ? 'open' : ''}`}><IconFolder size={13} /></span>
             : <span className={`fi ${fileKind(node.name)}`}><IconFile size={13} /></span>}
-          <span>{node.name}</span>
+          <span className="ti-name">{node.name}</span>
         </div>
         {node.isDir && isOpen && (children.get(node.path) ?? []).map((c) => renderNode(c, depth + 1))}
       </React.Fragment>

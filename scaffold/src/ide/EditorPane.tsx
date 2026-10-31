@@ -6,7 +6,8 @@ import { api } from '../core/tauri';
 import type { ProblemItem } from '../core/types';
 import { registerFloatLanguage, LANG_ID, validateModel } from '../lang/floatlang';
 import { loadSettings, SETTINGS_EVENT, type Settings } from '../ui/settings';
-import { IconClose } from '../ui/icons';
+import { askText } from '../ui/prompt';
+import { IconClose, IconPlus } from '../ui/icons';
 
 /* Float 编辑器：多标签 + Monaco（.cw 高亮/补全/悬停）+ 断点 + 当前执行行 + Ctrl+S。 */
 
@@ -54,9 +55,15 @@ monaco.editor.defineTheme('float-light', {
     'editorWidget.background': '#ffffff',
     'editorWidget.border': '#dee5ef',
     'editorSuggestWidget.background': '#ffffff',
-    'editorSuggestWidget.border': '#dee5ef',
+    'editorSuggestWidget.border': '#c4d0e0',
+    'editorSuggestWidget.foreground': '#1f2b3a',
     'editorSuggestWidget.selectedBackground': '#e9f1fc',
+    'editorSuggestWidget.selectedForeground': '#0a3d91',
+    'editorSuggestWidget.selectedIconForeground': '#1567c6',
     'editorSuggestWidget.highlightForeground': '#1567c6',
+    'editorSuggestWidget.focusHighlightForeground': '#0a3d91',
+    'editorSuggestWidgetStatus.foreground': '#77899f',
+    'editorWidget.foreground': '#1f2b3a',
     'editorHoverWidget.background': '#ffffff',
     'editorHoverWidget.border': '#dee5ef',
     'scrollbarSlider.background': '#c8d5e6aa',
@@ -101,9 +108,14 @@ monaco.editor.defineTheme('float-dark', {
     'editorWidget.background': '#16222f',
     'editorWidget.border': '#24323f',
     'editorSuggestWidget.background': '#16222f',
-    'editorSuggestWidget.border': '#24323f',
+    'editorSuggestWidget.border': '#3a4f66',
+    'editorSuggestWidget.foreground': '#cfdae7',
     'editorSuggestWidget.selectedBackground': '#1b3348',
+    'editorSuggestWidget.selectedForeground': '#a8d4ff',
+    'editorSuggestWidget.selectedIconForeground': '#6fb6ff',
     'editorSuggestWidget.highlightForeground': '#6fb6ff',
+    'editorSuggestWidget.focusHighlightForeground': '#a8d4ff',
+    'editorSuggestWidgetStatus.foreground': '#6d8095',
     'editorHoverWidget.background': '#16222f',
     'editorHoverWidget.border': '#24323f',
     'scrollbarSlider.background': '#2a3a4a88',
@@ -162,6 +174,8 @@ export type EditorHandle = {
   insertAtCursor: (text: string) => void;
   /** 用新内容替换当前编辑器全文 */
   replaceActiveText: (text: string) => void;
+  /** 新建文件（标签栏 + 按钮用） */
+  newFile: () => Promise<void>;
   /** 打开（或切到）一个文档标签页 */
   openDoc: (doc: DocTab) => void;
   /** 关闭文档标签页 */
@@ -261,7 +275,8 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
       edRef.current?.updateOptions({
         fontSize: st.fontSize,
         tabSize: st.tabSize,
-        wordWrap: st.wordWrap ? 'on' : 'off'
+        wordWrap: st.wordWrap ? 'on' : 'off',
+        suggest: { preview: st.suggestDocs, showStatusBar: true, showInlineDetails: true }
       });
       fontSizeRef.current = st.fontSize;
       applyTheme();
@@ -297,8 +312,20 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
       lineNumbersMinChars: 3,
       renderLineHighlight: 'all',
       suggestSelection: 'first',
-      quickSuggestions: { other: true, comments: false, strings: false },
-      acceptSuggestionOnEnter: 'on'
+      /* 补全弹窗：开右侧文档预览 + 底部状态条 + 行内类型，信息给足 */
+      suggest: {
+        preview: true,
+        showStatusBar: true,
+        showInlineDetails: true,
+        insertMode: 'replace',
+        snippetsPreventQuickSuggestions: false
+      },
+      quickSuggestions: { other: true, comments: false, strings: true },
+      quickSuggestionsDelay: 80,
+      acceptSuggestionOnEnter: 'on',
+      tabCompletion: 'on',
+      wordBasedSuggestions: 'off',
+      snippetSuggestions: 'top'
     });
     edRef.current = ed;
     const diffEd = monaco.editor.createDiffEditor(diffHostRef.current, {
@@ -598,6 +625,27 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
     });
   }, [activeTab, diffSpec]);
 
+  /** 标签栏「+」：在工程根新建一个 .cw 文件并打开 */
+  const newFile = useCallback(async (): Promise<void> => {
+    const name = await askText('新建文件', {
+      placeholder: '文件名，如 tools.cw',
+      hint: '不写后缀会自动补 .cw',
+      validate: (v) => (/[\\/:*?"<>|]/.test(v) ? '名称里不能有 \\ / : * ? " < > |' : null)
+    });
+    if (!name) return;
+    const finalName = /\.[A-Za-z0-9]{1,8}$/.test(name) ? name : name + '.cw';
+    const root = projectDir.replace(/\\/g, '/').replace(/\/+$/, '');
+    const path = `${root}/${finalName}`;
+    try {
+      await api.fsWrite(path, /\.cw$/i.test(finalName)
+        ? '// 新建的 Float Script 文件\n\nprint("你好，Float Script")\n'
+        : '');
+      await openFile(path);
+    } catch (e) {
+      setStatus('新建失败：' + String(e));
+    }
+  }, [projectDir, openFile]);
+
   /** 外部（全局替换 / 重命名）改写缓冲区后，同步 mtime 再走一次保存 */
   const setContent = useCallback((path: string, text: string): void => {
     const m = modelsRef.current.get(path);
@@ -631,7 +679,7 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
       refreshBpDecor,
       openDiff, closeDiff,
       runAction, zoom, toggleBreakpoint,
-      openDoc, closeDoc,
+      openDoc, closeDoc, newFile,
       activeDocId: () => activeDocRef.current,
       currentPath: () => activePathRef.current,
       cursor: () => {
@@ -660,7 +708,7 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
       }
     };
     return () => { delete bus.current.editor; };
-  }, [bus, openFile, closeTab, saveAll, saveOne, setContent, revealLine, refreshBpDecor, openDiff, closeDiff, runAction, zoom, toggleBreakpoint, openDoc, closeDoc]);
+  }, [bus, openFile, closeTab, saveAll, saveOne, setContent, revealLine, refreshBpDecor, openDiff, closeDiff, runAction, zoom, toggleBreakpoint, openDoc, closeDoc, newFile]);
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0 }}>
@@ -702,6 +750,10 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
             </span>
           </div>
         )}
+        {/* 新建标签：鼠标点这里就能新建文件，不用记 Ctrl+N */}
+        <button className="tab-new" title="新建文件（Ctrl+N）" onClick={() => void newFile()}>
+          <IconPlus size={12} />
+        </button>
       </div>
       <div style={{ position: 'relative', flex: 1, minHeight: 0 }}>
         <div

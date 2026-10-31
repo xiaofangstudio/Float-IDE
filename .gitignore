@@ -19,7 +19,9 @@ scaffold/.ec[0-9]*/
 scaffold/.ep[0-9]*/
 scaffold/.edgepr*/
 scaffold/.edgeprof*/
+scaffold/.e*/
 _check-*.png
+_e*.png
 _selftest-dom.html
 
 # ===== 本地 / 工具 =====

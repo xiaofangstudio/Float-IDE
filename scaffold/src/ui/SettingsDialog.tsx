@@ -56,6 +56,25 @@ export function SettingsDialog({ onClose, onAppearance, embedded }: { onClose: (
           </section>
 
           <section>
+            <h4>界面</h4>
+            <div className="set-row">
+              <label>紧凑模式</label>
+              <button className={`switch ${s.compact ? 'on' : ''}`} onClick={() => set('compact', !s.compact)}><span /></button>
+            </div>
+            <div className="set-hint">行高与内边距收紧，一屏能多看几行代码。喜欢宽松的可以关掉。</div>
+            <div className="set-row">
+              <label>界面动画</label>
+              <button className={`switch ${s.animations ? 'on' : ''}`} onClick={() => set('animations', !s.animations)}><span /></button>
+            </div>
+            <div className="set-hint">面板淡入、按钮悬停位移等。关掉后界面瞬间响应，不拖泥带水。</div>
+            <div className="set-row">
+              <label>补全详情面板</label>
+              <button className={`switch ${s.suggestDocs ? 'on' : ''}`} onClick={() => set('suggestDocs', !s.suggestDocs)}><span /></button>
+            </div>
+            <div className="set-hint">补全时在右侧显示这个函数的说明与用法。关掉只留候选列表。</div>
+          </section>
+
+          <section>
             <h4>文件与运行</h4>
             <div className="set-row">
               <label>自动保存</label>

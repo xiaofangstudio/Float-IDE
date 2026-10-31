@@ -75,6 +75,12 @@ export function Workspace({ projectDir, onExit }: Props) {
   }, []);
 
   const bus = useRef<{ editor?: EditorHandle }>({});
+  /* 无头测试钩子：只有 ?debug=1 才挂到 window，正常使用不暴露 */
+  useEffect(() => {
+    if (new URLSearchParams(location.search).get('debug') !== '1') return;
+    (window as unknown as { __floatBus?: unknown }).__floatBus = bus.current;
+  }, []);
+
   /* 工程索引：跨文件搜索、跳转定义、重命名都靠它 */
   const indexRef = useRef<ProjectIndex | null>(null);
   if (!indexRef.current) {
@@ -644,6 +650,10 @@ export function Workspace({ projectDir, onExit }: Props) {
       if (mod && e.shiftKey && e.code === 'KeyH') { e.preventDefault(); openTutorial(); return; }
       // 注意要排除 Shift：Ctrl+Shift+P 是命令面板，不能被快速开文件抢走
       if (mod && !e.shiftKey && e.code === 'KeyP') { e.preventDefault(); setQuickOpen({ q: '', list: [], sel: 0 }); return; }
+      // Ctrl+Space：手动唤出补全（IDE 标准键位）
+      if (mod && e.code === 'Space') { e.preventDefault(); ed?.runAction('editor.action.triggerSuggest'); return; }
+      // Ctrl+/ 之外再给一个「参数提示」
+      if (mod && e.shiftKey && e.code === 'Space') { e.preventDefault(); ed?.runAction('editor.action.triggerParameterHints'); return; }
       if (e.code === 'F12') { e.preventDefault(); gotoDefinition(); return; }
       if (e.code === 'F2') { e.preventDefault(); startRename(); return; }
 

@@ -67,7 +67,6 @@ export function TitleBar({ title, subtitle, center, right }: Props) {
   return (
     <div className="titlebar" data-tauri-drag-region>
       <div className="tb-left" data-tauri-drag-region>
-        <span className="tb-brand" data-tauri-drag-region>FLOAT</span>
         <span className="tb-title" data-tauri-drag-region>{title}</span>
         {subtitle && (<><span className="tb-sep" data-tauri-drag-region>/</span><span className="tb-sub" data-tauri-drag-region>{subtitle}</span></>)}
       </div>

@@ -80,9 +80,13 @@ const files = new Map<string, string>([
   [`${PROJECT}/project.json`, JSON.stringify({ name: '示例工程', entry: 'main.cw', version: '0.7.0', kind: 'float' }, null, 2)],
   [`${PROJECT}/main.cw`, MAIN],
   [`${PROJECT}/lib.cw`, LIB],
+  [`${PROJECT}/core/engine.cw`, '// 引擎\nfunction tick()\n    return 1\n'],
+  [`${PROJECT}/core/util/str.cw`, '// 字符串工具\nfunction pad(s, n)\n    return s\n'],
   [`${PROJECT}/README.md`, '# 示例工程\n\n这是 Float IDE 的界面预览工程。\n']
 ]);
-const dirs = new Set<string>([PROJECT, `${PROJECT}/.float`]);
+const dirs = new Set<string>([
+  PROJECT, `${PROJECT}/.float`, `${PROJECT}/core`, `${PROJECT}/core/util`
+]);
 const mtimes = new Map<string, number>();
 
 const mtimeOf = (p: string): number => {
@@ -106,10 +110,16 @@ function listDir(dir: string): { name: string; relPath: string; isDir: boolean; 
   for (const p of files.keys()) {
     if (!p.startsWith(d + '/')) continue;
     const rest = p.slice(d.length + 1);
-    const name = rest.split('/')[0];
+    const parts = rest.split('/');
+    const name = parts[0];
     if (seen.has(name)) continue;
     seen.add(name);
-    out.push({ name, relPath: name, isDir: false, size: (files.get(p) ?? '').length });
+    if (parts.length > 1) {
+      // 路径里还有下一层 → 这是个子目录，不是文件
+      out.push({ name, relPath: name, isDir: true, size: 0 });
+    } else {
+      out.push({ name, relPath: name, isDir: false, size: (files.get(p) ?? '').length });
+    }
   }
   for (const dd of dirs) {
     if (dd === d || !dd.startsWith(d + '/')) continue;
@@ -268,6 +278,22 @@ if (host) {
       <PromptHost />
     </>
   );
+  // ?expand=1 展开文件树的目录，方便看嵌套结构
+  if (new URLSearchParams(location.search).get('expand') === '1') {
+    window.setTimeout(() => {
+      const items = [...document.querySelectorAll('.tree-item')] as HTMLElement[];
+      for (const it of items) {
+        if ((it.textContent ?? '').trim() === 'core') it.click();
+      }
+      window.setTimeout(() => {
+        const items2 = [...document.querySelectorAll('.tree-item')] as HTMLElement[];
+        for (const it of items2) {
+          if ((it.textContent ?? '').trim() === 'util') it.click();
+        }
+      }, 500);
+    }, 1500);
+  }
+
   // ?learn=1 在欢迎页里直接展开学习中心
   if (new URLSearchParams(location.search).get('learn') === '1') {
     window.setTimeout(() => {
@@ -440,6 +466,62 @@ async function selftest(): Promise<void> {
   ok('MCP 页能打开（标签）', !!q('.mcp-panel') && !!q('.doc-host'));
   ok('MCP 配置片段可见', !!q('.mcp-code'));
   ok('MCP 工具清单已列出', qa('.mcp-tool').length === 8, `${qa('.mcp-tool').length} 个工具`);
+
+  /* 7.5 自动补全：真的能唤出来，而且有像样的 UI */
+  {
+    const bus = (window as unknown as { __floatBus?: {
+      editor?: { insertAtCursor: (t: string) => void; runAction: (id: string) => void };
+    } }).__floatBus;
+    // 无头 + 虚拟时间下浏览器根本不发帧，requestAnimationFrame 一次都不跑，
+    // 而 Monaco 的补详情面板是 rAF 排的。这里临时把 rAF 垫成 setTimeout，测完还原。
+    const rafOrig = window.requestAnimationFrame.bind(window);
+    (window as unknown as { requestAnimationFrame: unknown }).requestAnimationFrame =
+      (cb: FrameRequestCallback): number => window.setTimeout(() => cb(performance.now()), 8);
+    // 先回到编辑器（补全面板打开时可能停在别的页）
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Escape', bubbles: true }));
+    await sleep(300);
+    ok('调试钩子可用', !!bus?.editor);
+    if (bus?.editor) {
+      bus.editor.insertAtCursor('\npri');
+      await sleep(150);
+      bus.editor.runAction('editor.action.triggerSuggest');
+      await sleep(900);
+      const sw = q('.suggest-widget');
+      ok('补全弹窗能唤出', !!sw);
+      const rows = qa('.suggest-widget .monaco-list-row');
+      ok('补全有候选项', rows.length > 0, `${rows.length} 项`);
+      ok('候选项有类型图标', qa('.suggest-widget .suggest-icon').length > 0);
+      const dl = q('.suggest-widget .details-label');
+      ok('有右侧类型标注', !!dl, (dl?.textContent ?? '').slice(0, 24));
+      ok('有底部操作提示条', !!q('.suggest-widget .suggest-status-bar'));
+      // 展开箭头：Monaco 只在「候选项带 documentation」时才给它绑 onclick，
+      // 所以 onclick 存在 == 文档面板是真的能展开的。
+      const more = q('.suggest-widget .readMore') as HTMLElement | null;
+      const bound = more && typeof (more as unknown as { onclick?: unknown }).onclick === 'function';
+      ok('候选项带可展开的文档', !!bound,
+        bound ? '展开箭头已绑定（说明 documentation 有内容）' : 'readMore 没绑 onclick，怀疑 item 缺 documentation');
+
+      // 真的点一下：先给列表 DOM 焦点（无头下 Monaco 的 .focused 行状态依赖它），再点箭头
+      const list = q('.suggest-widget .monaco-list') as HTMLElement | null;
+      list?.focus();
+      (q('.suggest-widget .monaco-list-row') as HTMLElement | null)?.focus();
+      if (more) {
+        more.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+        more.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+        more.click();
+      }
+      await sleep(600);
+      if (!q('.suggest-details-container')) bus.editor.runAction('toggleSuggestionDetails');
+      await sleep(400);
+      const det = q('.suggest-details') ?? q('.suggest-details-container');
+      ok('展开后有文档说明面板', !!det, det
+        ? (det.textContent ?? '').slice(0, 40)
+        : `未渲染（focused=${!!q('.suggest-widget .monaco-list-row.focused')}，widget="${sw?.className ?? '无'}"）`);
+      window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Escape', bubbles: true }));
+      await sleep(200);
+    }
+    (window as unknown as { requestAnimationFrame: unknown }).requestAnimationFrame = rafOrig;
+  }
 
   /* 8. 重命名对话框 */
   window.dispatchEvent(new KeyboardEvent('keydown', { code: 'F2', bubbles: true }));
