@@ -1,4 +1,4 @@
-/* Float Script 内建函数库。
+/* CW Script 内建函数库。
  *
  * 同一张表被两处使用：
  * 1. 表达式求值：`x = add(a, b)`、`print(len(nums))`、`if (contain(s, "a"))`

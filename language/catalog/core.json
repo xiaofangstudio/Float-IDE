@@ -1,6 +1,6 @@
 {
-  "$schema": "float-language-catalog/1",
-  "name": "Float Script",
+  "$schema": "cw-language-catalog/1",
+  "name": "CW Script",
   "shortName": "Float",
   "version": "0.4.0",
   "basedOn": "CW Script（代码世界）",
@@ -200,7 +200,7 @@
     {
       "ast": "func_def",
       "category": "function",
-      "syntax": "function name(a, b = 默认值)\nfunction bool name()\nfn name()\nf name()",
+      "syntax": "fn name(a, b = 默认值)\nfn bool name()\nfunction name() / f name()（旧写法，仍兼容）",
       "body": true,
       "notes": "0.2 起支持多参数、默认值、递归与返回值；函数在顶层先注册，允许先用后定义"
     },
@@ -227,7 +227,7 @@
     {
       "ast": "method_def",
       "category": "class",
-      "syntax": "function 方法名(参数)",
+      "syntax": "fn 方法名(参数)",
       "body": true
     },
     {

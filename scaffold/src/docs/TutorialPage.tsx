@@ -54,7 +54,7 @@ function CodeBlock({ sample, onRun, onOpenInEditor }: {
     <div className="tut-code-wrap">
       <div className="tut-code">
         <div className="tut-code-head">
-          <span className="tut-code-lang">Float Script</span>
+          <span className="tut-code-lang">CW Script</span>
           <span className="tool-grow" />
           <button className="tut-cbtn" onClick={copy}>{copied ? '已复制' : '复制'}</button>
           {onOpenInEditor && (
@@ -140,7 +140,7 @@ export function TutorialPage({ onOpenInEditor, onRun, onOpenPluginsDoc }: Props)
       {/* 左：目录 */}
       <aside className="tut-nav">
         <div className="tut-nav-head">
-          <div className="tut-nav-title">Float Script 教程</div>
+          <div className="tut-nav-title">CW Script 教程</div>
           <div className="tut-nav-sub">{TUTORIAL_STATS.chapters} 章 · {TUTORIAL_STATS.sections} 节 · {TUTORIAL_STATS.samples} 个示例</div>
           <div className="tut-progress">
             <div className="tut-progress-bar"><span style={{ width: progress + '%' }} /></div>

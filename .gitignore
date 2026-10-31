@@ -8,6 +8,7 @@ reference/
 scaffold/node_modules/
 scaffold/dist/
 scaffold/src-tauri/target/
+scaffold/src-tauri/float-lang/target/
 scaffold/src-tauri/gen/
 
 # ===== 运行时二进制（ffmpeg 约 154M，不进仓库；走 Releases）=====

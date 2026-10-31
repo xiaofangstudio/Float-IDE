@@ -39,7 +39,7 @@ export type PluginHostOptions = {
     getPath: () => string | null;
     getCursor: () => { line: number; col: number } | null;
   };
-  /** 运行一段 Float Script，返回输出与错误 */
+  /** 运行一段 CW Script，返回输出与错误 */
   runCode: (code: string) => Promise<{ out: string[]; error: string | null }>;
 };
 

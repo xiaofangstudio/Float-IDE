@@ -21,6 +21,10 @@ type Props = {
 export function SidePanels({ source, file, onReveal, vars, running, width, tabRequest, problems, onOpenProblem }: Props) {
   const [tab, setTab] = useState<'outline' | 'vars' | 'problems'>('outline');
   const outline = useMemo(() => extractOutline(source), [source]);
+  // 变量分成两组：脚本自己的变量，和语言自带的特殊变量（ans / __last_*）
+  const isSpecial = (n: string): boolean => n === 'ans' || n.startsWith('__');
+  const normalVars = useMemo(() => vars.filter((v) => !isSpecial(v.name)), [vars]);
+  const specialVars = useMemo(() => vars.filter((v) => isSpecial(v.name)), [vars]);
 
   useEffect(() => {
     if (tabRequest) setTab(tabRequest.tab);
@@ -80,18 +84,41 @@ export function SidePanels({ source, file, onReveal, vars, running, width, tabRe
         ) : (
           <>
             {!running && vars.length === 0 && (
-              <div className="muted">运行或调试时，变量与特殊变量（__last_* / ans）会实时出现在这里。</div>
+              <div className="muted">运行或调试时，变量会实时出现在这里。</div>
             )}
             {vars.length === 0 && running && <div className="muted">还没有变量。</div>}
-            {vars.map((v) => (
-              <div className="kv" key={v.name}>
-                <span><code className="inline">{v.name}</code></span>
-                <span style={{ textAlign: 'right' }}>
-                  <b className="mono" style={{ fontSize: 11.5 }}>{v.type}</b>
-                  <span className="mono" style={{ marginLeft: 8, userSelect: 'text' }}>{v.value}</span>
-                </span>
-              </div>
-            ))}
+            {vars.length > 0 && (
+              <>
+                {/* 上面：脚本自己的变量（名字 + 类型 + 当前值） */}
+                <div className="vsec-tag">变量</div>
+                {normalVars.length === 0 && <div className="muted" style={{ paddingLeft: 2 }}>还没有普通变量</div>}
+                {normalVars.map((v) => (
+                  <div className="kv" key={v.name}>
+                    <span><code className="inline">{v.name}</code></span>
+                    <span style={{ textAlign: 'right' }}>
+                      <b className="mono" style={{ fontSize: 11.5 }}>{v.type}</b>
+                      <span className="mono" style={{ marginLeft: 8, userSelect: 'text' }}>{v.value}</span>
+                    </span>
+                  </div>
+                ))}
+                {/* 分割线下面：语言自己的特殊变量（ans / __last_*） */}
+                {specialVars.length > 0 && (
+                  <>
+                    <div className="vsec-split" />
+                    <div className="vsec-tag special">特殊变量</div>
+                    {specialVars.map((v) => (
+                      <div className="kv special" key={v.name}>
+                        <span><code className="inline">{v.name}</code></span>
+                        <span style={{ textAlign: 'right' }}>
+                          <b className="mono" style={{ fontSize: 11.5 }}>{v.type}</b>
+                          <span className="mono" style={{ marginLeft: 8, userSelect: 'text' }}>{v.value}</span>
+                        </span>
+                      </div>
+                    ))}
+                  </>
+                )}
+              </>
+            )}
           </>
         )}
       </div>

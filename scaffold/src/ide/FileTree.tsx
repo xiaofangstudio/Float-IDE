@@ -97,7 +97,7 @@ export function FileTree({ projectDir, activePath, bus, onDirtyTree }: Props) {
         await api.fsWrite(
           p,
           /\.cw$/i.test(finalName)
-            ? '// 新建的 Float Script 文件\n\nprint("你好，Float Script")\n'
+            ? '// 新建的 CW Script 文件\n\nprint("你好，CW Script")\n'
             : ''
         );
       }

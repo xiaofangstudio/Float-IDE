@@ -49,13 +49,13 @@
 
 放进去 → 打开「插件」面板 → 它已经在列表里了 → 按 `Ctrl+Shift+P` 搜「打个招呼」就能执行。
 
-`run` 里就是一段 **Float Script**，会被语言内核真跑一遍，输出进控制台。
+`run` 里就是一段 **CW Script**，会被语言内核真跑一遍，输出进控制台。
 
 ### 命令能做的三件事
 
 | 字段 | 作用 |
 | --- | --- |
-| `run` | 跑一段 Float Script |
+| `run` | 跑一段 CW Script |
 | `insert` | 往当前编辑器插入文本 |
 | `handler` | 调用 `main.js` 里 `commands` 导出的同名函数 |
 
@@ -148,7 +148,7 @@ module.exports = {
 | `float.editor.insert(t)` | 在光标处插入 | `editor:write` |
 | `float.editor.getPath()` | 当前文件路径 | 不需要 |
 | `float.editor.getCursor()` | `{ line, col }` | 不需要 |
-| `float.language.run(code)` | 跑一段 Float Script，拿 `{ out, error }` | `language:run` |
+| `float.language.run(code)` | 跑一段 CW Script，拿 `{ out, error }` | `language:run` |
 | `float.console.print(msg)` | 写控制台 | `console:write` |
 | `float.console.error(msg)` | 写控制台（错误色） | `console:write` |
 | `float.ui.notify(msg)` | 界面提示 | `ui:notify` |

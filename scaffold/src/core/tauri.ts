@@ -37,6 +37,11 @@ export const api = {
   projectImportZip: (zipPath: string, destDir: string) =>
     invoke<string>('project_import_zip', { zipPath, destDir }),
   pickFolder: (title: string) => invoke<string | null>('pick_folder', { title }),
+  /** 选单个文件（.cw 之类）。"打开"以前只能选文件夹，所以根本看不到脚本文件 */
+  pickOpenFile: (title: string, exts: string[] = ['cw']) =>
+    invoke<string | null>('pick_open_file', { title, exts }),
+  /** 启动参数里带进来的路径（双击 .cw 打开时） */
+  startupPath: () => invoke<string | null>('startup_path'),
   pickSaveFile: (title: string, defaultName: string, ext: string) =>
     invoke<string | null>('pick_save_file', { title, defaultName, ext }),
   openPath: (path: string) => invoke<void>('open_path', { path }),

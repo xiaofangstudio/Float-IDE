@@ -1,4 +1,4 @@
-/* Float Script 语法层：缩进定块 + 行式语句 + Pratt 表达式 → AST。
+/* CW Script 语法层：缩进定块 + 行式语句 + Pratt 表达式 → AST。
  *
  * 与 0.1.0 的差别（也是这次重写的目的）：
  * - 所有指令参数都是表达式：`for i in range(n)` 的 n 可以是变量、`range(n-1)`、`range(a*2)`

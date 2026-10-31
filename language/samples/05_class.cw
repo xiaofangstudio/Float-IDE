@@ -5,14 +5,14 @@ class Animal
     str name = ""
     int hp = 10
 
-    function init(name, hp)
+    fn init(name, hp)
         self.name = name
         self.hp = hp
 
-    function speak()
+    fn speak()
         return "……"
 
-    function hurt(damage)
+    fn hurt(damage)
         hp -= damage
         if (hp < 0)
             hp = 0
@@ -21,16 +21,16 @@ class Animal
 class Dog extends Animal
     str breed = "土狗"
 
-    function init(name, breed)
+    fn init(name, breed)
         super(name, 20)
         self.breed = breed
 
     // 覆盖父类方法，方法里可以直接用 self.name
-    function speak()
+    fn speak()
         return join(name, "（", breed, "）：汪！")
 
 class Cat extends Animal
-    function speak()
+    fn speak()
         return join(name, "：喵～")
 
 Dog d = new Dog("大黄", "中华田园犬")

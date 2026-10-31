@@ -17,7 +17,7 @@ const starter = `{
   "name": "起步片段包",
   "version": "1.0.0",
   "publisher": "小方工作室",
-  "description": "把最常用的 Float Script 写法做成片段与命令，输入前缀就能展开。纯声明式，不需要任何脚本。",
+  "description": "把最常用的 CW Script 写法做成片段与命令，输入前缀就能展开。纯声明式，不需要任何脚本。",
   "tags": ["snippet", "productivity"],
   "contributes": {
     "snippets": [
@@ -38,7 +38,7 @@ const starter = `{
       { "label": "range", "detail": "计数范围", "insert": "range(" }
     ],
     "commands": [
-      { "id": "float.starter.hello", "title": "起步包：在控制台打个招呼", "category": "插件", "run": "print(\\"你好，Float Script！\\")" },
+      { "id": "float.starter.hello", "title": "起步包：在控制台打个招呼", "category": "插件", "run": "print(\\"你好，CW Script！\\")" },
       { "id": "float.starter.note", "title": "起步包：插入文件头注释", "category": "插件", "when": "editor", "insert": "// \${file}\\n// 创建于 \${date}\\n\\n" }
     ],
     "menus": {
@@ -85,7 +85,9 @@ async function countAll() {
 module.exports = {
   activate(float) {
     float.commands.register('float.stats.count', countAll);
-    float.console.print('代码统计插件已启用');
+    // 启用时不往控制台打字：控制台只留脚本输出和真正的错误，
+    // 否则每次启动都会被插件自己的话刷一遍。
+
   },
   commands: {
     count: countAll

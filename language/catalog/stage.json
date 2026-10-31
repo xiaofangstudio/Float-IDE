@@ -1,5 +1,5 @@
 {
-  "$schema": "float-language-extension/1",
+  "$schema": "cw-language-extension/1",
   "extension": "stage",
   "name": "Float Stage",
   "status": "archived",

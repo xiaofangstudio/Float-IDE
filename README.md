@@ -1,14 +1,21 @@
 # Float IDE
 
-> 小方工作室出品 ｜ Windows 桌面 ｜ MIT ｜ 完全免费 ｜ 当前版本 0.10.1
+> 小方工作室出品 ｜ Windows 桌面 ｜ MIT ｜ 完全免费 ｜ 当前版本 0.11.0
 
-**代码世界脚本工作室：给 Float Script（CW Script）一个正经的 IDE。**
+**代码世界脚本工作室：给 CW Script（CW Script）一个正经的 IDE。**
 
 「代码世界」（CW Script）是一门行式中文脚本语言：一行一句、缩进成块、指令写结果进特殊变量。原版配套的 IDE 是一个网页沙盒，写代码、打断点都施展不开。Float IDE 把它重做成一个真正的桌面 IDE：Monaco 编辑器、文件树、断点调试、变量查看、真终端、Git，一样不少。
 
 0.2 把语言内核整个换掉了——不再是"一行一条正则"，而是 **词法 → AST → 解释器** 三层。所以 `for` 的次数能写变量、函数能有参数和返回值、类能继承。
 
 ---
+
+## 0.11 这次改了什么（语言内核 Rust 化）
+
+- 🦀 **CW Script 换 Rust 原生内核**：新增 `scaffold/src-tauri/float-lang/`——词法 / 语法 / 字节码 / VM / 包系统全套 Rust 实现（`parser.rs` / `bytecode.rs` / `vm.rs` / `packages.rs`），带基准测试（`examples/bench.rs` + `tests/bench-compare.sh`）跟原解释器对标性能
+- 📚 **示例从 5 个扩到 12 个**：排序与搜索、猜数字、对话游戏、Eliza 聊天机器人、RPG 找包、计算器、指针演示——全部能直接在 IDE 里跑
+- 🧩 **语言目录与内置插件扩充**：`core.json` 指令目录、`spec.ts` 语言规格、`builtin.ts` 内置插件同步更新
+- 🖥️ **侧面板与样式打磨**：`SidePanels` 布局细节与主题样式继续过一遍
 
 ## 0.10.1 这次改了什么（打磨）
 
@@ -166,7 +173,7 @@
 
 - [插件开发指南](docs/plugins.md) —— 清单字段、可用 API、权限、离线生态
 - [MCP 服务器](docs/mcp.md) —— 怎么接客户端、8 个工具、协议细节与安全边界
-- [语言教程](docs/tutorial.md) —— Float Script 从入门到异常处理
+- [语言教程](docs/tutorial.md) —— CW Script 从入门到异常处理
 
 ---
 
@@ -293,7 +300,7 @@ int low, int high = minmax([])
 
 | 你可能想问 | 答案 |
 | --- | --- |
-| 什么是 Float Script？ | 即 CW Script（代码世界）去掉舞台相关指令后的核心语言，0.2 在原语法上补齐了函数参数、类、表达式。规范见 `language/catalog/core.json` |
+| 什么是 CW Script？ | 即 CW Script（代码世界）去掉舞台相关指令后的核心语言，0.2 在原语法上补齐了函数参数、类、表达式。规范见 `language/catalog/core.json` |
 | 语法难吗？ | 一行一句，回车就是新语句，缩进就是进块。指令与内建函数悬停可查中文文档 |
 | 和原版沙盒什么关系？ | 语言行为向下兼容原版（老脚本照跑），并做了向后兼容的扩展；工程形态是本地文件夹 + `project.json` |
 | 要钱吗？要登录吗？ | 不要钱，不要账号，MIT 许可，不联网 |

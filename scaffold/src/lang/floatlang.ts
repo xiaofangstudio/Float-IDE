@@ -19,7 +19,7 @@ import {
   type Analysis, type OutlineItem
 } from './analyze';
 
-/* Float Script 编辑器支持：Monarch 高亮、AST 驱动的补全 / 悬停 / 签名提示 / 实时诊断 / 大纲。
+/* CW Script 编辑器支持：Monarch 高亮、AST 驱动的补全 / 悬停 / 签名提示 / 实时诊断 / 大纲。
  *
  * 0.1.0 的补全靠正则扫源码；这里全部换成 analyze() 产出的符号表，
  * 因此类、方法、字段、参数都能真正参与提示。
@@ -56,7 +56,7 @@ export function registerFloatLanguage(): void {
   if (registered) return;
   registered = true;
 
-  monaco.languages.register({ id: LANG_ID, extensions: ['.cw'], aliases: ['Float Script', 'floatscript'] });
+  monaco.languages.register({ id: LANG_ID, extensions: ['.cw'], aliases: ['CW Script', 'cwscript'] });
 
   monaco.languages.setMonarchTokensProvider(LANG_ID, {
     ignoreCase: false,
@@ -408,7 +408,7 @@ export function validateModel(model: monaco.editor.ITextModel): void {
       : monaco.MarkerSeverity.Info,
     message: d.message,
     code: d.code,
-    source: 'Float Script',
+    source: 'CW Script',
     startLineNumber: d.span.line,
     startColumn: Math.max(1, d.span.col),
     endLineNumber: d.span.endLine,

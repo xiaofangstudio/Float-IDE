@@ -1,4 +1,4 @@
-/* Float Script AST：语句与表达式两套节点，全部带文件/行/列。
+/* CW Script AST：语句与表达式两套节点，全部带文件/行/列。
  *
  * 设计原则：
  * 1. 指令参数不再是"字符串"，而是 Expr —— 所以 `for i in range(n)`、`add(a+1, b)`

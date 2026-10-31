@@ -32,9 +32,16 @@ import { AppearanceDialog } from '../ui/AppearanceDialog';
 /* Float IDE 工作区：左 IDE（文件/Git/编辑器）+ 右大纲/变量 + 底部控制台/终端。
  * 运行与调试由 Runner（生成器解释器）驱动。 */
 
-type Props = { projectDir: string; onExit: () => void };
+type Props = {
+  projectDir: string;
+  /** 进来就直接打开的文件（双击 .cw 启动时用） */
+  initialFile?: string;
+  /** 打开工程外的文件时，交给上层重新挂载工作区 */
+  onOpenTarget?: (path: string) => void;
+  onExit: () => void;
+};
 
-export function Workspace({ projectDir, onExit }: Props) {
+export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Props) {
   const [meta, setMeta] = useState<ProjectMeta | null>(null);
   const [sideTab, setSideTab] = useState<'files' | 'git'>('files');
   const [dockTab, setDockTab] = useState<'console' | 'terminal' | 'search'>('console');
@@ -134,12 +141,45 @@ export function Workspace({ projectDir, onExit }: Props) {
       const ef = projectDir + '/' + (m.entry ?? 'main.cw');
       setEntryFile(ef);
       try { setEntrySrc(await api.fsRead(ef)); } catch { setEntrySrc(''); }
-    } catch (e) {
-      pushLine({ kind: 'err', text: '工程缺少 project.json：' + String(e) });
+    } catch {
+      // 没有 project.json 也照样能开（用户可能只是随手打开一个放脚本的文件夹）：
+      // 入口优先用传进来的那个文件，其次找目录里第一个 .cw
+      const base = projectDir.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '未命名工程';
+      let entry = initialFile ? initialFile.split(/[\\/]/).pop() ?? 'main.cw' : 'main.cw';
+      if (!initialFile) {
+        try {
+          const items = await api.fsList(projectDir);
+          const cw = items.find((it) => !it.isDir && it.name.toLowerCase().endsWith('.cw'));
+          if (cw) entry = cw.name;
+        } catch { /* 空目录 */ }
+      }
+      setMeta({ name: base, entry, version: '0.0.0', kind: 'float' } as ProjectMeta);
+      document.title = `Float IDE — ${base}`;
+      const ef = projectDir + '/' + entry;
+      setEntryFile(ef);
+      try { setEntrySrc(await api.fsRead(ef)); } catch { setEntrySrc(''); }
     }
-  }, [projectDir, pushLine]);
+  }, [projectDir, initialFile, pushLine]);
 
   useEffect(() => { void reloadEntry(); }, [reloadEntry]);
+
+  /* 双击 .cw 进来时，光打开工程还不够，得把那个文件也开成标签页。
+   * 编辑器是异步挂载的，等它出现在 bus 上再开（最多等 3 秒）。 */
+  useEffect(() => {
+    if (!initialFile) return;
+    let tries = 0;
+    const t = window.setInterval(() => {
+      const ed = bus.current.editor;
+      tries++;
+      if (ed) {
+        window.clearInterval(t);
+        void ed.openFile(initialFile);
+      } else if (tries > 30) {
+        window.clearInterval(t);
+      }
+    }, 100);
+    return () => window.clearInterval(t);
+  }, [initialFile]);
 
   /* 工程占用锁：两个 Float IDE 同时改同一个工程是最容易丢代码的场景。
    * 抢不到锁就明确提示（仍可只读查看），不抢别人的锁。 */
@@ -177,6 +217,20 @@ export function Workspace({ projectDir, onExit }: Props) {
       release();
     };
   }, [projectDir, pushLine]);
+
+  const openOneFile = useCallback(async (): Promise<void> => {
+    const f = await api.pickOpenFile('打开 CW Script 文件', ['cw']);
+    if (!f) return;
+    const norm = f.replace(/\\/g, '/');
+    const root = projectDir.replace(/\\/g, '/').replace(/\/+$/, '');
+    if (norm.startsWith(root + '/')) {
+      await bus.current.editor?.openFile(f);
+    } else if (onOpenTarget) {
+      onOpenTarget(f);
+    } else {
+      await bus.current.editor?.openFile(f);
+    }
+  }, [projectDir, onOpenTarget]);
 
   const onSaved = useCallback((paths: string[]): void => {
     void reloadEntry();
@@ -708,7 +762,7 @@ export function Workspace({ projectDir, onExit }: Props) {
     { id: 'export', title: '导出工程包（.floatzip）', run: () => void doExport() },
     { id: 'clear', title: '清空控制台', run: () => setLines([]) },
     { id: 'exit', title: '关闭工程，返回欢迎页', run: () => { doStop(); onExit(); } },
-    { id: 'tutorial', title: '学习中心（Float Script 教程）', hint: 'Ctrl+Shift+H', run: () => openTutorial() },
+    { id: 'tutorial', title: '学习中心（CW Script 教程）', hint: 'Ctrl+Shift+H', run: () => openTutorial() },
     { id: 'plugins', title: '插件管理', run: () => openPluginsPage() },
     { id: 'mcp', title: 'MCP 服务器（让外部 AI 用这个工程）', run: () => openMcpPage() },
     ...pluginCommands.map((c) => ({
@@ -723,6 +777,8 @@ export function Workspace({ projectDir, onExit }: Props) {
     {
       label: '文件',
       items: [
+        { label: '打开文件…', hint: 'Ctrl+O', run: () => void openOneFile() },
+        { sep: true, label: 's0' },
         { label: '保存全部', hint: 'Ctrl+S', run: () => void bus.current.editor?.saveAll() },
         { label: '导出工程包', hint: 'Ctrl+Shift+E', run: () => void doExport() },
         { sep: true, label: 's1' },
@@ -795,11 +851,11 @@ export function Workspace({ projectDir, onExit }: Props) {
     {
       label: '帮助',
       items: [
-        { label: '学习中心（Float Script 教程）', hint: 'Ctrl+Shift+H', run: () => openTutorial() },
+        { label: '学习中心（CW Script 教程）', hint: 'Ctrl+Shift+H', run: () => openTutorial() },
         { sep: true, label: 'h1' },
         { label: '快捷键一览', hint: 'F1', run: () => openShortcutsPage() },
         { label: '偏好设置…', hint: 'Ctrl+Alt+S', run: () => openSettingsPage() },
-        { label: '关于 Float IDE', run: () => pushLine({ kind: 'info', text: 'Float IDE 0.10 · 小方工作室 · Float Script（CW Script 系）' }) }
+        { label: '关于 Float IDE', run: () => pushLine({ kind: 'info', text: 'Float IDE · 小方工作室 · CW Script' }) }
       ]
     }
   ];
@@ -963,7 +1019,7 @@ export function Workspace({ projectDir, onExit }: Props) {
         <span>行 {cursor.line}，列 {cursor.col}</span>
         <span>UTF-8</span>
         <span>LF</span>
-        <span>Float Script 0.10</span>
+        <span>CW Script 0.10</span>
       </div>
 
       {rename && (
@@ -1067,6 +1123,6 @@ export function Workspace({ projectDir, onExit }: Props) {
         current = idx.code === 0 ? idx.stdout : '';
       }
     } catch { /* 空基线 */ }
-    bus.current.editor?.openDiff({ title: `${rel}（${kind === 'index' ? '已暂存' : '工作区改动'}）`, base, current, lang: 'floatscript' });
+    bus.current.editor?.openDiff({ title: `${rel}（${kind === 'index' ? '已暂存' : '工作区改动'}）`, base, current, lang: 'cwscript' });
   }
 }

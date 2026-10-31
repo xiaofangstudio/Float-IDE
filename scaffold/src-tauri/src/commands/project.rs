@@ -124,6 +124,30 @@ pub fn pick_folder(title: String) -> Option<String> {
     rfd::FileDialog::new().set_title(&title).pick_folder().map(|p| p.to_string_lossy().to_string())
 }
 
+/// 打开单个文件（.cw 之类）。之前的"打开"只能选文件夹，
+/// 所以用户在对话框里根本看不到 .cw 文件——这个命令专门补这个洞。
+#[tauri::command]
+pub fn pick_open_file(title: String, exts: Vec<String>) -> Option<String> {
+    let mut dlg = rfd::FileDialog::new().set_title(&title);
+    let ext_refs: Vec<&str> = exts.iter().map(|e| e.as_str()).collect();
+    if !ext_refs.is_empty() {
+        dlg = dlg.add_filter("脚本", &ext_refs);
+    }
+    // 再给一个"所有文件"，免得别人把脚本起成奇怪后缀就打不开了
+    dlg = dlg.add_filter("所有文件", &["*"]);
+    if let Some(d) = std::env::current_dir().ok() {
+        dlg = dlg.set_directory(d);
+    }
+    dlg.pick_file().map(|p| p.to_string_lossy().to_string())
+}
+
+/// 启动时带进来的路径（双击 .cw / 把文件拖到 exe 上）。
+/// 只认第一个参数，且必须真实存在。
+#[tauri::command]
+pub fn startup_path() -> Option<String> {
+    crate::startup::path()
+}
+
 #[tauri::command]
 pub fn pick_image(title: String) -> Option<String> {
     rfd::FileDialog::new()

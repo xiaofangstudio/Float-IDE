@@ -70,10 +70,18 @@ export function ConsoleDock({ lines, askQuestion, onAnswer, running, stateText, 
           <div className="console-list" ref={listRef}>
             {lines.length === 0 && <div className="muted" style={{ padding: '6px 2px' }}>输出会显示在这里。F5 运行，F6 调试（支持断点与单步）。</div>}
             {lines.map((l, i) => (
-              <div key={i} className={`console-line ${l.kind}`}>
-                <span className="console-tag">{l.kind === 'out' ? '输出' : l.kind === 'err' ? '错误' : '信息'}</span>
-                <span style={{ whiteSpace: 'pre-wrap' }}>{l.text}</span>
-              </div>
+              // 脚本自己的输出不打标签，看着就像真控制台；
+              // 只有"错误 / 信息"这种系统消息才加前缀，免得满屏都是「输出」两个字。
+              l.kind === 'out' ? (
+                <div key={i} className="console-line out">
+                  <span style={{ whiteSpace: 'pre-wrap' }}>{l.text}</span>
+                </div>
+              ) : (
+                <div key={i} className={`console-line ${l.kind}`}>
+                  <span className="console-tag">{l.kind === 'err' ? '错误' : '信息'}</span>
+                  <span style={{ whiteSpace: 'pre-wrap' }}>{l.text}</span>
+                </div>
+              )
             ))}
             {askQuestion !== null && (
               <div className="console-line info ask-row">

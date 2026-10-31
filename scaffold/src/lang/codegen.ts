@@ -1,4 +1,4 @@
-/* Float Script 编译执行通道：AST → JavaScript 源码 → new Function。
+/* CW Script 编译执行通道：AST → JavaScript 源码 → new Function。
  *
  * 为什么要有这一层：
  * - 树遍历解释器每执行一条语句都要走一次函数调用与状态机，比 CPython 慢；
@@ -497,6 +497,9 @@ export type CompiledUnit = {
   src?: string;
 };
 
+/** 退回解释模式的提示只打一次，别每次运行都刷 */
+let warnedFallback = false;
+
 const BUILTINS_REF: Record<string, (...args: Val[]) => Val> = {};
 for (const b of builtinList()) BUILTINS_REF[b.name] = (...args: Val[]) => b.fn(args);
 
@@ -579,8 +582,10 @@ ${body}
     const main = factory(BUILTINS_REF, O, VALUES_REF);
     return { main, functions: fnNames.size, src };
   } catch (e) {
-    if (!(e instanceof CompileError)) {
-      console.warn('[Float 编译器] 退回解释模式：' + (e instanceof Error ? e.message : String(e)));
+    // 同一个问题只提示一次：否则每次运行都会往浏览器控制台刷一条，看着很吵
+    if (!(e instanceof CompileError) && !warnedFallback) {
+      warnedFallback = true;
+      console.warn('[Float 编译器] 退回解释模式（只提示一次）：' + (e instanceof Error ? e.message : String(e)));
     }
     return null;
   }

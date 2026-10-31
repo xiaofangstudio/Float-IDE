@@ -3,7 +3,7 @@ import { api } from '../core/tauri';
 import { Runner } from '../lang/interp';
 import { TutorialPage } from '../docs/TutorialPage';
 import { TEMPLATES, type Template } from '../core/templates';
-import { Logo, IconFolder, IconPlus, IconImport, IconClose, IconBook, IconImage, IconSearch } from './icons';
+import { Logo, IconFolder, IconFile, IconPlus, IconImport, IconClose, IconBook, IconImage, IconSearch } from './icons';
 import { TitleBar } from './TitleBar';
 import { MenuBar, type MenuGroup } from './MenuBar';
 import { ShortcutsDialog } from './ShortcutsDialog';
@@ -172,7 +172,11 @@ function LearnPage({ onClose }: { onClose: () => void }) {
 }
 
 
-export function Welcome({ onOpenProject }: { onOpenProject: (dir: string) => void }) {
+export function Welcome({ onOpenProject, onOpenFile }: {
+  onOpenProject: (dir: string) => void;
+  /** 直接打开一个 .cw 文件（会连带打开它所在的文件夹） */
+  onOpenFile?: (file: string) => void;
+}) {
   const [recents, setRecents] = useState<RecentItem[]>([]);
   const [busy, setBusy] = useState('');
   const [newTpl, setNewTpl] = useState<Template | null>(null);
@@ -197,6 +201,14 @@ export function Welcome({ onOpenProject }: { onOpenProject: (dir: string) => voi
     const dir = await api.pickFolder('选择工程文件夹（含 project.json）');
     if (!dir) return;
     onOpenProject(dir);
+  };
+
+  /** 直接打开单个 .cw 文件：对话框里能看见脚本文件，不再只有文件夹 */
+  const openSingleFile = async (): Promise<void> => {
+    const f = await api.pickOpenFile('打开 CW Script 文件', ['cw']);
+    if (!f) return;
+    if (onOpenFile) onOpenFile(f);
+    else onOpenProject(f.replace(/[\\/][^\\/]*$/, ''));
   };
 
   const importZip = async (): Promise<void> => {
@@ -238,7 +250,8 @@ export function Welcome({ onOpenProject }: { onOpenProject: (dir: string) => voi
       label: '文件',
       items: [
         { label: '新建工程', hint: 'Ctrl+N', run: () => setNewTpl(TEMPLATES[1]) },
-        { label: '打开工程', hint: 'Ctrl+O', run: () => void openExisting() },
+        { label: '打开工程（文件夹）', hint: 'Ctrl+O', run: () => void openExisting() },
+        { label: '打开文件…', hint: '', run: () => void openSingleFile() },
         { label: '导入工程包', hint: 'Ctrl+Shift+O', run: () => void importZip() },
         { sep: true, label: 's1' },
         { label: '退出', hint: 'Alt+F4', run: () => { void import('@tauri-apps/api/window').then((m) => m.getCurrentWindow().close()).catch(() => {}); } }
@@ -255,7 +268,7 @@ export function Welcome({ onOpenProject }: { onOpenProject: (dir: string) => voi
       label: '帮助',
       items: [
         { label: '快捷键一览', hint: 'F1', run: () => setShortcuts(true) },
-        { label: '学习中心（Float Script 教程）', hint: 'Ctrl+Shift+H', run: () => setLearn(true) },
+        { label: '学习中心（CW Script 教程）', hint: 'Ctrl+Shift+H', run: () => setLearn(true) },
         { label: '关于 Float IDE', run: () => setLearn(true) }
       ]
     }
@@ -264,6 +277,7 @@ export function Welcome({ onOpenProject }: { onOpenProject: (dir: string) => voi
   const cards = [
     { icon: <IconPlus size={18} />, title: '新建工程', desc: '从模板起步', run: () => setNewTpl(TEMPLATES[1]) },
     { icon: <IconFolder size={18} />, title: '打开工程', desc: '选择已有文件夹', run: () => void openExisting() },
+    { icon: <IconFile size={18} />, title: '打开 .cw 文件', desc: '直接挑一个脚本打开', run: () => void openSingleFile() },
     { icon: <IconImport size={18} />, title: '导入工程包', desc: '.float 一键搬入', run: () => void importZip() },
     { icon: <IconBook size={18} />, title: '学习中心', desc: '13 章 · 51 节 · 可运行示例', run: () => setLearn(true) },
     { icon: <IconImage size={18} />, title: '外观背景', desc: '换一张自己的图', run: () => setShowAppearance(true) },
@@ -284,7 +298,8 @@ export function Welcome({ onOpenProject }: { onOpenProject: (dir: string) => voi
           <div className="wc-side-head">项目</div>
           <div className="wc-acts">
             <button className="wc-act" onClick={() => setNewTpl(TEMPLATES[1])}><IconPlus size={15} /> 新建工程…</button>
-            <button className="wc-act" onClick={() => void openExisting()}><IconFolder size={15} /> 打开…</button>
+            <button className="wc-act" onClick={() => void openExisting()}><IconFolder size={15} /> 打开文件夹…</button>
+            <button className="wc-act" onClick={() => void openSingleFile()}><IconFile size={15} /> 打开 .cw 文件…</button>
             <button className="wc-act" onClick={() => void importZip()}><IconImport size={15} /> 导入工程包…</button>
           </div>
 
@@ -347,7 +362,7 @@ export function Welcome({ onOpenProject }: { onOpenProject: (dir: string) => voi
       <div className="wc-foot">
         <span>v0.6.0 · 小方工作室 · MIT</span>
         <span className="grow" />
-        <span className="muted">Float Script（CW Script 系）</span>
+        <span className="muted">CW Script</span>
       </div>
 
       {newTpl && <NewProjectDialog preset={newTpl} onClose={() => setNewTpl(null)} onOpenProject={onOpenProject} />}

@@ -11,7 +11,7 @@ export type PluginCommand = {
   title: string;
   /** 可选分类，会在命令面板里分组 */
   category?: string;
-  /** 最短写法：直接运行一段 Float Script */
+  /** 最短写法：直接运行一段 CW Script */
   run?: string;
   /** 往当前编辑器插入一段文本（支持 ${selection} ${file} ${project} 占位） */
   insert?: string;

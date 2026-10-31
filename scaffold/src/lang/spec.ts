@@ -1,4 +1,4 @@
-/* Float Script 指令与关键字元数据（v0.2）。
+/* CW Script 指令与关键字元数据（v0.2）。
  * 供高亮、补全、悬停、文档展示；内建函数文档来自 builtins.ts，避免两处各写一遍。
  */
 
@@ -31,7 +31,7 @@ export const INSTRUCTIONS: InstDoc[] = [
   { name: 'stop', args: 'stop / stop all / stop now / stop script', desc: '直接停止脚本', category: '控制' },
 
   /* 函数与类 */
-  { name: 'function', args: 'function name(a, b = 默认值)', desc: '定义函数；支持多参数、默认值、返回值、递归。fn / Function / f 是同样写法', category: '函数' },
+  { name: 'fn', args: 'fn name(a, b = 默认值)', desc: '定义函数；支持多参数、默认值、返回值、递归。fn 是主写法，function / Function / f 仍然兼容', category: '函数' },
   { name: 'return', args: 'return 表达式 / return', desc: '从函数返回一个值', category: '函数' },
   { name: 'class', args: 'class 名称 / class 名称 extends 父类', desc: '定义类：类体里写字段和方法，init 是构造方法', category: '类' },
   { name: 'new', args: 'new 类名(参数)', desc: '创建实例；如果类里有 init，会自动调用', category: '类' },
@@ -124,7 +124,7 @@ export const SNIPPETS: { label: string; detail: string; body: string }[] = [
   }
 ];
 
-export const LANG_ID = 'floatscript';
+export const LANG_ID = 'cwscript';
 
 /** 内建方法（字符串 / 列表 / 字典），给 p. 之后的补全兜底用 */
 export const BUILTIN_METHODS: { name: string; owner: string; desc: string }[] = [

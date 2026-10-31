@@ -25,7 +25,18 @@ var init_tauri = __esm({
       fsList: (dir) => invoke("fs_list", { dir }),
       fsRead: (path) => invoke("fs_read", { path }),
       fsWrite: (path, contents) => invoke("fs_write", { path, contents }),
+      /** 文件指纹（mtime+大小），用于检测磁盘内容是否被别的进程改动 */
+      fsStat: (path) => invoke("fs_stat", { path }),
+      /** 带版本校验的写：expectMtimeMs 与磁盘不符时抛 CONFLICT，绝不静默覆盖 */
+      fsWriteChecked: (path, contents, expectMtimeMs) => invoke(
+        "fs_write_checked",
+        { path, contents, expectMtimeMs: String(expectMtimeMs) }
+      ),
       fsMkdir: (path) => invoke("fs_mkdir", { path }),
+      /* 工程占用锁：防止两个 Float IDE 同时改同一个工程 */
+      lockAcquire: (dir, id) => invoke("project_lock_acquire", { dir, id }),
+      lockTouch: (dir, id) => invoke("project_lock_touch", { dir, id }),
+      lockRelease: (dir, id) => invoke("project_lock_release", { dir, id }),
       fsRename: (from, to) => invoke("fs_rename", { from, to }),
       fsDelete: (path) => invoke("fs_delete", { path }),
       /* 工程 */
@@ -35,6 +46,7 @@ var init_tauri = __esm({
       pickFolder: (title) => invoke("pick_folder", { title }),
       pickSaveFile: (title, defaultName, ext) => invoke("pick_save_file", { title, defaultName, ext }),
       openPath: (path) => invoke("open_path", { path }),
+      pickImage: (title) => invoke("pick_image", { title }),
       detectEnv: () => invoke("detect_env"),
       /* 最近工程 */
       recentGet: () => invoke("recent_get"),
@@ -45,6 +57,22 @@ var init_tauri = __esm({
       ptyWrite: (id, data) => invoke("pty_write", { id, data }),
       ptyResize: (id, cols, rows) => invoke("pty_resize", { id, cols, rows }),
       ptyClose: (id) => invoke("pty_close", { id }),
+      /* 插件 */
+      pluginRootDir: () => invoke("plugin_root_dir"),
+      pluginScan: () => invoke("plugin_scan"),
+      pluginReadFile: (id, rel) => invoke("plugin_read_file", { id, rel }),
+      pluginWriteFile: (id, rel, contents) => invoke("plugin_write_file", { id, rel, contents }),
+      pluginInstallDir: (src) => invoke("plugin_install_dir", { src }),
+      pluginUninstall: (id) => invoke("plugin_uninstall", { id }),
+      pluginReveal: () => invoke("plugin_reveal"),
+      pluginStatePath: () => invoke("plugin_state_path"),
+      pluginRegistry: () => invoke("plugin_registry"),
+      /* MCP */
+      mcpStart: (port, project) => invoke("mcp_start", { port, project }),
+      mcpStop: () => invoke("mcp_stop"),
+      mcpStatus: () => invoke("mcp_status"),
+      mcpLog: () => invoke("mcp_log"),
+      mcpReply: (id, result) => invoke("mcp_reply", { id, result }),
       /* Git */
       gitAvailable: () => invoke("git_available"),
       gitRun: (dir, args) => invoke("git_run", { dir, args })
@@ -107,8 +135,8 @@ var isIdPart = (c) => isIdStart(c) || /[0-9]/.test(c);
 function tokenizeLine(src, line, startCol = 1) {
   const out = [];
   let i = 0;
-  const push = (k, v, col, endCol, num2) => {
-    out.push({ k, v, line, col, endCol, num: num2 });
+  const push = (k, v, col, endCol, num3) => {
+    out.push({ k, v, line, col, endCol, num: num3 });
   };
   while (i < src.length) {
     const c = src[i];
@@ -126,10 +154,13 @@ function tokenizeLine(src, line, startCol = 1) {
       const startCol2 = startCol + i;
       let j = i + 1;
       let text = "";
-      while (j < src.length && src[j] !== quote) {
+      let depth = 0;
+      while (j < src.length && !(src[j] === quote && depth === 0)) {
+        if (src[j] === "{") depth++;
+        else if (src[j] === "}" && depth > 0) depth--;
         if (src[j] === "\\" && j + 1 < src.length) {
           const e = src[j + 1];
-          text += e === "n" ? "\n" : e === "t" ? "	" : e === "r" ? "\r" : e === "0" ? "\0" : e === "\\" ? "\\" : e === '"' ? '"' : e === "'" ? "'" : e;
+          text += e === "n" ? "\n" : e === "t" ? "	" : e === "r" ? "\r" : e === "0" ? "\0" : e === "\\" ? "\\" : e === '"' ? '"' : e === "'" ? "'" : e === "{" || e === "}" ? "\\" + e : e;
           j += 2;
           continue;
         }
@@ -263,7 +294,7 @@ var PREC = {
 var EOF = { k: "eof", v: "", line: 0, col: 0, endCol: 0 };
 var startOf = (e) => ({ k: "ident", v: "", line: e.line, col: e.col, endCol: e.col });
 var endOf = (e) => ({ k: "ident", v: "", line: e.endLine, col: e.endCol, endCol: e.endCol });
-var ExprParser = class {
+var ExprParser = class _ExprParser {
   constructor(toks, file) {
     this.toks = toks;
     this.file = file;
@@ -297,6 +328,16 @@ var ExprParser = class {
     if (!this.atEnd()) throw new ParseError(`\u8868\u8FBE\u5F0F\u540E\u9762\u591A\u4E86${describeTok(this.cur)}`, this.cur, "trailing");
     return e;
   }
+  /** 逗号分隔的表达式列表，用于 print / return 这种「参数可以裸写」的场合 */
+  parseAllList() {
+    if (this.atEnd()) return [];
+    const out = [this.parseExpr(0)];
+    while (this.at(",")) {
+      this.eat();
+      out.push(this.parseExpr(0));
+    }
+    return out;
+  }
   parseExpr(minPrec) {
     let left = this.parseUnary();
     for (; ; ) {
@@ -327,7 +368,7 @@ var ExprParser = class {
     }
     if (t.k === "str") {
       this.eat();
-      return { k: "str", v: t.v, ...this.span(t) };
+      return this.stringNode(t);
     }
     if (t.k === "kw" && t.v === "new") {
       this.eat();
@@ -399,6 +440,59 @@ var ExprParser = class {
       return { k: "dict", entries, ...this.span(t, close) };
     }
     throw new ParseError(`\u8FD9\u91CC\u5E94\u8BE5\u662F\u4E00\u4E2A\u503C\uFF0C\u5B9E\u9645\u662F${describeTok(t)}`, t, "value");
+  }
+  /** 字符串字面量 → 支持 {变量/表达式} 插值，编译成字符串拼接 */
+  stringNode(t) {
+    const text = t.v;
+    if (!text.includes("{") && !text.includes("\\{")) {
+      return { k: "str", v: text.replace(/\\}/g, "}"), ...this.span(t) };
+    }
+    const parts = [];
+    let buf = "";
+    let i = 0;
+    const pushStr = () => {
+      if (buf) {
+        parts.push({ k: "str", v: buf, ...this.span(t) });
+        buf = "";
+      }
+    };
+    while (i < text.length) {
+      const c = text[i];
+      if (c === "\\" && (text[i + 1] === "{" || text[i + 1] === "}")) {
+        buf += text[i + 1];
+        i += 2;
+        continue;
+      }
+      if (c !== "{") {
+        buf += c;
+        i++;
+        continue;
+      }
+      const close = text.indexOf("}", i + 1);
+      if (close < 0) {
+        buf += c;
+        i++;
+        continue;
+      }
+      const inner = text.slice(i + 1, close).trim();
+      if (!inner) {
+        buf += "{}";
+        i = close + 1;
+        continue;
+      }
+      pushStr();
+      const toks = tokenizeLine(inner, t.line, t.col + i + 1);
+      const sub = new _ExprParser(toks, this.file);
+      try {
+        parts.push(sub.parseAll());
+      } catch {
+        buf += text.slice(i, close + 1);
+      }
+      i = close + 1;
+    }
+    pushStr();
+    if (parts.length === 1) return parts[0];
+    return parts.reduce((acc, cur) => ({ k: "bin", op: "+", a: acc, b: cur, ...this.span(t) }));
   }
   parseArgs() {
     this.expect("(", "\u5DE6\u62EC\u53F7 (");
@@ -645,13 +739,37 @@ function parseProgram(file, src) {
         case "return": {
           i++;
           const rest = toks.slice(1);
-          return { k: "return", value: rest.length ? exprOf(rest) : null, ...stmtSpan(ln) };
+          if (!rest.length) return { k: "return", value: null, ...stmtSpan(ln) };
+          const rp = parserFor(rest);
+          const first2 = rp.parseExpr(0);
+          if (rp.at(",")) {
+            const items = [first2];
+            while (rp.at(",")) {
+              rp.eat();
+              items.push(rp.parseExpr(0));
+            }
+            if (!rp.atEnd()) throw new ParseError("return \u540E\u9762\u591A\u4E86\u5185\u5BB9", rp.cur, "return");
+            return { k: "return", value: { k: "list", items, file, line: ln.no, col: 1, endLine: ln.no, endCol: 1 }, ...stmtSpan(ln) };
+          }
+          if (!rp.atEnd()) throw new ParseError("return \u540E\u9762\u591A\u4E86\u5185\u5BB9", rp.cur, "return");
+          return { k: "return", value: first2, ...stmtSpan(ln) };
         }
+        case "throw": {
+          i++;
+          const rest = toks.slice(1);
+          if (!rest.length) throw new ParseError("throw \u540E\u9762\u8981\u8DDF\u8981\u629B\u51FA\u7684\u503C", toks[0], "throw");
+          return { k: "throw", value: exprOf(rest), ...stmtSpan(ln) };
+        }
+        case "try":
+          return parseTry(ln, toks);
+        case "catch":
+          throw new ParseError("catch \u8981\u8DDF\u5728 try \u5757\u540E\u9762", toks[0], "stray-catch");
+        case "finally":
+          throw new ParseError("finally \u8981\u8DDF\u5728 try \u5757\u540E\u9762", toks[0], "stray-finally");
         case "ask":
           return parseAsk(ln, toks);
         case "print":
-          if (toks[1]?.v === "(") return parsePrint(ln, toks);
-          break;
+          return parsePrint(ln, toks);
         case "import":
           return parseImport(ln, toks);
         case "time":
@@ -695,6 +813,33 @@ function parseProgram(file, src) {
       if (FUNC_WORDS.has(word) && (word !== "f" || toks[1]?.k === "ident")) return parseFuncDef(ln, toks);
     }
     if (first.k === "kw" && first.v === "class") return parseClass(ln, toks);
+    if (isIdent) {
+      const names = [];
+      let k = 0;
+      let ok = true;
+      for (; ; ) {
+        if (toks[k]?.k === "ident" && TYPE_WORDS.has(toks[k].v) && toks[k + 1]?.k === "ident") k++;
+        const t = toks[k];
+        if (!t || t.k !== "ident") {
+          ok = false;
+          break;
+        }
+        names.push({ name: t.v, line: t.line, col: t.col });
+        k++;
+        if (toks[k]?.v === ",") {
+          k++;
+          continue;
+        }
+        break;
+      }
+      if (ok && names.length >= 2 && toks[k]?.v === "=") {
+        const dp = parserFor(toks.slice(k + 1));
+        const value = dp.parseExpr(0);
+        if (!dp.atEnd()) throw new ParseError("\u89E3\u6784\u8D4B\u503C\u53F3\u8FB9\u591A\u4E86\u5185\u5BB9", dp.cur, "destructure");
+        i++;
+        return { k: "destructure", names, value, ...stmtSpan(ln) };
+      }
+    }
     if (isIdent && TYPE_WORDS.has(word) && toks[1]?.k === "ident") {
       const p2 = parserFor(toks.slice(2));
       let init = null;
@@ -746,6 +891,7 @@ function parseProgram(file, src) {
       if (!cond) throw new ParseError("if out \u9700\u8981\u4E00\u4E2A\u6761\u4EF6", toks[0], "if-out");
       return { k: "ifOut", cond, ...stmtSpan(ln) };
     }
+    if (!cond) throw new ParseError("if \u540E\u9762\u8981\u8DDF\u6761\u4EF6\uFF0C\u4F8B\u5982 if (a > 1)", toks[0], "if-no-cond");
     const branches = [{ cond, body: parseBodyOf(ln.indent), line: ln.no }];
     const elseBox = { body: null };
     mergeBranches(branches, ln.indent, elseBox);
@@ -773,6 +919,43 @@ function parseProgram(file, src) {
     }
     const seconds = parserFor(toks.slice(1)).parseExpr(0);
     return { k: "wait", seconds, ...stmtSpan(ln) };
+  };
+  const parseTry = (ln, _toks) => {
+    i++;
+    const body2 = parseBodyOf(ln.indent);
+    let catchName = null;
+    let catchBody = null;
+    let finallyBody = null;
+    for (; ; ) {
+      const L = lines[i];
+      if (!L || L.skipped) break;
+      let code = L.code;
+      let brace = false;
+      if (code.startsWith("}")) {
+        brace = true;
+        code = code.replace(/^\}\s*/, "").trim();
+      }
+      if (!code) break;
+      const sameIndent = L.indent === ln.indent || brace && L.indent <= ln.indent + 1;
+      if (!sameIndent) break;
+      if (/^catch\b/.test(code)) {
+        const rest = code.replace(/^catch\b/, "").trim();
+        catchName = rest ? rest.split(/[\s(]/)[0].replace(/\)$/, "") : null;
+        i++;
+        catchBody = parseBodyOf(L.indent);
+        continue;
+      }
+      if (/^finally\b/.test(code)) {
+        i++;
+        finallyBody = parseBodyOf(L.indent);
+        continue;
+      }
+      break;
+    }
+    if (!catchBody && !finallyBody) {
+      diag("warning", "try \u540E\u9762\u6CA1\u6709 catch \u4E5F\u6CA1\u6709 finally\uFF0C\u5757\u91CC\u7684\u9519\u8BEF\u4F1A\u76F4\u63A5\u629B\u51FA\u53BB", stmtSpan(ln), "try-bare");
+    }
+    return { k: "try", body: body2, catchName, catchBody, finallyBody, ...stmtSpan(ln) };
   };
   const parseFor = (ln, toks) => {
     i++;
@@ -874,7 +1057,7 @@ function parseProgram(file, src) {
   const parsePrint = (ln, toks) => {
     i++;
     const p = parserFor(toks.slice(1));
-    const args = p.parseArgs();
+    const args = p.at("(") ? p.parseArgs() : p.parseAllList();
     if (!p.atEnd()) throw new ParseError("print \u540E\u9762\u591A\u4E86\u5185\u5BB9", p.cur, "print");
     return { k: "print", args, ...stmtSpan(ln) };
   };
@@ -1059,6 +1242,13 @@ function parseProgram(file, src) {
     return { k: "classDef", name: nameTok.v, base, fields, methods, ...stmtSpan(ln) };
   };
   const body = parseBlock(0);
+  for (const s of body) {
+    if (s.k === "return") {
+      diag("error", "return \u53EA\u80FD\u5199\u5728\u51FD\u6570\u6216\u65B9\u6CD5\u91CC", { file, line: s.line, col: s.col, endLine: s.endLine, endCol: s.endCol }, "stray-return");
+    } else if (s.k === "break" || s.k === "continue") {
+      diag("error", `${s.k === "break" ? "out / break" : "balo / continue"} \u53EA\u80FD\u5199\u5728\u5FAA\u73AF\u91CC`, { file, line: s.line, col: s.col, endLine: s.endLine, endCol: s.endCol }, "stray-jump");
+    }
+  }
   return { file, body, diagnostics };
 }
 var SUGGEST = {
@@ -1110,32 +1300,43 @@ function typeName(v) {
   if (typeof v === "boolean") return "bool";
   return "str";
 }
-function fmtInner(v) {
+var FMT_MAX_DEPTH = 16;
+function fmtInner(v, seen, depth) {
   if (typeof v === "string") return JSON.stringify(v);
-  return fmtVal(v);
+  return fmtVal(v, seen, depth);
 }
-function fmtVal(v) {
+function fmtVal(v, seen = /* @__PURE__ */ new Set(), depth = 0) {
   if (v === null) return "null";
-  if (Array.isArray(v)) return "[" + v.map(fmtInner).join(", ") + "]";
-  if (isDict(v)) {
-    const parts = [];
-    for (const [k, x] of v.map) parts.push(`${k}: ${fmtInner(x)}`);
-    return "{" + parts.join(", ") + "}";
-  }
-  if (isInstance(v)) {
-    const parts = [];
-    for (const [k, x] of v.fields) parts.push(`${k}: ${fmtInner(x)}`);
-    return `${v.cls.name}{` + parts.join(", ") + "}";
-  }
-  if (isCInstLike(v)) {
-    const parts = [];
-    for (const [k, x] of Object.entries(v.f)) parts.push(`${k}: ${fmtInner(x)}`);
-    return `${v.cls.name}{` + parts.join(", ") + "}";
-  }
   if (typeof v === "boolean") return v ? "true" : "false";
   if (typeof v === "number") {
     if (!Number.isFinite(v)) return String(v);
     return Number.isInteger(v) ? String(v) : String(Number(v.toFixed(10)));
+  }
+  const isBox = Array.isArray(v) || isDict(v) || isInstance(v) || isCInstLike(v);
+  if (isBox) {
+    const boxed = v;
+    if (seen.has(boxed)) return "\u2026(\u5FAA\u73AF)";
+    if (depth >= FMT_MAX_DEPTH) return "\u2026";
+    seen.add(boxed);
+    try {
+      if (Array.isArray(v)) return "[" + v.map((x) => fmtInner(x, seen, depth + 1)).join(", ") + "]";
+      if (isDict(v)) {
+        const parts2 = [];
+        for (const [k, x] of v.map) parts2.push(`${k}: ${fmtInner(x, seen, depth + 1)}`);
+        return "{" + parts2.join(", ") + "}";
+      }
+      if (isInstance(v)) {
+        const parts2 = [];
+        for (const [k, x] of v.fields) parts2.push(`${k}: ${fmtInner(x, seen, depth + 1)}`);
+        return `${v.cls.name}{` + parts2.join(", ") + "}";
+      }
+      const ci = v;
+      const parts = [];
+      for (const [k, x] of Object.entries(ci.f)) parts.push(`${k}: ${fmtInner(x, seen, depth + 1)}`);
+      return `${ci.cls.name}{` + parts.join(", ") + "}";
+    } finally {
+      seen.delete(boxed);
+    }
   }
   return String(v);
 }
@@ -1151,20 +1352,37 @@ function truthy(v) {
   if (isDict(v)) return v.map.size > 0;
   return true;
 }
-function deepEq(a, b) {
+function deepEqRec(a, b, seen) {
   if (a === b) return true;
-  if (Array.isArray(a) && Array.isArray(b)) {
-    return a.length === b.length && a.every((x, i) => deepEq(x, b[i]));
-  }
-  if (isDict(a) && isDict(b)) {
-    if (a.map.size !== b.map.size) return false;
-    for (const [k, v] of a.map) {
-      if (!b.map.has(k) || !deepEq(v, b.map.get(k))) return false;
+  const aBox = Array.isArray(a) || isDict(a);
+  const bBox = Array.isArray(b) || isDict(b);
+  if (aBox && bBox) {
+    const ao = a;
+    const bo = b;
+    const prev = seen.get(ao);
+    if (prev !== void 0) return prev === bo;
+    seen.set(ao, bo);
+    try {
+      if (Array.isArray(a) && Array.isArray(b)) {
+        return a.length === b.length && a.every((x, i) => deepEqRec(x, b[i], seen));
+      }
+      if (isDict(a) && isDict(b)) {
+        if (a.map.size !== b.map.size) return false;
+        for (const [k, v] of a.map) {
+          if (!b.map.has(k) || !deepEqRec(v, b.map.get(k), seen)) return false;
+        }
+        return true;
+      }
+      return false;
+    } finally {
+      seen.delete(ao);
     }
-    return true;
   }
   if (isInstance(a) && isInstance(b)) return a === b;
   return false;
+}
+function deepEq(a, b) {
+  return deepEqRec(a, b, /* @__PURE__ */ new Map());
 }
 function toNum(v) {
   if (typeof v === "number") return v;
@@ -1173,10 +1391,23 @@ function toNum(v) {
   return null;
 }
 function cloneVal(v) {
-  if (Array.isArray(v)) return v.map(cloneVal);
+  return cloneRec(v, /* @__PURE__ */ new Map());
+}
+function cloneRec(v, seen) {
+  if (Array.isArray(v)) {
+    const hit = seen.get(v);
+    if (hit !== void 0) return hit;
+    const out = [];
+    seen.set(v, out);
+    for (const x of v) out.push(cloneRec(x, seen));
+    return out;
+  }
   if (isDict(v)) {
+    const hit = seen.get(v);
+    if (hit !== void 0) return hit;
     const d = dict();
-    for (const [k, x] of v.map) d.map.set(k, cloneVal(x));
+    seen.set(v, d);
+    for (const [k, x] of v.map) d.map.set(k, cloneRec(x, seen));
     return d;
   }
   return v;
@@ -1360,7 +1591,150 @@ function builtinList() {
 }
 var emptyDict = () => dict();
 
+// src/lang/methods.ts
+var NOT = { handled: false };
+var MethodError = class extends Error {
+};
+var bad2 = (msg) => {
+  throw new MethodError(msg);
+};
+var num2 = (v, who) => {
+  const n = toNum(v);
+  if (n === null) bad2(`${who} \u9700\u8981\u6570\u5B57\uFF0C\u5F97\u5230 ${fmtVal(v)}`);
+  return n;
+};
+var str = (v) => toStr(v);
+function callBuiltinMethod(obj, name, args) {
+  if (typeof obj === "string") return strMethod(obj, name, args);
+  if (isList(obj)) return listMethod(obj, name, args);
+  if (isDict(obj)) return dictMethod(obj, name, args);
+  return NOT;
+}
+function strMethod(s, name, a) {
+  switch (name) {
+    case "upper":
+      return { handled: true, value: s.toUpperCase() };
+    case "lower":
+      return { handled: true, value: s.toLowerCase() };
+    case "trim":
+      return { handled: true, value: s.trim() };
+    case "split":
+      return { handled: true, value: s.split(a.length ? str(a[0]) : "") };
+    case "replace": {
+      const from = str(a[0] ?? "");
+      const to = str(a[1] ?? "");
+      return { handled: true, value: s.split(from).join(to) };
+    }
+    case "find":
+    case "index_of":
+      return { handled: true, value: s.indexOf(str(a[0] ?? "")) };
+    case "contains":
+    case "includes":
+      return { handled: true, value: s.includes(str(a[0] ?? "")) };
+    case "starts_with":
+      return { handled: true, value: s.startsWith(str(a[0] ?? "")) };
+    case "ends_with":
+      return { handled: true, value: s.endsWith(str(a[0] ?? "")) };
+    case "substr":
+    case "substring": {
+      const start = Math.trunc(num2(a[0] ?? 0, "substr"));
+      const len = a.length >= 2 ? Math.trunc(num2(a[1], "substr")) : s.length;
+      return { handled: true, value: s.slice(start, start + len) };
+    }
+    case "repeat":
+      return { handled: true, value: s.repeat(Math.max(0, Math.trunc(num2(a[0] ?? 1, "repeat")))) };
+    case "chars":
+      return { handled: true, value: s.split("") };
+    case "to_int":
+      return { handled: true, value: Math.trunc(num2(s.trim() === "" ? 0 : s, "to_int")) };
+    case "to_float":
+      return { handled: true, value: num2(s.trim() === "" ? 0 : s, "to_float") };
+    case "len":
+      return { handled: true, value: s.length };
+    default:
+      return NOT;
+  }
+}
+function listMethod(xs, name, a) {
+  switch (name) {
+    case "push":
+    case "add":
+      xs.push(a[0] ?? null);
+      return { handled: true, value: xs.length };
+    case "pop":
+      return { handled: true, value: xs.length ? xs.pop() : null };
+    case "insert": {
+      const i = Math.trunc(num2(a[0] ?? 0, "insert"));
+      const at = Math.max(0, Math.min(xs.length, i));
+      xs.splice(at, 0, a[1] ?? null);
+      return { handled: true, value: xs.length };
+    }
+    case "remove": {
+      const i = Math.trunc(num2(a[0] ?? 0, "remove"));
+      if (i < 0 || i >= xs.length) bad2(`\u4E0B\u6807 ${i} \u8D85\u51FA\u8303\u56F4\uFF08\u957F\u5EA6 ${xs.length}\uFF09`);
+      return { handled: true, value: xs.splice(i, 1)[0] ?? null };
+    }
+    case "index_of":
+      return { handled: true, value: xs.findIndex((x) => JSON.stringify(x) === JSON.stringify(a[0] ?? null)) };
+    case "contains":
+      return { handled: true, value: xs.some((x) => JSON.stringify(x) === JSON.stringify(a[0] ?? null)) };
+    case "join":
+      return { handled: true, value: xs.map((x) => str(x)).join(a.length ? str(a[0]) : "") };
+    case "reverse":
+      xs.reverse();
+      return { handled: true, value: xs };
+    case "sort": {
+      const nums = xs.every((x) => typeof x === "number");
+      xs.sort((p, q) => nums ? p - q : str(p).localeCompare(str(q), "zh-Hans-CN"));
+      return { handled: true, value: xs };
+    }
+    case "slice": {
+      const from = Math.trunc(num2(a[0] ?? 0, "slice"));
+      const to = a.length >= 2 ? Math.trunc(num2(a[1], "slice")) : xs.length;
+      return { handled: true, value: xs.slice(from, to) };
+    }
+    case "sum":
+      return { handled: true, value: xs.reduce((n, x) => n + num2(x, "sum"), 0) };
+    case "clear":
+      xs.length = 0;
+      return { handled: true, value: 0 };
+    case "len":
+      return { handled: true, value: xs.length };
+    default:
+      return NOT;
+  }
+}
+function dictMethod(d, name, a) {
+  switch (name) {
+    case "keys":
+      return { handled: true, value: [...d.map.keys()] };
+    case "values":
+      return { handled: true, value: [...d.map.values()] };
+    case "items":
+      return { handled: true, value: [...d.map].map(([k, v]) => [k, v]) };
+    case "has":
+      return { handled: true, value: d.map.has(str(a[0] ?? "")) };
+    case "remove": {
+      const k = str(a[0] ?? "");
+      const had = d.map.get(k) ?? null;
+      d.map.delete(k);
+      return { handled: true, value: had };
+    }
+    case "get":
+      return { handled: true, value: d.map.has(str(a[0] ?? "")) ? d.map.get(str(a[0] ?? "")) : a[1] ?? null };
+    case "set": {
+      d.map.set(str(a[0] ?? ""), a[1] ?? null);
+      return { handled: true, value: dict() };
+    }
+    case "len":
+      return { handled: true, value: d.map.size };
+    default:
+      return NOT;
+  }
+}
+
 // src/lang/codegen.ts
+var MAX_CALL_DEPTH = 400;
 var isCInst = (v) => typeof v === "object" && v !== null && v.__cinst === 1;
 var RuntimeError = class extends Error {
   constructor(message, line, frames = []) {
@@ -1391,7 +1765,13 @@ var CompiledRuntime = class {
   out = () => {
   };
   stack = [];
+  /** 编译通道也要拦无限递归：否则用户只会看到一句「Maximum call stack size exceeded」，
+   *  既没有行列号也不知道是哪一层出问题。和解释通道用同一个上限与同一套措辞。 */
   push(name) {
+    if (this.stack.length >= MAX_CALL_DEPTH) {
+      const hint = `\u9012\u5F52\u592A\u6DF1\u4E86\uFF08\u8D85\u8FC7 ${MAX_CALL_DEPTH} \u5C42\uFF09\u505C\u4E86\u4E0B\u6765\u3002\u591A\u534A\u662F ${name}() \u7684\u7ED3\u675F\u6761\u4EF6\u6CA1\u5199\u5BF9\uFF0C\u68C0\u67E5\u4E00\u4E0B\u5B83\u662F\u4E0D\u662F\u4F1A\u4E0D\u65AD\u8C03\u7528\u81EA\u5DF1\u3002`;
+      throw new RuntimeError(hint, this.ln);
+    }
     this.stack.push(name);
   }
   pop() {
@@ -1433,6 +1813,24 @@ var CompiledRuntime = class {
     const fn = this.f[name];
     if (!fn) throw new RuntimeError(`\u51FD\u6570\u300C${name}\u300D\u6CA1\u6709\u5B9A\u4E49`, this.ln);
     return fn(this, null, ...args);
+  }
+  /** catch 里拿到的错误对象：e.message / e.line / e.file */
+  errObj(e) {
+    const d = dict();
+    if (e instanceof RuntimeError) {
+      d.map.set("message", e.message);
+      d.map.set("line", e.line || this.ln);
+      d.map.set("file", this.file);
+    } else {
+      d.map.set("message", e instanceof Error ? e.message : String(e));
+      d.map.set("line", this.ln);
+      d.map.set("file", this.file);
+    }
+    return d;
+  }
+  throwVal(v) {
+    const msg = isDict(v) && v.map.has("message") ? toStr(v.map.get("message")) : toStr(v);
+    throw new RuntimeError(msg, this.ln);
   }
   badBreak(what) {
     throw new RuntimeError(`${what} \u53EA\u80FD\u7528\u5728\u5FAA\u73AF\u91CC`, this.ln);
@@ -1768,6 +2166,13 @@ var O = {
     throw new RuntimeError("for a, b in \u2026 \u53EA\u80FD\u7528\u5728\u5B57\u5178\u4E0A", 0);
   },
   mcall(obj, name, args, rt) {
+    try {
+      const m = callBuiltinMethod(obj, name, args);
+      if (m.handled) return m.value;
+    } catch (e) {
+      if (e instanceof MethodError) throw new RuntimeError(e.message, rt.ln);
+      throw e;
+    }
     if (isCInst(obj)) {
       const fn = rt.findMethod(obj.cls, name);
       if (!fn) throw new RuntimeError(`\u7C7B ${obj.cls.name} \u6CA1\u6709\u65B9\u6CD5\u300C${name}\u300D`, rt.ln);
@@ -1889,6 +2294,9 @@ ${body}
             break;
           case "funcDef":
             out.add(s.name);
+            break;
+          case "destructure":
+            for (const n of s.names) out.add(n.name);
             break;
           case "if":
             for (const b of s.branches) walk(b.body);
@@ -2122,6 +2530,36 @@ ${genBlock(s.body, c2)}}
       case "return":
         return `${ln}return ${s.value ? genExpr(s.value, ctx) : "null"};
 `;
+      case "throw":
+        return `${ln}$.throwVal(${genExpr(s.value, ctx)});
+`;
+      case "try": {
+        const c2 = { ...ctx };
+        const body = genBlock(s.body, c2);
+        const fin = s.finallyBody ? ` finally {
+${genBlock(s.finallyBody, ctx)}}` : "";
+        if (!s.catchBody && !s.finallyBody) return `${ln}${body}`;
+        if (!s.catchBody) return `${ln}try {
+${body}}${fin}
+`;
+        const bind = s.catchName ? `let ${s.catchName} = $.errObj(__e);
+` : "";
+        const cctx = s.catchName ? { ...ctx, locals: /* @__PURE__ */ new Set([...ctx.locals, s.catchName]) } : c2;
+        return `${ln}try {
+${body}} catch (__e) {
+${bind}${genBlock(s.catchBody, cctx)}}${fin}
+`;
+      }
+      case "destructure": {
+        const tmp = `__d${s.line}_${s.col}`;
+        let out = `${ln}{ const ${tmp} = ${genExpr(s.value, ctx)};
+`;
+        s.names.forEach((n, idx) => {
+          out += `${genAssign({ k: "var", name: n.name, file: s.file, line: n.line, col: n.col, endLine: n.line, endCol: n.col }, "=", `${tmp}[${idx}]`, ctx)};
+`;
+        });
+        return out + "}\n";
+      }
       case "funcDef":
         return genFuncDef(s, ctx);
       case "classDef":
@@ -2334,6 +2772,17 @@ function nestedBlocks(s) {
 }
 
 // src/lang/interp.ts
+function hostGlobal() {
+  return typeof window !== "undefined" ? window : globalThis;
+}
+function hostSetTimeout(fn, ms) {
+  if (typeof window !== "undefined") {
+    window.setTimeout(fn, ms);
+    return;
+  }
+  setTimeout(fn, ms);
+}
+var MAX_CALL_DEPTH2 = 400;
 var FloatError = class extends Error {
   constructor(message, span, frames = []) {
     super(message);
@@ -2430,10 +2879,11 @@ function defaultValue(type) {
   }
 }
 var Runner = class {
-  constructor(entryFile, hook, importRoot) {
+  constructor(entryFile, hook, importRoot, explicitSources = null) {
     this.entryFile = entryFile;
     this.hook = hook;
     this.importRoot = importRoot;
+    this.explicitSources = explicitSources;
     this.env = this.globals;
   }
   state = "idle";
@@ -2447,6 +2897,8 @@ var Runner = class {
   globals = new Env(null, "global");
   env;
   depth = 0;
+  /** 函数调用叠了多少层（和上面的缩进 depth 是两回事，专管递归） */
+  callDepth = 0;
   steps = 0;
   time0 = 0;
   retValue = null;
@@ -2527,7 +2979,7 @@ var Runner = class {
     if (this.waitSeconds > 0) {
       const s = this.waitSeconds;
       this.waitSeconds = 0;
-      window.setTimeout(() => void this.pump(), Math.round(s * 1e3));
+      hostSetTimeout(() => void this.pump(), Math.round(s * 1e3));
       return;
     }
     void this.pump();
@@ -2557,6 +3009,7 @@ var Runner = class {
     this.imported.clear();
     this.steps = 0;
     this.depth = 0;
+    this.callDepth = 0;
     this.retValue = null;
     this.frames = [];
     for (const [k, v] of Object.entries(SPECIAL_DEFAULTS)) this.globals.define(k, v);
@@ -2704,6 +3157,11 @@ var Runner = class {
     }
     const msg = e instanceof FloatError ? this.formatError(e) : e instanceof Error ? e.message : String(e);
     this.hook.output({ kind: "err", text: msg });
+    this.hook.onError?.({
+      message: e instanceof Error ? e.message : String(e),
+      file: e instanceof FloatError && e.span ? e.span.file : this.crt?.file ?? this.entryFile,
+      line: e instanceof FloatError && e.span ? e.span.line : this.crt?.ln ?? 1
+    });
     this.gen = null;
     this.finish(true);
   }
@@ -2728,10 +3186,12 @@ var Runner = class {
     return norm2.split("/").pop() ?? norm2;
   }
   sources() {
-    const m = window.__floatSources;
+    if (this.explicitSources) return this.explicitSources;
+    const host = hostGlobal();
+    const m = host.__floatSources;
     if (!m) {
       const empty = /* @__PURE__ */ new Map();
-      window.__floatSources = empty;
+      host.__floatSources = empty;
       return empty;
     }
     return m;
@@ -2954,6 +3414,43 @@ var Runner = class {
         }
         return "normal";
       }
+      case "throw": {
+        yield { kind: "stmt", node: s, depth };
+        const v = yield* this.evalExpr(s.value, env);
+        throw new FloatError(this.errMessageOf(v), s);
+      }
+      case "try": {
+        yield { kind: "stmt", node: s, depth };
+        try {
+          const sig = yield* this.execBlock(s.body, env, depth);
+          if (sig !== "normal") {
+            if (s.finallyBody) yield* this.execBlock(s.finallyBody, env, depth);
+            return sig;
+          }
+        } catch (e) {
+          if (!s.catchBody) {
+            if (s.finallyBody) yield* this.execBlock(s.finallyBody, env, depth);
+            throw e;
+          }
+          if (s.catchName) env.define(s.catchName, this.errorObjectOf(e));
+          const sig = yield* this.execBlock(s.catchBody, env, depth);
+          if (s.finallyBody) yield* this.execBlock(s.finallyBody, env, depth);
+          return sig === "normal" ? "normal" : sig;
+        }
+        if (s.finallyBody) yield* this.execBlock(s.finallyBody, env, depth);
+        return "normal";
+      }
+      case "destructure": {
+        yield { kind: "stmt", node: s, depth };
+        const v = yield* this.evalExpr(s.value, env);
+        const arr = isList(v) ? v : typeof v === "string" ? v.split("") : null;
+        if (!arr) throw new FloatError("\u89E3\u6784\u8D4B\u503C\u53F3\u8FB9\u8981\u662F\u5217\u8868", s);
+        if (arr.length < s.names.length) {
+          throw new FloatError(`\u53F3\u8FB9\u53EA\u6709 ${arr.length} \u4E2A\u503C\uFF0C\u5DE6\u8FB9\u8981 ${s.names.length} \u4E2A`, s);
+        }
+        s.names.forEach((n, idx) => env.assign(n.name, arr[idx]));
+        return "normal";
+      }
       case "wait": {
         const secs = toNum(yield* this.evalExpr(s.seconds, env));
         if (secs === null) throw new FloatError("wait \u9700\u8981\u79D2\u6570", s);
@@ -3072,6 +3569,20 @@ var Runner = class {
         return "normal";
       }
     }
+  }
+  /** 把任意错误转成脚本里可读的字典：e.message / e.line / e.file */
+  errorObjectOf(e) {
+    const msg = e instanceof FloatError ? e.message : e instanceof Error ? e.message : String(e);
+    const span = e instanceof FloatError ? e.span : void 0;
+    const d = dict();
+    d.map.set("message", msg);
+    d.map.set("line", span?.line ?? 0);
+    d.map.set("file", span?.file ?? "");
+    return d;
+  }
+  errMessageOf(v) {
+    if (isDict(v) && v.map.has("message")) return toStr(v.map.get("message"));
+    return toStr(v);
   }
   async *loopWhile(s, env, depth) {
     let guard = 0;
@@ -3206,6 +3717,13 @@ var Runner = class {
         }
         if (e.callee.k === "member") {
           const obj = yield* this.evalExpr(e.callee.obj, env);
+          try {
+            const m = callBuiltinMethod(obj, e.callee.name, args);
+            if (m.handled) return m.value;
+          } catch (err) {
+            if (err instanceof MethodError) throw new FloatError(err.message, e);
+            throw err;
+          }
           if (isInstance(obj)) {
             const found = findMethod(obj.cls, e.callee.name);
             if (!found) throw new FloatError(`\u7C7B ${obj.cls.name} \u6CA1\u6709\u65B9\u6CD5\u300C${e.callee.name}\u300D`, e);
@@ -3446,6 +3964,12 @@ var Runner = class {
     if (args.length > fn.params.length) {
       throw new FloatError(`${fn.name} \u53EA\u63A5\u53D7 ${fn.params.length} \u4E2A\u53C2\u6570\uFF0C\u5B9E\u9645\u7ED9\u4E86 ${args.length} \u4E2A`, spanOf(e));
     }
+    if (this.callDepth >= MAX_CALL_DEPTH2) {
+      throw new FloatError(
+        `\u9012\u5F52\u592A\u6DF1\u4E86\uFF08\u8D85\u8FC7 ${MAX_CALL_DEPTH2} \u5C42\uFF09\u505C\u4E86\u4E0B\u6765\u3002\u591A\u534A\u662F ${fn.name} \u7684\u7ED3\u675F\u6761\u4EF6\u6CA1\u5199\u5BF9\uFF0C\u68C0\u67E5\u4E00\u4E0B\u5B83\u662F\u4E0D\u662F\u4F1A\u4E0D\u65AD\u8C03\u7528\u81EA\u5DF1\u3002`,
+        spanOf(e)
+      );
+    }
     const env = new Env(this.globals, fn.name);
     env.selfObj = self;
     for (let k = 0; k < fn.params.length; k++) {
@@ -3463,6 +3987,7 @@ var Runner = class {
     this.retValue = null;
     this.env = env;
     this.ownerStack.push(owner);
+    this.callDepth += 1;
     const caller = this.frames.length ? this.frames[this.frames.length - 1] : "";
     this.frames.push(`${self ? `${self.cls.name}.` : ""}${fn.name}() \u5728 ${this.shortFile(fn.file)} \u7B2C ${fn.line} \u884C${caller ? `\uFF08\u7531 ${caller} \u8C03\u7528\uFF09` : ""}`);
     try {
@@ -3487,6 +4012,7 @@ var Runner = class {
     } finally {
       this.frames.pop();
       this.ownerStack.pop();
+      this.callDepth -= 1;
     }
   }
   /** 实例化：先铺字段默认值，再调用 init（init 里可以有 ask / wait，所以是生成器） */

@@ -1,4 +1,4 @@
-/* Float Script 教程内容。
+/* CW Script 教程内容。
  *
  * 结构化的数据而不是一坨 Markdown——这样应用里能渲染成带目录的页面、
  * 代码块能一键「在编辑器中打开」和「直接运行」，同一份内容还能导出去。
@@ -43,12 +43,12 @@ export const CHAPTERS: Chapter[] = [
     id: 'start',
     title: '开始之前',
     icon: '▶',
-    summary: 'Float Script 是什么、怎么跑起来、和 Python 有什么关系',
+    summary: 'CW Script 是什么、怎么跑起来、和 Python 有什么关系',
     sections: [
       {
         id: 'what',
         title: '这是什么语言',
-        lead: 'Float Script（CW Script 系）是一门行式脚本语言：一行一句、缩进成块、中英文都认。',
+        lead: 'CW Script 是一门行式脚本语言：一行一句、缩进成块、中英文都认。',
         paras: [
           '它有 Python 的读感，但走的是「先翻译成 JS 再跑」的路线：按 F5 时，整份 AST 会被编译成 JavaScript 交给 V8 执行。所以循环、递归、字符串拼接这些热路径，实测比 CPython 快 5～9 倍。',
           '同时它保留了「开箱即用」：没有编译等待，按下就跑；随时可以切到解释执行（F6）打断点、单步、看变量。'
@@ -62,8 +62,8 @@ export const CHAPTERS: Chapter[] = [
         title: '第一个程序',
         paras: ['创建工程后，入口文件 main.cw 里写：'],
         codes: [{
-          code: 'print("你好，Float Script！")',
-          out: '你好，Float Script！'
+          code: 'print("你好，CW Script！")',
+          out: '你好，CW Script！'
         }],
         tips: [
           { kind: 'tip', text: 'print 的括号可以省略：print "你好" 也能跑。多个值用逗号隔开，输出时用空格连接。' }

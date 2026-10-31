@@ -221,7 +221,12 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
   color: var(--txt3); cursor: pointer; display: flex; align-items: center; justify-content: center;
 }
 .rail-btn:hover { color: var(--txt); background: var(--bg3); }
-.rail-btn.active { color: #fff; background: var(--accent); }
+.rail-btn { position: relative; }
+.rail-btn.active { color: var(--txt); background: var(--s3); }
+.rail-btn.active::before {
+  content: ""; position: absolute; left: -4px; top: 7px; bottom: 7px;
+  width: 2px; border-radius: 2px; background: var(--accent);
+}
 
 /* 侧栏（资源管理器 / Git） */
 .side-wrap {
@@ -368,6 +373,15 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 .sp-tabs { display: flex; border-bottom: 1px solid var(--line); flex: none; }
 .sp-tab { flex: 1; text-align: center; padding: 9px 0; font-size: 12.5px; color: var(--txt2); cursor: pointer; border-bottom: 2px solid transparent; }
 .sp-tab.active { color: var(--txt); border-bottom-color: var(--accent); }
+
+/* 变量面板：上面是脚本自己的变量，分割线下面是特殊变量 */
+.vsec-tag {
+  font-size: 10.5px; letter-spacing: 1px; color: var(--txt3);
+  padding: 2px 2px 5px; text-transform: none;
+}
+.vsec-tag.special { padding-top: 4px; }
+.vsec-split { height: 1px; background: var(--line); margin: 8px 0 6px; }
+.kv.special code.inline { color: var(--txt2); }
 .sp-body { flex: 1; overflow-y: auto; padding: 8px 10px; font-size: 12.5px; line-height: 1.65; }
 .kv { display: flex; justify-content: space-between; padding: 3px 0; color: var(--txt2); }
 .kv b { color: var(--txt); font-weight: 600; }

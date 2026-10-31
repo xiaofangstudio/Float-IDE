@@ -248,7 +248,7 @@ export function PluginPanel({ host, onChanged, onClose, embedded }: Props) {
   }
 }`}</pre>
           <p className="pp-muted">
-            命令里的 <code>run</code> 直接就是一段 Float Script，会被语言内核执行，输出进控制台。
+            命令里的 <code>run</code> 直接就是一段 CW Script，会被语言内核执行，输出进控制台。
             也可以用 <code>insert</code> 往编辑器里插文本，支持 <code>{'${file} ${path} ${project} ${date} ${time}'}</code> 占位符。
           </p>
 
@@ -269,7 +269,7 @@ module.exports = {
             <tbody>
               <tr><td><code>float.files.read / write / list</code></td><td>读写工程文件（需 <code>files:read/write</code> 权限）</td></tr>
               <tr><td><code>float.editor.getText / setText / insert</code></td><td>读写当前编辑器（需 <code>editor:read/write</code>）</td></tr>
-              <tr><td><code>float.language.run(code)</code></td><td>跑一段 Float Script 拿输出（需 <code>language:run</code>）</td></tr>
+              <tr><td><code>float.language.run(code)</code></td><td>跑一段 CW Script 拿输出（需 <code>language:run</code>）</td></tr>
               <tr><td><code>float.console.print / error</code></td><td>写控制台（需 <code>console:write</code>）</td></tr>
               <tr><td><code>float.ui.notify</code></td><td>界面提示（需 <code>ui:notify</code>）</td></tr>
               <tr><td><code>float.plugin.storage.get / set</code></td><td>插件私有键值存储</td></tr>

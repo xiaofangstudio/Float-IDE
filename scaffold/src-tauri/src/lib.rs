@@ -1,4 +1,5 @@
 mod commands;
+pub mod startup;
 
 use commands::terminal::PtyState;
 use tauri::Manager;
@@ -31,6 +32,8 @@ pub fn run() {
             commands::project::recent_push,
             commands::project::recent_remove,
             commands::project::pick_folder,
+            commands::project::pick_open_file,
+            commands::project::startup_path,
             commands::project::pick_save_file,
             commands::project::pick_image,
             commands::project::project_export_zip,
