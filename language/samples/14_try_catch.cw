@@ -1,0 +1,65 @@
+-- 14 异常处理 try / catch / finally / throw
+-- 运行时出错不再直接终止程序：能接住、能说清原因、能继续跑。
+-- catch 拿到的：throw 抛什么就是什么；运行时错误则是一张带「消息 / 行 / 类型」的字典。
+
+-- ① 自己主动抛
+try
+    throw "余额不够"
+catch e
+    print "接住了：" + e
+
+-- ② 接住运行时错误，并读它的原因和行号
+try
+    int n = 1
+    print n.什么
+catch e
+    print "出问题的是第 " + e.行 + " 行"
+    print "原因：" + e.消息
+
+-- ③ 函数里抛，外面接
+fn 取钱(余额, 金额)
+    if (金额 > 余额)
+        throw "余额不足：" + 金额 + " > " + 余额
+    return 余额 - 金额
+
+try
+    print "取完还剩 " + 取钱(100, 30)
+    print "取完还剩 " + 取钱(100, 300)
+catch e
+    print e
+
+-- ④ finally：不管出不出错都要跑的收尾
+fn 干活(会不会失败)
+    try
+        if (会不会失败)
+            throw "中途炸了"
+        return "顺利"
+    finally
+        print "  → 收尾（关文件 / 还内存都写这儿）"
+
+print 干活(false)
+try
+    print 干活(true)
+catch e
+    print "兜底：" + e
+
+-- ⑤ 循环里每圈都能各自接住，不会因为一圈出错就全停
+for i in range(5)
+    try
+        if (i % 2 == 1)
+            throw "第 " + i + " 圈不行"
+        print i
+    catch e
+        print "跳过：" + e
+
+-- ⑥ 嵌套：里层先接，里层不处理就自动传给外层
+try
+    try
+        throw "内层的问题"
+    catch e
+        print "内层处理：" + e
+        throw "升级成外层问题"
+catch e
+    print "外层处理：" + e
+
+print "程序正常跑完了"

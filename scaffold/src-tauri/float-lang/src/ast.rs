@@ -34,6 +34,8 @@ pub enum ExprKind {
     Dict(Vec<(Expr, Expr)>),
     Un { op: Op, a: Box<Expr> },
     Bin { op: Op, a: Box<Expr>, b: Box<Expr> },
+    /// 三元：`条件 ? 这个 : 那个`（只有被选中的那一支会求值）
+    Ternary { cond: Box<Expr>, a: Box<Expr>, b: Box<Expr> },
     Idx { obj: Box<Expr>, index: Box<Expr> },
     Member { obj: Box<Expr>, name: Rc<str> },
     Call { callee: Box<Expr>, args: Vec<Expr> },
@@ -47,6 +49,8 @@ pub enum Op {
     Sub,
     Mul,
     Div,
+    /// 整除：向下取整（`7 // 2` = 3，`-7 // 2` = -4）
+    IDiv,
     Mod,
     Pow,
     Eq,
@@ -75,6 +79,7 @@ impl Op {
             "*" => Op::Mul,
             "/" => Op::Div,
             "%" => Op::Mod,
+            "//" => Op::IDiv,
             "**" => Op::Pow,
             "==" | "===" => Op::Eq,
             "!=" | "!==" => Op::Ne,
@@ -194,6 +199,10 @@ pub enum StmtKind {
     Print(Vec<Expr>),
     /// 报告：写法跟 print 一样，但走「报告」通道（IDE 右侧面板），不进控制台
     Report(Vec<Expr>),
+    /// 调试输出：`调试 报告/警告/报错 内容`——纯给开发者看的，带颜色级别，
+    /// 对程序没有任何影响（报错也不中断，返回 null）。
+    /// level：1 = 报告（蓝），2 = 警告（黄），3 = 报错（红）
+    Debug { level: u8, args: Vec<Expr> },
     /// ask "问题" —— 把回答写进 ans / __last_ans
     Ask(Option<Expr>),
     If {
@@ -205,6 +214,17 @@ pub enum StmtKind {
         cond: Expr,
         body: Vec<Stmt>,
     },
+    /// wait until (条件)：条件为假就一直执行块（死循环有次数上限）
+    WaitUntil {
+        cond: Expr,
+        body: Vec<Stmt>,
+    },
+    /// if out (条件)：条件成立就跳出当前循环（条件式 break）
+    IfOut(Expr),
+    /// time read：把距上次 time reset 的秒数写进 __last_time
+    TimeRead,
+    /// time reset：重置计时器
+    TimeReset,
     Repeat {
         count: Expr,
         body: Vec<Stmt>,
@@ -238,8 +258,21 @@ pub enum StmtKind {
         ret: Option<Rc<str>>,
         body: Vec<Stmt>,
     },
+    /// try / catch / finally
+    Try {
+        body: Vec<Stmt>,
+        /// `catch e` 的变量名；只写 `catch` 就是 None（照样接住，只是不绑定名字）
+        catch_name: Option<Rc<str>>,
+        /// 有没有写 catch 子句（写了 catch_body / catch_name 任意一个都算）
+        catch_body: Option<Vec<Stmt>>,
+        finally: Option<Vec<Stmt>>,
+    },
+    /// throw 一个值：`throw "余额不够"`
+    Throw(Expr),
     /// 只有注释 / 空行，什么都不做
     Nop,
+    /// 一条源码语句展开成多条（class 降级成函数）
+    Group(Vec<Stmt>),
     /// 语法上认得、但这版运行时还没实现（如 class / try / import）
     Unsupported {
         what: String,

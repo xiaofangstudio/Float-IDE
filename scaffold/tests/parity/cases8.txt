@@ -1,0 +1,38 @@
+### 带返回类型的函数
+int add(a, b)
+    return a + b
+
+print(add(2, 3))
+print(add(2, 3) + 1)
+### 老写法也应该照样能用
+fn int mul(a, b)
+    return a * b
+
+print(mul(3, 4))
+### 无返回类型的函数
+fn hi(x)
+    return "hi " + x
+
+print(hi("你"))
+### 七种类型声明
+int i = 1
+float f = 1.5
+str s = "x"
+bool b = true
+list xs = [1]
+dict d = {"k": 1}
+print(i, f, s, b, len(xs), len(d))
+### void 函数
+void 说(内容)
+    print(内容)
+
+说("跑完了")
+### 类型只作标注，运行时按值走
+int n = 3
+print(n / 2)
+print(n // 2)
+### 参数带类型
+int twice(int x)
+    return x * 2
+
+print(twice(21))

@@ -238,3 +238,12 @@ export function collectMethods(cls: ClassDef): string[] {
   while (c) { for (const k of c.methods.keys()) out.add(k); c = c.base; }
   return [...out];
 }
+
+/** 脚本里 `throw 值` 抛出来的东西：把原值原样带到 catch，
+ *  和 Rust 内核一致（throw 抛什么，catch 就拿到什么）。 */
+export class ThrownValue extends Error {
+  constructor(public value: Val) {
+    super('throw');
+    this.name = 'ThrownValue';
+  }
+}

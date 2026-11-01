@@ -11,6 +11,7 @@
 
 use crate::ast::Op as AOp;
 use crate::ast::*;
+use crate::TypeName;
 use crate::error::{FloatError, Span};
 use crate::value::{UserFn, Value};
 use std::collections::HashMap;
@@ -34,6 +35,8 @@ pub enum Op {
     Sub,
     Mul,
     Div,
+    /// 整除：向下取整
+    IDiv,
     Mod,
     Pow,
     Eq,
@@ -105,11 +108,26 @@ pub enum Op {
     Ask,
     /// 报告：弹出 n 个值，拼成一行写进「报告」通道（0 个 = 报告当前所有变量）
     Report(u16),
+    /// 调试输出：弹出 n 个值拼成一行，按 level 带颜色级别写给开发者看（不影响程序）
+    /// level：1 = 报告（蓝），2 = 警告（黄），3 = 报错（红）
+    Debug { n: u16, level: u8 },
+    /// 压一个 float：距上次 time reset 的秒数
+    TimeRead,
+    /// 把计时器归零
+    TimeReset,
 
     IterInit,
     /// 迭代器取下一个：取到压栈，取完跳到目标
     IterNext(u32),
     IterEnd,
+
+    /* ── try / catch ── */
+    /// 记一个"出错就往 handler 跳"的现场（handler 地址先写 0，后面 patch）
+    TryBegin(u32),
+    /// 正常跑完 try 块，撤掉现场
+    TryEnd,
+    /// 弹栈顶当错误抛出去
+    Throw,
 }
 
 #[derive(Clone, Debug)]
@@ -126,6 +144,12 @@ pub struct Chunk {
     pub global_names: Vec<Rc<str>>,
     pub n_globals: u16,
     pub file: Rc<str>,
+    /// 参与编译的文件（[0] 是主文件）。用了 import 时不止一个。
+    pub files: Vec<Rc<str>>,
+    /// 每一行（下标 = 行号 - 1）属于哪个文件；空 = 全算主文件
+    pub line_file: Vec<u16>,
+    /// 每一行在它自己那个文件里的行号
+    pub line_local: Vec<u32>,
 }
 
 impl Chunk {
@@ -150,11 +174,13 @@ enum Slot {
 struct Scope {
     vars: HashMap<Rc<str>, u16>,
     next: u16,
+    /// 变量名 → 声明时写的类型（`var` / 类名 这类"不强制"的不记）
+    types: HashMap<Rc<str>, TypeName>,
 }
 
 impl Scope {
     fn new() -> Scope {
-        Scope { vars: HashMap::new(), next: 0 }
+        Scope { vars: HashMap::new(), next: 0, types: HashMap::new() }
     }
     fn declare(&mut self, name: &Rc<str>) -> u16 {
         if let Some(s) = self.vars.get(name) {
@@ -174,6 +200,10 @@ struct LoopCtx {
     iter_depth: usize,
     /// 进这层循环时计数循环的深度（break 要按层数收状态）
     range_depth: usize,
+    /// 进这层循环时 try 的深度（break/continue 跳出 try 要把现场撤掉）
+    try_depth: usize,
+    /// 进这层循环时"带 finally 的 try"的深度（break 要把循环里那几层 finally 跑掉）
+    fin_depth: usize,
     breaks: Vec<usize>,
     continues: Vec<usize>,
 }
@@ -190,6 +220,10 @@ pub struct Compiler {
     iters: usize,
     /// 当前嵌了几层计数循环（break 时按层收状态）
     ranges: usize,
+    /// 当前嵌了几层 try（break/continue 出门时要撤掉)
+    tries: usize,
+    /// 外层每个 try 的 finally 块：return / break 提前出门时要把它们跑掉
+    finallies: Vec<Rc<Vec<Stmt>>>,
     loops: Vec<LoopCtx>,
     pub errors: Vec<FloatError>,
     /// 编译产出：函数体登记在这里，靠 entry 地址回到字节码
@@ -210,6 +244,8 @@ impl Compiler {
             line: 0,
             iters: 0,
             ranges: 0,
+            tries: 0,
+            finallies: Vec::new(),
             loops: Vec::new(),
             errors: Vec::new(),
             funcs: Vec::new(),
@@ -252,7 +288,8 @@ impl Compiler {
             | Op::JumpIfFalse(x)
             | Op::JumpIfFalseKeep(x)
             | Op::JumpIfTrueKeep(x)
-            | Op::IterNext(x) => *x = t,
+            | Op::IterNext(x)
+            | Op::TryBegin(x) => *x = t,
             Op::RangeNext { fail } => *fail = t,
             Op::JumpIfArgc { target, .. } => *target = t,
             other => panic!("patch 打在了非跳转指令上：{:?}", other),
@@ -306,6 +343,59 @@ impl Compiler {
         Slot::Global(s)
     }
 
+    /// `int a = "x"` 这种一眼能看出来的类型错，编译期就拦掉。
+    /// 只查"右边是字面量"的情况：变量、函数返回值这些静态看不出类型的，留给运行时。
+    fn check_decl_type(&mut self, name: &Rc<str>, ty: &TypeName, init: Option<&Expr>, span: &Span) {
+        let e = match init {
+            Some(e) => e,
+            None => return,
+        };
+        let got = match &e.kind {
+            ExprKind::Str(_) => "str",
+            ExprKind::Bool(_) => "bool",
+            ExprKind::List(_) => "list",
+            ExprKind::Dict(_) => "dict",
+            ExprKind::Num(v) => {
+                if v.fract() == 0.0 && v.is_finite() { "int" } else { "float" }
+            }
+            _ => return,
+        };
+        let want = match ty {
+            TypeName::Int => "int",
+            TypeName::Float => "float",
+            TypeName::Str => "str",
+            TypeName::Bool => "bool",
+            TypeName::List => "list",
+            TypeName::Dict => "dict",
+            _ => return,
+        };
+        let ok = want == got || (want == "float" && got == "int");
+        if !ok {
+            self.err(
+                format!("{} 是 {}，但右边给的是 {}", name, want, got),
+                span,
+            );
+        }
+    }
+
+    /// 赋值时检查：这个变量是声明成什么类型的
+    fn check_assign_type(&mut self, target: &Target, value: &Expr, span: &Span) {
+        let name = match target {
+            Target::Var(n) => n,
+            _ => return,
+        };
+        let ty = self
+            .scopes
+            .last()
+            .and_then(|sc| sc.types.get(name).copied())
+            .or_else(|| self.scopes[0].types.get(name).copied());
+        let ty = match ty {
+            Some(t) => t,
+            None => return,
+        };
+        self.check_decl_type(name, &ty, Some(value), span);
+    }
+
     fn declare_local(&mut self, name: &Rc<str>) -> Slot {
         if self.in_function() {
             let s = self.scopes.last_mut().unwrap().declare(name);
@@ -352,6 +442,9 @@ impl Compiler {
             global_names,
             n_globals: self.scopes[0].next,
             file: Rc::clone(&self.file),
+            files: vec![Rc::clone(&self.file)],
+            line_file: Vec::new(),
+            line_local: Vec::new(),
         }
     }
 
@@ -362,19 +455,42 @@ impl Compiler {
             self.line = s.span.line;
         }
         match &s.kind {
+            StmtKind::Group(list) => {
+                for st in list {
+                    self.stmt(st);
+                }
+            }
             StmtKind::Nop => {}
-            StmtKind::Decl { name, init, .. } => {
+            StmtKind::Decl { name, ty, init } => {
+                self.check_decl_type(name, ty, init.as_ref(), &s.span);
                 let slot = self.declare_local(name);
+                if matches!(ty, TypeName::Int | TypeName::Float | TypeName::Str | TypeName::Bool | TypeName::List | TypeName::Dict) {
+                    self.scopes.last_mut().unwrap().types.insert(Rc::clone(name), *ty);
+                }
                 match init {
                     Some(e) => self.expr(e),
+                    // `list xs` / `dict d` 不给初值时给个空容器，
+                    // 不然一句 add … to 就崩在 null 上（老脚本大量这么写）
                     None => {
-                        self.emit(Op::Nil);
+                        // 空变量：`int c` 这种只声明不赋值的写法。
+                        // 按类型给个中性初值（而不是一律 null），这样
+                        // `int 总数` + `总数 += x` 这种累加写法直接就能用。
+                        match ty {
+                            TypeName::List => self.emit(Op::BuildList(0)),
+                            TypeName::Dict => self.emit(Op::BuildDict(0)),
+                            TypeName::Int => self.emit_const(Value::Int(0)),
+                            TypeName::Float => self.emit_const(Value::Float(0.0)),
+                            TypeName::Str => self.emit_const(Value::string(String::new())),
+                            TypeName::Bool => self.emit(Op::False),
+                            _ => self.emit(Op::Nil),
+                        };
                     }
                 }
                 self.store(slot);
             }
             StmtKind::Assign { target, op, value } => {
                 if *op == AssignOp::Set {
+                    self.check_assign_type(target, value, &s.span);
                     self.push_ref(target);
                     self.expr(value);
                     self.emit_set(target);
@@ -457,6 +573,50 @@ impl Compiler {
                 }
                 self.emit(Op::Report(args.len() as u16));
             }
+            StmtKind::Debug { level, args } => {
+                for a in args {
+                    self.expr(a);
+                }
+                self.emit(Op::Debug { n: args.len() as u16, level: *level });
+            }
+            // wait until (条件)：条件成立就往下走，否则一直跑块（带上限防死循环）
+            StmtKind::WaitUntil { cond, body } => {
+                let start = self.here();
+                self.expr(cond);
+                self.emit(Op::Not);
+                let jf = self.emit(Op::JumpIfFalse(0));
+                self.loops.push(LoopCtx { iter_depth: self.iters, range_depth: self.ranges, try_depth: self.tries, fin_depth: self.finallies.len(), breaks: vec![], continues: vec![] });
+                for st in body {
+                    self.stmt(st);
+                }
+                let back = self.emit(Op::Jump(0));
+                self.patch_to(back, start);
+                let ctx = self.loops.pop().unwrap();
+                let after = self.here();
+                self.patch_to(jf, after);
+                for b in ctx.breaks {
+                    self.patch_to(b, after);
+                }
+                for c in ctx.continues {
+                    self.patch_to(c, start);
+                }
+            }
+            // if out (条件)：条件成立就跳出当前循环（等于"条件式 break"）
+            StmtKind::IfOut(cond) => {
+                self.expr(cond);
+                let jf = self.emit(Op::JumpIfFalse(0));
+                self.stmt(&Stmt::new(StmtKind::Break, s.span.clone()));
+                let after = self.here();
+                self.patch_to(jf, after);
+            }
+            // time read：把秒数写进 __last_time
+            StmtKind::TimeRead => {
+                self.emit(Op::TimeRead);
+                self.store_special("__last_time");
+            }
+            StmtKind::TimeReset => {
+                self.emit(Op::TimeReset);
+            }
             StmtKind::Ask(prompt) => {
                 // 有提示就先打出来（控制台风格），再读一行写进 ans / __last_ans
                 if let Some(e) = prompt {
@@ -502,7 +662,7 @@ impl Compiler {
                 let start = self.here();
                 self.expr(cond);
                 let jf = self.emit(Op::JumpIfFalse(0));
-                self.loops.push(LoopCtx { iter_depth: self.iters, range_depth: self.ranges, breaks: vec![], continues: vec![] });
+                self.loops.push(LoopCtx { iter_depth: self.iters, range_depth: self.ranges, try_depth: self.tries, fin_depth: self.finallies.len(), breaks: vec![], continues: vec![] });
                 for st in body {
                     self.stmt(st);
                 }
@@ -528,10 +688,13 @@ impl Compiler {
                 self.emit_const(Value::Int(0));
                 self.emit(Op::Gt);
                 let jf = self.emit(Op::JumpIfFalse(0));
-                self.loops.push(LoopCtx { iter_depth: self.iters, range_depth: self.ranges, breaks: vec![], continues: vec![] });
+                self.loops.push(LoopCtx { iter_depth: self.iters, range_depth: self.ranges, try_depth: self.tries, fin_depth: self.finallies.len(), breaks: vec![], continues: vec![] });
                 for st in body {
                     self.stmt(st);
                 }
+                // continue 必须接在"递减"这一步上：直接跳回循环头的话计数永远不减，
+                // 写成 `if (...) continue` 就是死循环（对拍抓到的真 bug）
+                let dec = self.here();
                 self.load(temp);
                 self.emit_const(Value::Int(1));
                 self.emit(Op::Sub);
@@ -545,7 +708,7 @@ impl Compiler {
                     self.patch_to(b, after);
                 }
                 for c in ctx.continues {
-                    self.patch_to(c, start);
+                    self.patch_to(c, dec);
                 }
             }
             StmtKind::ForRange { var, from, to, step, inclusive, body } => {
@@ -577,6 +740,8 @@ impl Compiler {
                 self.loops.push(LoopCtx {
                     iter_depth: self.iters,
                     range_depth: self.ranges - 1,
+                    try_depth: self.tries,
+                    fin_depth: self.finallies.len(),
                     breaks: vec![],
                     continues: vec![],
                 });
@@ -622,7 +787,7 @@ impl Compiler {
                     self.emit(Op::Index);
                     self.store(vs);
                 }
-                self.loops.push(LoopCtx { iter_depth: self.iters - 1, range_depth: self.ranges, breaks: vec![], continues: vec![] });
+                self.loops.push(LoopCtx { iter_depth: self.iters - 1, range_depth: self.ranges, try_depth: self.tries, fin_depth: self.finallies.len(), breaks: vec![], continues: vec![] });
                 for st in body {
                     self.stmt(st);
                 }
@@ -644,6 +809,73 @@ impl Compiler {
                     self.patch_to(c, start);
                 }
             }
+            StmtKind::Try { body, catch_name, catch_body, finally } => {
+                let fin: Option<Rc<Vec<Stmt>>> = finally.as_ref().map(|f| Rc::new(f.clone()));
+                if let Some(f) = &fin {
+                    self.finallies.push(Rc::clone(f));
+                }
+                self.tries += 1;
+                let tb = self.emit(Op::TryBegin(0));
+                for st in body {
+                    self.stmt(st);
+                }
+                self.emit(Op::TryEnd);
+                self.tries -= 1;
+                if fin.is_some() {
+                    self.finallies.pop();
+                }
+                if let Some(f) = finally {
+                    for st in f {
+                        self.stmt(st);
+                    }
+                }
+                let j_end = self.emit(Op::Jump(0));
+
+                // ── 出错时从这里接上：错误值已经在栈顶 ──
+                self.patch(tb);
+                let has_catch = catch_body.is_some() || catch_name.is_some();
+                if has_catch {
+                    match catch_name {
+                        Some(name) => {
+                            let slot = self.declare_local(name);
+                            self.store(slot);
+                        }
+                        None => {
+                            self.emit(Op::Pop);
+                        }
+                    }
+                    if let Some(cb) = catch_body {
+                        if let Some(f) = &fin {
+                            self.finallies.push(Rc::clone(f));
+                        }
+                        for st in cb {
+                            self.stmt(st);
+                        }
+                        if fin.is_some() {
+                            self.finallies.pop();
+                        }
+                    }
+                    if let Some(f) = finally {
+                        for st in f {
+                            self.stmt(st);
+                        }
+                    }
+                } else {
+                    // 只有 finally：先把它跑完，再把错误原样抛给外层。
+                    // 错误值一直留在栈顶，finally 语句是平衡的，跑完还在。
+                    if let Some(f) = finally {
+                        for st in f {
+                            self.stmt(st);
+                        }
+                    }
+                    self.emit(Op::Throw);
+                }
+                self.patch(j_end);
+            }
+            StmtKind::Throw(v) => {
+                self.expr(v);
+                self.emit(Op::Throw);
+            }
             StmtKind::Break => {
                 let need = self.iters - self.loops.last().map(|l| l.iter_depth).unwrap_or(self.iters);
                 for _ in 0..need {
@@ -654,6 +886,14 @@ impl Compiler {
                 for _ in 0..need_ranges {
                     self.emit(Op::RangeEnd);
                 }
+                // 跳出 try 时要撤掉它的处理器，不然错误会跳进已经跳出去的 catch
+                let need_try = self.tries - self.loops.last().map(|l| l.try_depth).unwrap_or(self.tries);
+                for _ in 0..need_try {
+                    self.emit(Op::TryEnd);
+                }
+                // 循环里那几层 finally 也得跑（循环外面的不管）
+                let fd = self.loops.last().map(|l| l.fin_depth).unwrap_or(0);
+                self.run_finallies(fd);
                 let j = self.emit(Op::Jump(0));
                 if let Some(ctx) = self.loops.last_mut() {
                     ctx.breaks.push(j);
@@ -667,6 +907,10 @@ impl Compiler {
                 for _ in 0..need {
                     self.emit(Op::IterEnd);
                 }
+                let need_try = self.tries - self.loops.last().map(|l| l.try_depth).unwrap_or(self.tries);
+                for _ in 0..need_try {
+                    self.emit(Op::TryEnd);
+                }
                 let j = self.emit(Op::Jump(0));
                 if let Some(ctx) = self.loops.last_mut() {
                     ctx.continues.push(j);
@@ -675,6 +919,7 @@ impl Compiler {
                 }
             }
             StmtKind::Stop => {
+                self.run_finallies(0);
                 self.emit(Op::Nil);
                 self.emit(Op::Return);
             }
@@ -695,6 +940,9 @@ impl Compiler {
                         self.emit(Op::Nil);
                     }
                 }
+                // return 从 try 里"提前出门"：外面那几层 finally 得先跑完
+                // （返回值压在栈底，finally 语句是平衡的，不会碰它）
+                self.run_finallies(0);
                 self.emit(Op::Return);
             }
             StmtKind::FuncDef { name, params, body, .. } => self.func_def(name, params, body, &s.span),
@@ -714,6 +962,22 @@ impl Compiler {
                 self.err(format!("{}", what), &s.span);
             }
         }
+    }
+
+    /// 把 return / break 出门前该跑的 finally 就地摊开。
+    /// 从最内层开始（倒序），`from` 之下的是循环外面那几层，不该跑。
+    fn run_finallies(&mut self, from: usize) {
+        if self.finallies.len() <= from {
+            return;
+        }
+        let blocks: Vec<Rc<Vec<Stmt>>> = self.finallies[from..].iter().rev().cloned().collect();
+        let saved = std::mem::take(&mut self.finallies);
+        for b in &blocks {
+            for st in b.iter() {
+                self.stmt(st);
+            }
+        }
+        self.finallies = saved;
     }
 
     fn func_def(&mut self, name: &Rc<str>, params: &[Param], body: &[Stmt], span: &Span) {
@@ -911,8 +1175,14 @@ impl Compiler {
                 }
             }
             ExprKind::SelfRef => {
-                self.err("self 只能用在类方法里，这版 VM 还没实现类", &e.span);
-                self.emit(Op::Nil);
+                // 类的降级方案里 self 就是方法的第 0 个参数，直接当普通变量取
+                match self.lookup("self") {
+                    Some(slot) => self.load(slot),
+                    None => {
+                        self.err("self 只能用在类的方法里", &e.span);
+                        self.emit(Op::Nil);
+                    }
+                }
             }
             ExprKind::List(items) => {
                 for it in items {
@@ -935,6 +1205,18 @@ impl Compiler {
                     AOp::BitNot => Op::BitNot,
                     _ => Op::Not,
                 });
+            }
+            // 条件 ? 这个 : 那个 —— 只算被选中的那一支
+            ExprKind::Ternary { cond, a, b } => {
+                self.expr(cond);
+                let jf = self.emit(Op::JumpIfFalse(0));
+                self.expr(a);
+                let jend = self.emit(Op::Jump(0));
+                let else_at = self.here();
+                self.patch_to(jf, else_at);
+                self.expr(b);
+                let end = self.here();
+                self.patch_to(jend, end);
             }
             ExprKind::Bin { op, a, b } => {
                 match op {
@@ -1009,12 +1291,22 @@ impl Compiler {
                     self.emit(Op::Call(args.len() as u8));
                 }
             }
-            ExprKind::New { class, .. } => {
-                self.err(
-                    format!("new {}：这版 VM 还没实现类与实例", class),
-                    &e.span,
-                );
-                self.emit(Op::Nil);
+            ExprKind::New { class, args } => {
+                // 类已经在解析阶段降级成 `__new_类(…)`，这里直接当普通函数调
+                let ctor: Rc<str> = Rc::from(format!("__new_{}_", class).as_str());
+                match self.lookup(&ctor) {
+                    Some(slot) => {
+                        self.load(slot);
+                        for a in args {
+                            self.expr(a);
+                        }
+                        self.emit(Op::Call(args.len() as u8));
+                    }
+                    None => {
+                        self.err(format!("找不到类「{}」（是不是没定义？）", class), &e.span);
+                        self.emit(Op::Nil);
+                    }
+                }
             }
         }
     }
@@ -1166,10 +1458,13 @@ fn literal_of(e: &Expr) -> Option<Value> {
     }
 }
 
-fn binop_to_op(op: AOp) -> Op {    match op {        AOp::Add => Op::Add,
+fn binop_to_op(op: AOp) -> Op {
+    match op {
+        AOp::Add => Op::Add,
         AOp::Sub => Op::Sub,
         AOp::Mul => Op::Mul,
         AOp::Div => Op::Div,
+        AOp::IDiv => Op::IDiv,
         AOp::Mod => Op::Mod,
         AOp::Pow => Op::Pow,
         AOp::Eq => Op::Eq,

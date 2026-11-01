@@ -24,7 +24,7 @@ const KEYWORDS = new Set(['new', 'class', 'extends', 'function', 'fn', 'return',
 const OPERATORS = [
   '===', '!==', '**=', '<<=', '>>=',
   '==', '!=', '<=', '>=', '&&', '||', '**', '<<', '>>', '+=', '-=', '*=', '/=', '%=',
-  '++', '--', '=>',
+  '++', '--', '//', '=>',
   '+', '-', '*', '/', '%', '<', '>', '!', '~', '&', '|', '^', '=', '?', ':'
 ];
 
@@ -56,8 +56,7 @@ export function tokenizeLine(src: string, line: number, startCol = 1): Token[] {
     if (c === ' ' || c === '\t' || c === '\u3000') { i++; continue; }
     if (c === '\r') { i++; continue; }
 
-    // 行注释：// 之后全部丢弃（调用方需要原文时自己切）
-    if (c === '/' && src[i + 1] === '/') break;
+    // 注意：`//` 不是注释，是整除运算符（注释在 codePart 里按 `--` 剥掉）
 
     // 字符串
     if (c === '"' || c === "'") {
@@ -159,7 +158,10 @@ export function describeTok(t: Token): string {
   return `「${t.v}」`;
 }
 
-/** 取一行里 `//` 之前的有效代码（跳过字符串内的 //） */
+/** 取一行的有效代码，把 `--` 注释剥掉（跳过字符串里的 `--`）。
+ *  消歧：`--` 左边是行首/空白、右边是空白/行尾，才算注释。
+ *  所以 `i--` 是自减，`i-- -- 说明` 前半是自减、后半是注释。
+ *  **`//` 不是注释**，它是整除运算符。 */
 export function codePart(line: string): { code: string; comment: string | null } {
   let inStr: string | null = null;
   for (let i = 0; i < line.length; i++) {
@@ -170,8 +172,13 @@ export function codePart(line: string): { code: string; comment: string | null }
       continue;
     }
     if (c === '"' || c === "'") { inStr = c; continue; }
-    if (c === '/' && line[i + 1] === '/') {
-      return { code: line.slice(0, i), comment: line.slice(i + 2) };
+    if (c === '-' && line[i + 1] === '-') {
+      const leftOk = i === 0 || /\s/.test(line[i - 1]);
+      const after = line[i + 2];
+      const rightOk = after === undefined || /\s/.test(after);
+      if (leftOk && rightOk) {
+        return { code: line.slice(0, i), comment: line.slice(i + 2) };
+      }
     }
   }
   return { code: line, comment: null };

@@ -8,8 +8,38 @@ pub struct AppState {
     pub ptys: PtyState,
 }
 
+/// 崩溃落盘：Rust 侧 panic 时把时间和调用栈写进 %APPDATA%\Float\crash.log。
+///
+/// 为什么要有这个：以前一旦后端 panic，用户看到的就是"界面不动了/一片黑"，
+/// 我们这边连一行线索都拿不到，只能猜。现在至少有据可查。
+fn install_crash_log() {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let mut path = std::env::var("APPDATA").map(std::path::PathBuf::from).unwrap_or_default();
+        path.push("Float");
+        let _ = std::fs::create_dir_all(&path);
+        path.push("crash.log");
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let text = format!(
+            "\n===== {} =====\n{}\n(位置: {:?})\n",
+            stamp,
+            info,
+            info.location()
+        );
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = f.write_all(text.as_bytes());
+        }
+        prev(info);
+    }));
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    install_crash_log();
     tauri::Builder::default()
         .manage(AppState { ptys: PtyState::new() })
         .manage(commands::mcp::McpState::new())
@@ -31,6 +61,8 @@ pub fn run() {
             commands::project::recent_get,
             commands::project::recent_push,
             commands::project::recent_remove,
+            commands::lang::lang_run,
+            commands::lang::lang_check,
             commands::project::pick_folder,
             commands::project::pick_open_file,
             commands::project::startup_path,

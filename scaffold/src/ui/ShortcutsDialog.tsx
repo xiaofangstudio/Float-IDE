@@ -17,9 +17,12 @@ const GROUPS: { title: string; rows: [string, string][] }[] = [
     title: '编辑',
     rows: [
       ['Ctrl + Z / Ctrl + Y', '撤销 / 重做'],
+      ['Ctrl + C / Ctrl + X / Ctrl + V', '复制 / 剪切 / 粘贴'],
+      ['Ctrl + A', '全选当前行（按两次全选全文）'],
       ['Ctrl + F / Ctrl + H', '查找 / 替换'],
       ['Ctrl + G', '跳到指定行'],
       ['Ctrl + /', '注释或取消注释当前行'],
+      ['Ctrl + Space', '手动唤出补全（补全项只插名字，不会自动加括号）'],
       ['Ctrl + Shift + P', '命令面板'],
       ['Ctrl + = / Ctrl + -', '放大 / 缩小字号'],
       ['Ctrl + 0', '字号恢复默认']

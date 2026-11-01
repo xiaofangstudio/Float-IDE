@@ -134,7 +134,13 @@ input[type="text"], input[type="number"], select, textarea {
   border-radius: 6px; padding: 7px 10px; font-size: 13px; outline: none;
   font-family: inherit;
 }
-input:focus, select:focus, textarea:focus { border-color: var(--accent); }
+/* 输入光标跟着主题走：以前没设，暗色下默认是白色，很刺眼 */
+input, textarea, select, [contenteditable="true"] { caret-color: var(--accent); }
+/* 聚焦：细边（1px 主色）+ 一圈很淡的柔光，不要 3px 的深色粗环（暗色下看着像黑边） */
+input:focus, select:focus, textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(76, 158, 240, .18);
+}
 
 /* 加载页 */
 .loading-wrap {
@@ -209,7 +215,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 }
 .ws-title { font-weight: 700; font-size: 13px; margin-right: 6px; }
 .ws-main { flex: 1; display: flex; min-height: 0; }
-.ws-left { flex: 1; min-width: 380px; display: flex; background: var(--bg2); }
+.ws-left { flex: 1; min-width: 0; display: flex; background: var(--bg2); }
 .ws-editor-col { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .ws-right { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .ws-timeline { height: 168px; flex: none; border-top: 1px solid var(--line); background: var(--bg2); }
@@ -427,6 +433,13 @@ code.inline { background: var(--bg3); padding: 1px 5px; border-radius: 4px; font
 }
 .console-line.err .console-tag { background: var(--sem-err-bg); color: var(--sem-err); border: 1px solid var(--sem-err-line); }
 .console-line.info .console-tag { background: var(--bg3); color: var(--accent); }
+/* 调试输出三档：报告=蓝、警告=黄、报错=红（纯给开发者看的，不影响程序） */
+.console-line.dbg-report { color: var(--accent); }
+.console-line.dbg-warn { color: var(--sem-warn, #d9a441); }
+.console-line.dbg-error { color: var(--sem-err, var(--danger)); }
+.console-line.dbg-report .console-tag { background: var(--bg3); color: var(--accent); }
+.console-line.dbg-warn .console-tag { background: var(--sem-warn-bg, #3a2f1a); color: var(--sem-warn, #d9a441); }
+.console-line.dbg-error .console-tag { background: var(--sem-err-bg); color: var(--sem-err); border: 1px solid var(--sem-err-line); }
 .ask-row { margin-top: 2px; color: var(--accent2); }
 .ask-input-row {
   display: flex; gap: 8px; padding: 8px 0 2px; border-top: 1px solid var(--line); margin-top: 6px; flex: none;
@@ -813,15 +826,22 @@ body.resizing, body.resizing * { cursor: inherit !important; user-select: none !
 }
 .seg button.on { background: #fff; color: var(--accent); box-shadow: var(--shadow-sm); font-weight: 600; }
 .switch {
-  width: 42px; height: 23px; border-radius: 6px; border: 1px solid var(--line2);
-  background: rgba(220, 232, 245, .9); position: relative; cursor: var(--cur-hand); padding: 0;
+  width: 34px; height: 18px; border-radius: 9px; border: 1px solid var(--line2);
+  background: var(--s3); position: relative; cursor: var(--cur-hand); padding: 0; flex: none;
+  transition: background .16s ease, border-color .16s ease;
 }
 .switch span {
-  position: absolute; top: 2px; left: 2px; width: 17px; height: 17px; border-radius: 50%;
-  background: #fff; box-shadow: 0 1px 3px rgba(16,32,54,.25); transition: left .16s ease;
+  position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%;
+  background: #fff; box-shadow: 0 0 0 .5px rgba(16, 32, 54, .12);
+  transition: transform .16s ease;
 }
+.switch:hover { border-color: var(--txt3); }
 .switch.on { background: var(--a1); border-color: var(--a1); }
-.switch.on span { left: 21px; }
+.switch.on span { transform: translateX(16px); }
+[data-theme='dark'] .switch { background: #26313d; border-color: #33414f; }
+[data-theme='dark'] .switch span { background: #dbe6f2; box-shadow: none; }
+[data-theme='dark'] .switch.on { background: var(--a1); border-color: var(--a1); }
+[data-theme='dark'] .switch.on span { background: #fff; }
 
 /* ── 问题面板 ── */
 .prob-item {
@@ -1006,7 +1026,7 @@ body.resizing, body.resizing * { cursor: inherit !important; user-select: none !
   background: var(--input-bg, #fff); color: var(--txt);
   outline: none;
 }
-.prompt-input:focus, .rename-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-weak, #dbeafe); }
+.prompt-input:focus, .rename-input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(76, 158, 240, .18); }
 .prompt-hint { font-size: 11.5px; color: var(--txt2); line-height: 1.6; }
 .prompt-hint.err { color: var(--danger); }
 .prompt-actions, .rename-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 2px; }
@@ -1627,7 +1647,7 @@ input[type='text'], input[type='number'], input[type='search'], .sp-input,
 }
 input:focus, .sp-input:focus, .prompt-input:focus, .rename-input:focus {
   border-color: var(--a1);
-  box-shadow: 0 0 0 3px var(--a3);
+  box-shadow: 0 0 0 2px rgba(76, 158, 240, .18);
   outline: none;
 }
 
@@ -2040,3 +2060,53 @@ input:focus, .sp-input:focus, .prompt-input:focus, .rename-input:focus {
   --cur-hand: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='22' height='22' viewBox='0 0 22 22'><path d='M7 11V5.6a1.3 1.3 0 012.6 0V10h.9V4.3a1.3 1.3 0 012.6 0V10h.9V5.6a1.3 1.3 0 012.6 0v7.6c0 3.6-2.2 6-5.6 6-2.2 0-3.6-.9-4.8-2.6l-2.3-3.4a1.3 1.3 0 012-1.6l1 1.1z' fill='%23111' stroke='%23fff' stroke-width='1.4' stroke-linejoin='round'/></svg>") 8 3, pointer;
 }
 html, body { cursor: var(--cur-arrow); }
+
+/* ══════════════════════════════════════════════════════════════
+   防溢出总闸（一处生效，不为每个面板单独打补丁）
+   1. 应用外壳永不滚动，滚动只发生在内部容器；
+   2. flex / grid 子项默认允许收缩（浏览器默认 min-width:auto，
+      长文件名、长路径会把父级顶破——这是溢出的头号原因）；
+   3. 按钮 / 图标这类"必须保住自身宽度"的控件反向兜住；
+   4. 长串（路径 / URL / 代码片段）允许任意位置断行；
+   5. 弹窗宽度收进视口，窗口再小也不会露到屏幕外。
+   ══════════════════════════════════════════════════════════════ */
+
+html, body, #root {
+  overflow: hidden;
+  max-width: 100vw;
+  max-height: 100vh;
+}
+
+/* 用 :where() 把优先级压到 0：谁写了更具体的 min-width 谁说了算，
+   这条只兜住"没人管"的元素。新加面板自动受保护，不用再补 CSS。 */
+.ws :where(*),
+.welcome :where(*),
+.modal-mask :where(*) {
+  min-width: 0;
+  min-height: 0;
+}
+
+/* 控件保住自身宽度，别被压成一条缝 */
+.ws :where(button, .btn, .icon-btn, .iconbtn, .pp-btn, .wc-act, .tut-cbtn) {
+  flex: none;
+  min-width: max-content;
+}
+
+/* 长串断行：路径、URL、没有空格的长标识符 */
+.ws, .welcome, .modal-mask {
+  overflow-wrap: anywhere;
+}
+
+/* 弹窗 / 浮层：宽度收进视口 */
+.modal, .appear, .npd, .learn, .dlg, .palette, .shortcuts {
+  max-width: calc(100vw - 24px);
+  max-height: calc(100vh - 24px);
+  overflow: auto;
+}
+
+/* Monaco 之外的自绘滚动区：自己滚，别把父级推大 */
+.explorer-body, .preview-wrap, .term-tabs {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}

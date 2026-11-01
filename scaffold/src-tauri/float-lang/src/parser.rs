@@ -31,10 +31,10 @@ struct Line {
     skipped: bool,
 }
 
-/// 把源码切成"有效行"：去 BOM、统一换行、Tab 展开成 4 空格、剥掉尾注释。
+/// 把源码切成"有效行"：去 BOM、统一换行、Tab 展开成 4 空格、剥掉 `--` 注释。
 fn split_source(src: &str) -> Vec<Line> {
     let text = src.trim_start_matches('\u{feff}').replace("\r\n", "\n").replace('\r', "\n");
-    let mut out = Vec::new();
+    let mut out: Vec<Line> = Vec::new();
     for (idx, raw_line) in text.split('\n').enumerate() {
         let expanded: String = raw_line.replace('\t', "    ");
         let indent = expanded.chars().take_while(|c| *c == ' ').count();
@@ -43,19 +43,10 @@ fn split_source(src: &str) -> Vec<Line> {
             continue;
         }
         let no = idx as u32 + 1;
-        if trimmed.starts_with("--") {
-            out.push(Line {
-                no,
-                indent,
-                code: String::new(),
-                raw: trimmed.to_string(),
-                is_comment: false,
-                skipped: true,
-            });
-            continue;
-        }
+        // 注释只有一种写法：`--`（`--` 后面要跟空白或行尾，`i--` 自减不受影响）。
+        // `//` 不是注释，它是整除运算符。
         let (code, comment) = code_part(trimmed);
-        let is_comment = trimmed.starts_with("//");
+        let is_comment = code.trim().is_empty();
         let cleaned = if is_comment {
             String::new()
         } else {
@@ -65,6 +56,18 @@ fn split_source(src: &str) -> Vec<Line> {
             c.trim().to_string()
         };
         let _ = comment;
+        // 多行字面量：上一行括号还没闭合，就把它接到上一行后面
+        let open = bracket_depth(&cleaned) + out.last().map(|l| bracket_depth(&l.code)).unwrap_or(0);
+        if let Some(last) = out.last_mut() {
+            if bracket_depth(&last.code) > 0 {
+                last.code.push(' ');
+                last.code.push_str(&cleaned);
+                last.raw.push('\n');
+                last.raw.push_str(trimmed);
+                continue;
+            }
+        }
+        let _ = open;
         out.push(Line {
             no,
             indent,
@@ -75,6 +78,28 @@ fn split_source(src: &str) -> Vec<Line> {
         });
     }
     out
+}
+
+/// 数一行里"没闭合的括号"（字符串里的不算）
+fn bracket_depth(code: &str) -> i32 {
+    let mut d = 0i32;
+    let mut in_str: Option<char> = None;
+    let mut esc = false;
+    for c in code.chars() {
+        if let Some(q) = in_str {
+            if esc { esc = false; }
+            else if c == '\\' { esc = true; }
+            else if c == q { in_str = None; }
+            continue;
+        }
+        match c {
+            '"' | '\'' => in_str = Some(c),
+            '(' | '[' | '{' => d += 1,
+            ')' | ']' | '}' => d -= 1,
+            _ => {}
+        }
+    }
+    d
 }
 
 /// 表达式优先级。数值越大越紧。
@@ -89,7 +114,7 @@ fn prec_of(op: &str) -> Option<u8> {
         "<" | ">" | "<=" | ">=" => 40,
         "<<" | ">>" => 45,
         "+" | "-" => 50,
-        "*" | "/" | "%" => 60,
+        "*" | "/" | "%" | "//" => 60,
         "**" => 70,
         _ => return None,
     })
@@ -197,6 +222,22 @@ impl<'a> ExprParser<'a> {
             let span = Span::new(self.file, tok.line, tok.col, right.span.end_col);
             left = Expr::new(
                 ExprKind::Bin { op, a: Box::new(left), b: Box::new(right) },
+                span,
+            );
+        }
+        // 三元：`条件 ? 这个 : 那个`，优先级最低、右结合
+        // （只在最外层解析，避免把 dict 里的冒号吃掉）
+        if min_prec == 0 && self.at("?") {
+            self.pos += 1;
+            let a = self.parse_expr(0)?;
+            if !self.at(":") {
+                return Err(self.err("三元的冒号丢了：写成 条件 ? 这个 : 那个"));
+            }
+            self.pos += 1;
+            let b = self.parse_expr(0)?;
+            let span = Span::new(self.file, left.span.line, left.span.col, b.span.end_col);
+            left = Expr::new(
+                ExprKind::Ternary { cond: Box::new(left), a: Box::new(a), b: Box::new(b) },
                 span,
             );
         }
@@ -319,19 +360,192 @@ impl<'a> ExprParser<'a> {
         Ok(out)
     }
 
+    /// 下一个 token 能不能当一个操作数（汇编式算术靠这个判断"还有没有下一个数"）
+    fn operand_ahead(&self) -> bool {
+        match self.toks.get(self.pos) {
+            Some(t) => match t.kind {
+                TokKind::Num | TokKind::Str | TokKind::Ident | TokKind::Kw => true,
+                TokKind::Punc => matches!(t.text.as_str(), "(" | "[" | "{"),
+                // 加减号不算操作数开头：它们留给外层的运算符，
+                // 不然 `add a b + 10` / `mul 2 3 - 1` 会被吃成 add(a,b,+10)、mul(2,3,-1)
+                TokKind::Op => matches!(t.text.as_str(), "!" | "~"),
+                TokKind::Eof => false,
+            },
+            None => false,
+        }
+    }
+
+    /// 字符串字面量 → 支持 `{表达式}` 插值，编译成一串字符串拼接。
+    /// 和 TS 兼容引擎完全一致：
+    /// * `"值是 {x} 结束"` → `"值是 " + x + " 结束"`
+    /// * `\{` `\}` 是转义，当普通花括号
+    /// * 插值里写错了就当普通文本（不在这里报错，交给外面的检查）
+    fn string_expr(&mut self, text: String, span: Span) -> Expr {
+        if !text.contains('{') {
+            return Expr::new(ExprKind::Str(Rc::from(text.as_str())), span);
+        }
+        let chars: Vec<char> = text.chars().collect();
+        let mut parts: Vec<Expr> = Vec::new();
+        let mut buf = String::new();
+        let mut i = 0usize;
+        while i < chars.len() {
+            let c = chars[i];
+            // \{ \} 是转义
+            if c == '\\' && i + 1 < chars.len() && (chars[i + 1] == '{' || chars[i + 1] == '}') {
+                buf.push(chars[i + 1]);
+                i += 2;
+                continue;
+            }
+            if c != '{' {
+                buf.push(c);
+                i += 1;
+                continue;
+            }
+            // 找配对的 }
+            let mut close: Option<usize> = None;
+            let mut k = i + 1;
+            while k < chars.len() {
+                if chars[k] == '}' {
+                    close = Some(k);
+                    break;
+                }
+                k += 1;
+            }
+            let close = match close {
+                Some(c2) => c2,
+                None => {
+                    buf.push(c);
+                    i += 1;
+                    continue;
+                }
+            };
+            let inner: String = chars[i + 1..close].iter().collect();
+            let inner = inner.trim();
+            if inner.is_empty() {
+                buf.push_str("{}");
+                i = close + 1;
+                continue;
+            }
+            if !buf.is_empty() {
+                parts.push(Expr::new(ExprKind::Str(Rc::from(buf.as_str())), span.clone()));
+                buf.clear();
+            }
+            match tokenize_line(inner, span.line, span.col + i as u32 + 1) {
+                Ok(mut toks) => {
+                    // 去掉行尾 Eof：at_end() 只认"用完 token"，不认 Eof 记号
+                    if matches!(toks.last().map(|t| t.kind), Some(TokKind::Eof)) {
+                        toks.pop();
+                    }
+                    match ExprParser::new(&toks, &self.file).parse_all() {
+                        Ok(e) => parts.push(e),
+                        Err(_) => {
+                            // 插值里写错了：当普通文本，后面交给语法/语义检查
+                            buf.push('{');
+                            buf.push_str(inner);
+                            buf.push('}');
+                        }
+                    }
+                }
+                Err(_) => {
+                    buf.push('{');
+                    buf.push_str(inner);
+                    buf.push('}');
+                }
+            }
+            i = close + 1;
+        }
+        if !buf.is_empty() {
+            parts.push(Expr::new(ExprKind::Str(Rc::from(buf.as_str())), span.clone()));
+        }
+        if parts.is_empty() {
+            return Expr::new(ExprKind::Str(Rc::from("")), span);
+        }
+        if parts.len() == 1 {
+            return parts.pop().unwrap();
+        }
+        let mut acc = parts[0].clone();
+        for p in parts[1..].iter() {
+            acc = Expr::new(
+                ExprKind::Bin { op: Op::Add, a: Box::new(acc), b: Box::new(p.clone()) },
+                span.clone(),
+            );
+        }
+        acc
+    }
+
+    /// 汇编式传参：空格分隔（顺带也认逗号），任意多个。
+    /// `写文件 "a.txt" "内容"`、`调试 警告 a, "个"`。
+    /// 每个参数都是完整表达式，所以 `调试 报告 x + 1` 里的 x + 1 算一个参数。
+    fn parse_loose_args(&mut self) -> EResult<Vec<Expr>> {        let mut out = Vec::new();
+        loop {
+            if self.at(",") {
+                self.pos += 1;
+                continue;
+            }
+            if !self.operand_ahead() {
+                break;
+            }
+            out.push(self.parse_expr(0)?);
+        }
+        Ok(out)
+    }
+
+    /// `add a b [c d …]`：空格分隔、左结合，任意多个数
+    fn parse_math_chain(&mut self, op: Op, span: Span) -> EResult<Expr> {
+        let mut acc: Option<Expr> = None;
+        let mut n = 0usize;
+        while self.operand_ahead() {
+            let e = self.parse_unary()?;
+            acc = Some(match acc {
+                None => e,
+                Some(prev) => Expr::new(
+                    ExprKind::Bin { op, a: Box::new(prev), b: Box::new(e) },
+                    span.clone(),
+                ),
+            });
+            n += 1;
+        }
+        if n < 2 {
+            return Err(self.err("add / sub / mul / div / mod 后面至少要两个数，例如 add a b"));
+        }
+        Ok(acc.unwrap())
+    }
+
     fn parse_primary(&mut self) -> EResult<Expr> {
         let t = self.bump().cloned().ok_or_else(|| self.err("缺少表达式"))?;
         let span = self.span_of(&t);
         match t.kind {
             TokKind::Num => Ok(Expr::new(ExprKind::Num(t.num.unwrap_or(f64::NAN)), span)),
-            TokKind::Str => Ok(Expr::new(ExprKind::Str(Rc::from(t.text.as_str())), span)),
-            TokKind::Ident | TokKind::Kw => match t.text.as_str() {
-                "true" => Ok(Expr::new(ExprKind::Bool(true), span)),
-                "false" => Ok(Expr::new(ExprKind::Bool(false), span)),
-                "null" | "nil" => Ok(Expr::new(ExprKind::Null, span)),
-                "self" | "this" => Ok(Expr::new(ExprKind::SelfRef, span)),
-                _ => Ok(Expr::new(ExprKind::Var(Rc::from(t.text.as_str())), span)),
-            },
+            TokKind::Str => Ok(self.string_expr(t.text.clone(), span)),
+            TokKind::Ident | TokKind::Kw => {
+                // 汇编式算术：`c = add a b`、`sub a b c`（空格分隔，能接任意多个数）。
+                // 带括号的 `add(a, b)` 仍然走普通函数调用，两种写法都认。
+                if let Some(op) = math_cmd_op(&t.text) {
+                    if !self.at("(") && self.operand_ahead() {
+                        return self.parse_math_chain(op, span);
+                    }
+                }
+                // 文件/网络内置函数的汇编式传参：`x = 取网页 "url"`、`写文件 "a.txt" "内容"`。
+                // 只对新内置函数启用，避免动到老语法；带括号的写法照常。
+                if LOOSE_ARG_BUILTINS.contains(&t.text.as_str())
+                    && !self.at("(")
+                    && self.operand_ahead()
+                {
+                    let args = self.parse_loose_args()?;
+                    let callee = Expr::new(ExprKind::Var(Rc::from(t.text.as_str())), span.clone());
+                    return Ok(Expr::new(
+                        ExprKind::Call { callee: Box::new(callee), args },
+                        span,
+                    ));
+                }
+                match t.text.as_str() {
+                    "true" => Ok(Expr::new(ExprKind::Bool(true), span)),
+                    "false" => Ok(Expr::new(ExprKind::Bool(false), span)),
+                    "null" | "nil" => Ok(Expr::new(ExprKind::Null, span)),
+                    "self" | "this" => Ok(Expr::new(ExprKind::SelfRef, span)),
+                    _ => Ok(Expr::new(ExprKind::Var(Rc::from(t.text.as_str())), span)),
+                }
+            }
             TokKind::Punc => match t.text.as_str() {
                 "(" => {
                     let e = self.parse_expr(0)?;
@@ -398,16 +612,31 @@ impl<'a> ExprParser<'a> {
 }
 
 pub struct Parser {
+    /// 类名 → (父类名, 自己的字段名)：方法体里裸写继承来的字段也能补成 self.
+    class_fields: std::collections::HashMap<Rc<str>, (Option<Rc<str>>, Vec<Rc<str>>)>,
     file: Rc<str>,
     lines: Vec<Line>,
     pos: usize,
     errors: Vec<FloatError>,
+    /// 当前缩进块嵌套深度（防止把递归下降的栈吃穿）
+    depth: usize,
 }
+
+/// 缩进块嵌套上限。正常人写代码很少超过 30 层；给了 200 层余量，
+/// 既够用，又能在恶意/失控的输入下守住进程（不然递归会把栈直接吃掉）。
+const MAX_NEST: usize = 200;
 
 /// 入口：把源码解析成 Program
 pub fn parse_program(file: &str, src: &str) -> Program {
     let file: Rc<str> = Rc::from(file);
-    let mut p = Parser { file: Rc::clone(&file), lines: split_source(src), pos: 0, errors: Vec::new() };
+    let mut p = Parser {
+        class_fields: std::collections::HashMap::new(),
+        file: Rc::clone(&file),
+        lines: split_source(src),
+        pos: 0,
+        errors: Vec::new(),
+        depth: 0,
+    };
     let body = p.parse_block(0);
     Program { file, body, errors: p.errors }
 }
@@ -439,6 +668,616 @@ impl Parser {
         Span::new(&self.file, ln.no, col, end)
     }
 
+    /// 把一个 class 降级成几条普通函数（不改 VM 的值模型）：
+    ///
+    /// - 实例就是字典，多存一个 `"__cls"` 键记住类名
+    /// - 方法编译成 `__m_类_方法(self, ...)`，`self` 就是第 0 个参数
+    /// - 构造编译成 `__new_类(...)`：建字典 → 铺字段默认值 → 调 init → 返回
+    /// - 方法体里裸写字段名（`hp -= damage`）会自动补成 `self.hp`
+    fn parse_class(&mut self, ln: &Line, toks: &[Token]) -> Result<Stmt, FloatError> {
+        let span = self.line_span(ln);
+        let cname: Rc<str> = match toks.get(1) {
+            Some(t) if t.kind == TokKind::Ident || t.kind == TokKind::Kw => Rc::from(t.text.as_str()),
+            _ => return Err(FloatError::new("class 后面要写类名", span.clone())),
+        };
+        let base: Option<Rc<str>> = match toks.iter().position(|t| t.text == "extends") {
+            Some(i) => toks.get(i + 1).map(|t| Rc::from(t.text.as_str())),
+            None => None,
+        };
+        // 类体：缩进更深的行
+        let indent = ln.indent;
+        let start = self.pos;
+        let mut end = start;
+        while end < self.lines.len() && self.lines[end].indent > indent {
+            end += 1;
+        }
+        let body_lines: Vec<Line> = self.lines[start..end].to_vec();
+
+        // 拆字段与方法
+        let mut fields: Vec<(Rc<str>, Option<Expr>)> = Vec::new();
+        let mut methods: Vec<(Rc<str>, Vec<Param>, Vec<Stmt>)> = Vec::new();
+        let mut i = 0;
+        while i < body_lines.len() {
+            let bl = &body_lines[i];
+            let code_l = code_part(&bl.code).0;
+            let col = bl.indent + 1;
+            let toks_l = tokenize_line(&code_l, bl.no, col as u32)
+                .map_err(|e| FloatError::new(e.message, Span::point(&self.file, e.line, e.col)))?;
+            if toks_l.is_empty() {
+                i += 1;
+                continue;
+            }
+            let first = toks_l[0].text.clone();
+            if matches!(first.as_str(), "fn" | "function" | "Function" | "f") {
+                // 方法：名字 + 参数
+                let mname: Rc<str> = match toks_l.get(1) {
+                    Some(t) => Rc::from(t.text.as_str()),
+                    None => return Err(FloatError::new("方法要有名字", self.line_span(bl))),
+                };
+                let mut params: Vec<Param> = Vec::new();
+                let mut k = 2;
+                if toks_l.get(k).map(|t| t.text.as_str()) == Some("(") {
+                    k += 1;
+                    while k < toks_l.len() && toks_l[k].text != ")" {
+                        if toks_l[k].text == "," {
+                            k += 1;
+                            continue;
+                        }
+                        let pname: Rc<str> = Rc::from(toks_l[k].text.as_str());
+                        let mut default = None;
+                        k += 1;
+                        if toks_l.get(k).map(|t| t.text.as_str()) == Some("=") {
+                            k += 1;
+                            let mut ep = ExprParser::new(&toks_l[k..], &self.file);
+                            default = Some(ep.parse_expr(0)?);
+                            while k < toks_l.len() && toks_l[k].text != "," && toks_l[k].text != ")" {
+                                k += 1;
+                            }
+                        }
+                        params.push(Param { name: pname, ty: None, default, line: bl.no as u32, col: 1 });
+                    }
+                }
+                // 方法体
+                i += 1;
+                self.pos = start + i;
+                let mut mbody: Vec<Stmt> = Vec::new();
+                while i < body_lines.len() && body_lines[i].indent > bl.indent {
+                    let before = self.pos;
+                    if let Some(st) = self.parse_statement() {
+                        mbody.push(st);
+                    }
+                    if self.pos == before {
+                        self.pos += 1; // 防御：不允许原地打转
+                    }
+                    i = self.pos - start;
+                }
+                methods.push((mname, params, mbody));
+                continue;
+            }
+            // 字段：`int hp = 100` / `str name = ""`
+            if toks_l.len() >= 2 {
+                let mut fi = 0;
+                if matches!(toks_l[0].text.as_str(), "int" | "float" | "str" | "bool" | "list" | "dict" | "ptr" | "var") {
+                    fi = 1;
+                }
+                if let Some(nt) = toks_l.get(fi) {
+                    if nt.kind == TokKind::Ident {
+                        let fname: Rc<str> = Rc::from(nt.text.as_str());
+                        let mut default = None;
+                        if toks_l.get(fi + 1).map(|t| t.text.as_str()) == Some("=") {
+                            let mut ep = ExprParser::new(&toks_l[fi + 2..], &self.file);
+                            default = Some(ep.parse_expr(0)?);
+                        }
+                        fields.push((fname, default));
+                    }
+                }
+            }
+            i += 1;
+            self.pos = start + i;
+        }
+        self.pos = end;
+
+        // 记下这个类自己的字段和父类，供继承者改写用
+        self.class_fields.insert(
+            Rc::clone(&cname),
+            (base.clone(), fields.iter().map(|(n, _)| Rc::clone(n)).collect()),
+        );
+        let group = self.lower_class(&cname, &base, fields, methods, span.clone());
+        Ok(Stmt::new(StmtKind::Group(group), span))
+    }
+
+    /// class → 函数集合（见 parse_class 的说明）
+    fn lower_class(
+        &mut self,
+        cname: &Rc<str>,
+        base: &Option<Rc<str>>,
+        fields: Vec<(Rc<str>, Option<Expr>)>,
+        methods: Vec<(Rc<str>, Vec<Param>, Vec<Stmt>)>,
+        span: Span,
+    ) -> Vec<Stmt> {
+        let fname = |prefix: &str, cls: &Rc<str>, name: &str| -> Rc<str> {
+            Rc::from(format!("{}{}_{}", prefix, cls, name).as_str())
+        };
+        let mut field_names: Vec<Rc<str>> = fields.iter().map(|(n, _)| Rc::clone(n)).collect();
+        // 父类的字段也要算：方法里裸写 `hp -= 1` 时 hp 可能是继承来的
+        let mut cur = base.clone();
+        while let Some(cn) = cur {
+            match self.class_fields.get(&cn) {
+                Some((b, fs)) => {
+                    for f in fs {
+                        if !field_names.iter().any(|x| x == f) {
+                            field_names.push(Rc::clone(f));
+                        }
+                    }
+                    cur = b.clone();
+                }
+                None => break,
+            }
+        }
+        let mut out: Vec<Stmt> = Vec::new();
+        let mk_param = |n: Rc<str>| Param { name: n, ty: None, default: None, line: span.line as u32, col: 1 };
+
+        for (mname, params, body) in &methods {
+            let mut ps: Vec<Param> = vec![mk_param(Rc::from("self"))];
+            ps.extend(params.iter().cloned());
+            let rewritten = self.rewrite_self(body, &field_names, params, base, cname);
+            out.push(Stmt::new(
+                StmtKind::FuncDef {
+                    name: fname("__m_", cname, mname),
+                    params: ps,
+                    ret: None,
+                    body: rewritten,
+                },
+                span.clone(),
+            ));
+        }
+
+        // init 单独编成一个函数（super(...) 会降级成调用父类的这个函数）
+        let init = methods.iter().find(|(n, _, _)| &**n == "init");
+        if let Some((_, iparams, ibody)) = init {
+            let mut ps: Vec<Param> = vec![mk_param(Rc::from("self"))];
+            ps.extend(iparams.iter().cloned());
+            // 父类字段也算"字段"，这样 init 里裸写字段名也能补成 self.x
+            let mut all_fields = field_names.clone();
+            if let Some(b) = base {
+                let _ = b;
+            }
+            let rewritten = self.rewrite_self(ibody, &all_fields, iparams, base, cname);
+            all_fields.clear();
+            out.push(Stmt::new(
+                StmtKind::FuncDef {
+                    name: fname("__init_", cname, ""),
+                    params: ps,
+                    ret: None,
+                    body: rewritten,
+                },
+                span.clone(),
+            ));
+        }
+
+        // 字段初始化函数：先调父类的 __fields_，再铺自己的
+        {
+            let mut fb: Vec<Stmt> = Vec::new();
+            if let Some(b) = base {
+                fb.push(Stmt::new(
+                    StmtKind::ExprStmt(Expr::new(
+                        ExprKind::Call {
+                            callee: Box::new(Expr::new(ExprKind::Var(fname("__fields_", b, "")), span.clone())),
+                            args: vec![Expr::new(ExprKind::Var(Rc::from("self")), span.clone())],
+                        },
+                        span.clone(),
+                    )),
+                    span.clone(),
+                ));
+            }
+            for (f, default) in &fields {
+                fb.push(Stmt::new(
+                    StmtKind::Assign {
+                        target: Target::Member(Expr::new(ExprKind::Var(Rc::from("self")), span.clone()), Rc::clone(f)),
+                        op: AssignOp::Set,
+                        value: default.clone().unwrap_or(Expr::new(ExprKind::Null, span.clone())),
+                    },
+                    span.clone(),
+                ));
+            }
+            out.push(Stmt::new(
+                StmtKind::FuncDef {
+                    name: fname("__fields_", cname, ""),
+                    params: vec![mk_param(Rc::from("self"))],
+                    ret: None,
+                    body: fb,
+                },
+                span.clone(),
+            ));
+        }
+
+        // 构造
+        let mut new_params: Vec<Param> = Vec::new();
+        let mut body: Vec<Stmt> = Vec::new();
+        // dict self = {}
+        body.push(Stmt::new(
+            StmtKind::Decl {
+                ty: crate::TypeName::Dict,
+                name: Rc::from("self"),
+                init: Some(Expr::new(ExprKind::Dict(Vec::new()), span.clone())),
+            },
+            span.clone(),
+        ));
+        // self["__cls"] = 类名
+        body.push(Stmt::new(
+            StmtKind::Assign {
+                target: Target::Idx(
+                    Expr::new(ExprKind::Var(Rc::from("self")), span.clone()),
+                    Expr::new(ExprKind::Str(Rc::from("__cls")), span.clone()),
+                ),
+                op: AssignOp::Set,
+                value: Expr::new(ExprKind::Str(Rc::clone(cname)), span.clone()),
+            },
+            span.clone(),
+        ));
+        // 记下父类名，VM 找不到方法时会沿这条链往上找
+        if let Some(b) = base {
+            body.push(Stmt::new(
+                StmtKind::Assign {
+                    target: Target::Idx(
+                        Expr::new(ExprKind::Var(Rc::from("self")), span.clone()),
+                        Expr::new(ExprKind::Str(Rc::from("__base")), span.clone()),
+                    ),
+                    op: AssignOp::Set,
+                    value: Expr::new(ExprKind::Str(Rc::clone(b)), span.clone()),
+                },
+                span.clone(),
+            ));
+        }
+
+        // 铺字段（父类 → 自己）
+        body.push(Stmt::new(
+            StmtKind::ExprStmt(Expr::new(
+                ExprKind::Call {
+                    callee: Box::new(Expr::new(ExprKind::Var(fname("__fields_", cname, "")), span.clone())),
+                    args: vec![Expr::new(ExprKind::Var(Rc::from("self")), span.clone())],
+                },
+                span.clone(),
+            )),
+            span.clone(),
+        ));
+        // 调 init
+        if let Some((_, iparams, _)) = init {
+            let mut args = vec![Expr::new(ExprKind::Var(Rc::from("self")), span.clone())];
+            for p in iparams {
+                new_params.push(p.clone());
+                args.push(Expr::new(ExprKind::Var(Rc::clone(&p.name)), span.clone()));
+            }
+            body.push(Stmt::new(
+                StmtKind::ExprStmt(Expr::new(
+                    ExprKind::Call {
+                        callee: Box::new(Expr::new(ExprKind::Var(fname("__init_", cname, "")), span.clone())),
+                        args,
+                    },
+                    span.clone(),
+                )),
+                span.clone(),
+            ));
+        }
+        body.push(Stmt::new(
+            StmtKind::Return(Some(Expr::new(ExprKind::Var(Rc::from("self")), span.clone()))),
+            span.clone(),
+        ));
+        out.push(Stmt::new(
+            StmtKind::FuncDef {
+                name: fname("__new_", cname, ""),
+                params: new_params,
+                ret: None,
+                body,
+            },
+            span.clone(),
+        ));
+        out
+    }
+
+    /// 方法体改写：裸字段名 → self.字段；super(...) → 父类 init
+    fn rewrite_self(
+        &self,
+        body: &[Stmt],
+        fields: &[Rc<str>],
+        params: &[Param],
+        base: &Option<Rc<str>>,
+        cname: &Rc<str>,
+    ) -> Vec<Stmt> {
+        let mut locals: Vec<Rc<str>> = params.iter().map(|p| Rc::clone(&p.name)).collect();
+        locals.push(Rc::from("self"));
+        self.rw_block(body, fields, &mut locals, base, cname)
+    }
+
+    fn rw_block(
+        &self,
+        body: &[Stmt],
+        fields: &[Rc<str>],
+        locals: &mut Vec<Rc<str>>,
+        base: &Option<Rc<str>>,
+        cname: &Rc<str>,
+    ) -> Vec<Stmt> {
+        let mut out = Vec::new();
+        for st in body {
+            out.push(self.rw_stmt(st, fields, locals, base, cname));
+        }
+        out
+    }
+
+    fn rw_stmt(
+        &self,
+        st: &Stmt,
+        fields: &[Rc<str>],
+        locals: &mut Vec<Rc<str>>,
+        base: &Option<Rc<str>>,
+        cname: &Rc<str>,
+    ) -> Stmt {
+        let sp = st.span.clone();
+        let kind = match &st.kind {
+            StmtKind::Decl { ty, name, init } => {
+                let i = init.as_ref().map(|e| self.rw_expr(e, fields, locals, base, cname));
+                locals.push(Rc::clone(name));
+                StmtKind::Decl { ty: *ty, name: Rc::clone(name), init: i }
+            }
+            StmtKind::Assign { target, op, value } => StmtKind::Assign {
+                target: self.rw_target(target, fields, locals, base, cname),
+                op: *op,
+                value: self.rw_expr(value, fields, locals, base, cname),
+            },
+            StmtKind::IncDec { target, delta, prefix } => StmtKind::IncDec {
+                target: self.rw_target(target, fields, locals, base, cname),
+                delta: *delta,
+                prefix: *prefix,
+            },
+            StmtKind::ExprStmt(e) => StmtKind::ExprStmt(self.rw_expr(e, fields, locals, base, cname)),
+            StmtKind::Print(a) => StmtKind::Print(a.iter().map(|e| self.rw_expr(e, fields, locals, base, cname)).collect()),
+            StmtKind::Report(a) => StmtKind::Report(a.iter().map(|e| self.rw_expr(e, fields, locals, base, cname)).collect()),
+            StmtKind::Debug { level, args } => StmtKind::Debug {
+                level: *level,
+                args: args.iter().map(|e| self.rw_expr(e, fields, locals, base, cname)).collect(),
+            },
+            StmtKind::Return(v) => StmtKind::Return(v.as_ref().map(|e| self.rw_expr(e, fields, locals, base, cname))),
+            StmtKind::If { branches, else_body } => StmtKind::If {
+                branches: branches
+                    .iter()
+                    .map(|(c, b)| (c.as_ref().map(|e| self.rw_expr(e, fields, locals, base, cname)), self.rw_block(b, fields, locals, base, cname)))
+                    .collect(),
+                else_body: else_body.as_ref().map(|b| self.rw_block(b, fields, locals, base, cname)),
+            },
+            StmtKind::While { cond, body } => StmtKind::While {
+                cond: self.rw_expr(cond, fields, locals, base, cname),
+                body: self.rw_block(body, fields, locals, base, cname),
+            },
+            StmtKind::Repeat { count, body } => StmtKind::Repeat {
+                count: self.rw_expr(count, fields, locals, base, cname),
+                body: self.rw_block(body, fields, locals, base, cname),
+            },
+            other => other.clone(),
+        };
+        Stmt::new(kind, sp)
+    }
+
+    fn rw_target(
+        &self,
+        t: &Target,
+        fields: &[Rc<str>],
+        locals: &mut Vec<Rc<str>>,
+        _base: &Option<Rc<str>>,
+        _cname: &Rc<str>,
+    ) -> Target {
+        match t {
+            Target::Var(n) if fields.iter().any(|f| f == n) && !locals.iter().any(|l| l == n) => Target::Member(
+                Expr::new(ExprKind::SelfRef, Span::point(&self.file, 1, 1)),
+                Rc::clone(n),
+            ),
+            other => other.clone(),
+        }
+    }
+
+    fn rw_expr(
+        &self,
+        e: &Expr,
+        fields: &[Rc<str>],
+        locals: &mut Vec<Rc<str>>,
+        base: &Option<Rc<str>>,
+        cname: &Rc<str>,
+    ) -> Expr {
+        let sp = e.span.clone();
+        let kind = match &e.kind {
+            ExprKind::Var(n) if fields.iter().any(|f| f == n) && !locals.iter().any(|l| l == n) => ExprKind::Member {
+                obj: Box::new(Expr::new(ExprKind::SelfRef, sp.clone())),
+                name: Rc::clone(n),
+            },
+            ExprKind::Var(n) => ExprKind::Var(Rc::clone(n)),
+            ExprKind::Bin { op, a, b } => ExprKind::Bin {
+                op: *op,
+                a: Box::new(self.rw_expr(a, fields, locals, base, cname)),
+                b: Box::new(self.rw_expr(b, fields, locals, base, cname)),
+            },
+            ExprKind::Un { op, a } => ExprKind::Un { op: *op, a: Box::new(self.rw_expr(a, fields, locals, base, cname)) },
+            ExprKind::Idx { obj, index } => ExprKind::Idx {
+                obj: Box::new(self.rw_expr(obj, fields, locals, base, cname)),
+                index: Box::new(self.rw_expr(index, fields, locals, base, cname)),
+            },
+            ExprKind::Member { obj, name } => ExprKind::Member {
+                obj: Box::new(self.rw_expr(obj, fields, locals, base, cname)),
+                name: Rc::clone(name),
+            },
+            ExprKind::List(items) => ExprKind::List(items.iter().map(|x| self.rw_expr(x, fields, locals, base, cname)).collect()),
+            ExprKind::Dict(es) => ExprKind::Dict(
+                es.iter()
+                    .map(|(k, v)| (self.rw_expr(k, fields, locals, base, cname), self.rw_expr(v, fields, locals, base, cname)))
+                    .collect(),
+            ),
+            ExprKind::Call { callee, args } => {
+                // super(args) → 父类 init(self, args)
+                if let ExprKind::Var(n) = &callee.kind {
+                    if &**n == "super" {
+                        if let Some(b) = base {
+                            let mut a2 = vec![Expr::new(ExprKind::SelfRef, sp.clone())];
+                            for a in args {
+                                a2.push(self.rw_expr(a, fields, locals, base, cname));
+                            }
+                            return Expr::new(
+                                ExprKind::Call {
+                                    callee: Box::new(Expr::new(ExprKind::Var(Rc::from(format!("__init_{}_", b).as_str())), sp.clone())),
+                                    args: a2,
+                                },
+                                sp,
+                            );
+                        }
+                    }
+                }
+                ExprKind::Call {
+                    callee: Box::new(self.rw_expr(callee, fields, locals, base, cname)),
+                    args: args.iter().map(|a| self.rw_expr(a, fields, locals, base, cname)).collect(),
+                }
+            }
+            other => other.clone(),
+        };
+        Expr::new(kind, sp)
+    }
+
+    /// 老式命令语句 → 现有 AST（不改编译器、不改 VM）
+    fn legacy_command(&mut self, ln: &Line, toks: &[Token]) -> Result<Option<Stmt>, FloatError> {
+        let word = toks[0].text.clone();
+        let span = self.line_span(ln);
+        let mk_call = |recv: Rc<str>, method: &str, args: Vec<Expr>, sp: Span| {
+            Expr::new(
+                ExprKind::Call {
+                    callee: Box::new(Expr::new(
+                        ExprKind::Member {
+                            obj: Box::new(Expr::new(ExprKind::Var(recv), sp.clone())),
+                            name: Rc::from(method),
+                        },
+                        sp.clone(),
+                    )),
+                    args,
+                },
+                sp,
+            )
+        };
+        let ident_at = |i: usize| -> Option<Rc<str>> {
+            toks.get(i)
+                .filter(|t| matches!(t.kind, TokKind::Ident | TokKind::Kw))
+                .map(|t| Rc::from(t.text.as_str()))
+        };
+
+        match word.as_str() {
+            // add X to L
+            "add" => {
+                let to = match toks.iter().position(|t| t.text == "to") { Some(i) => i, None => return Ok(None) };
+                let name = match ident_at(to + 1) { Some(n) => n, None => return Ok(None) };
+                let mut ep = ExprParser::new(&toks[1..to], &self.file);
+                let value = ep.parse_expr(0)?;
+                Ok(Some(Stmt::new(StmtKind::ExprStmt(mk_call(name, "push", vec![value], span.clone())), span)))
+            }
+            // insert X to L at N（方法签名是 insert(下标, 值)）
+            "insert" => {
+                let to = match toks.iter().position(|t| t.text == "to") { Some(i) => i, None => return Ok(None) };
+                let at = match toks.iter().position(|t| t.text == "at") { Some(i) => i, None => return Ok(None) };
+                let name = match ident_at(to + 1) { Some(n) => n, None => return Ok(None) };
+                let mut ep = ExprParser::new(&toks[1..to], &self.file);
+                let value = ep.parse_expr(0)?;
+                let mut ip = ExprParser::new(&toks[at + 1..], &self.file);
+                let at_expr = ip.parse_expr(0)?;
+                Ok(Some(Stmt::new(StmtKind::ExprStmt(mk_call(name, "insert", vec![at_expr, value], span.clone())), span)))
+            }
+            // replace L N with V
+            "replace" => {
+                let with = match toks.iter().position(|t| t.text == "with") { Some(i) => i, None => return Ok(None) };
+                let name = match ident_at(1) { Some(n) => n, None => return Ok(None) };
+                let mut ip = ExprParser::new(&toks[2..with], &self.file);
+                let idx = ip.parse_expr(0)?;
+                let mut vp = ExprParser::new(&toks[with + 1..], &self.file);
+                let value = vp.parse_expr(0)?;
+                let obj = Expr::new(ExprKind::Var(name), span.clone());
+                Ok(Some(Stmt::new(
+                    StmtKind::Assign { target: Target::Idx(obj, idx), op: AssignOp::Set, value },
+                    span,
+                )))
+            }
+            // del L [N]
+            "del" => {
+                let name = match ident_at(1) { Some(n) => n, None => return Ok(None) };
+                if toks.len() <= 2 {
+                    Ok(Some(Stmt::new(StmtKind::ExprStmt(mk_call(name, "clear", vec![], span.clone())), span)))
+                } else {
+                    let mut ep = ExprParser::new(&toks[2..], &self.file);
+                    let idx = ep.parse_expr(0)?;
+                    Ok(Some(Stmt::new(StmtKind::ExprStmt(mk_call(name, "remove", vec![idx], span.clone())), span)))
+                }
+            }
+            // read L N → __last_read
+            "read" => {
+                let name = match ident_at(1) { Some(n) => n, None => return Ok(None) };
+                let mut ep = ExprParser::new(&toks[2..], &self.file);
+                let idx = ep.parse_expr(0)?;
+                let obj = Expr::new(ExprKind::Var(name), span.clone());
+                let value = Expr::new(ExprKind::Idx { obj: Box::new(obj), index: Box::new(idx) }, span.clone());
+                Ok(Some(Stmt::new(
+                    StmtKind::Assign { target: Target::Var(Rc::from("__last_read")), op: AssignOp::Set, value },
+                    span,
+                )))
+            }
+            // len X → __last_len
+            "len" => {
+                let mut ep = ExprParser::new(&toks[1..], &self.file);
+                let value = ep.parse_expr(0)?;
+                let call = Expr::new(
+                    ExprKind::Call {
+                        callee: Box::new(Expr::new(ExprKind::Var(Rc::from("len")), span.clone())),
+                        args: vec![value],
+                    },
+                    span.clone(),
+                );
+                Ok(Some(Stmt::new(
+                    StmtKind::Assign { target: Target::Var(Rc::from("__last_len")), op: AssignOp::Set, value: call },
+                    span,
+                )))
+            }
+            // dict D key K = V / read K / del K
+            "dict" => {
+                let name = match ident_at(1) { Some(n) => n, None => return Ok(None) };
+                let op = match toks.get(2).map(|t| t.text.clone()) { Some(v) => v, None => return Ok(None) };
+                let obj = Expr::new(ExprKind::Var(name), span.clone());
+                match op.as_str() {
+                    "key" => {
+                        let eq = match toks.iter().position(|t| t.text == "=") { Some(i) => i, None => return Ok(None) };
+                        let mut kp = ExprParser::new(&toks[3..eq], &self.file);
+                        let key = kp.parse_expr(0)?;
+                        let mut vp = ExprParser::new(&toks[eq + 1..], &self.file);
+                        let value = vp.parse_expr(0)?;
+                        Ok(Some(Stmt::new(
+                            StmtKind::Assign { target: Target::Idx(obj, key), op: AssignOp::Set, value },
+                            span,
+                        )))
+                    }
+                    "read" => {
+                        let mut kp = ExprParser::new(&toks[3..], &self.file);
+                        let key = kp.parse_expr(0)?;
+                        let value = Expr::new(ExprKind::Idx { obj: Box::new(obj), index: Box::new(key) }, span.clone());
+                        Ok(Some(Stmt::new(
+                            StmtKind::Assign { target: Target::Var(Rc::from("__last_read")), op: AssignOp::Set, value },
+                            span,
+                        )))
+                    }
+                    "del" => {
+                        let mut kp = ExprParser::new(&toks[3..], &self.file);
+                        let key = kp.parse_expr(0)?;
+                        let name = match ident_at(1) { Some(n) => n, None => return Ok(None) };
+                        Ok(Some(Stmt::new(
+                            StmtKind::ExprStmt(mk_call(name, "remove", vec![key], span.clone())),
+                            span,
+                        )))
+                    }
+                    _ => Ok(None),
+                }
+            }
+            _ => Ok(None),
+        }
+    }
+
     fn expr_of(&mut self, toks: &[Token]) -> EResult<Expr> {
         ExprParser::new(toks, &self.file).parse_all()
     }
@@ -453,6 +1292,25 @@ impl Parser {
     }
 
     fn parse_block(&mut self, min_indent: usize) -> Vec<Stmt> {
+        // 嵌套太深就停下来说清楚，而不是让递归把栈吃穿（直接崩进程）
+        if self.depth >= MAX_NEST {
+            if let Some(ln) = self.lines.get(self.pos).cloned() {
+                let span = self.line_span(&ln);
+                self.errors.push(FloatError::new(
+                    format!(
+                        "缩进嵌套太深（超过 {} 层）停下来了。把这段拆成函数，或者把条件合并，都比往下堆层更清楚",
+                        MAX_NEST
+                    ),
+                    span,
+                ));
+            }
+            // 整块跳过，避免上层把它当普通语句再解析一遍
+            while self.pos < self.lines.len() && self.lines[self.pos].indent >= min_indent {
+                self.pos += 1;
+            }
+            return Vec::new();
+        }
+        self.depth += 1;
         let mut body = Vec::new();
         while self.pos < self.lines.len() {
             let ln = self.lines[self.pos].clone();
@@ -467,6 +1325,7 @@ impl Parser {
                 body.push(s);
             }
         }
+        self.depth -= 1;
         body
     }
 
@@ -474,6 +1333,8 @@ impl Parser {
         self.parse_block(indent + 1)
     }
 
+    /// 遇到这版 VM 还没实现的语法时用：明确报错，而不是静默失败
+    #[allow(dead_code)]
     fn unsupported(&mut self, ln: &Line, what: &str) -> Stmt {
         self.pos += 1;
         // 把子块吞掉，避免它被当成上层语句
@@ -605,6 +1466,25 @@ impl Parser {
                     }
                     return Ok(Some(Stmt::new(StmtKind::Return(Some(first_e)), self.line_span(ln))));
                 }
+                // ── 老式命令写法（照单全收，落到现有的方法与下标操作上）──
+                "add" | "insert" | "replace" | "del" | "read" | "len" | "dict"
+                    if toks.get(1).map(|t| t.text.as_str()) != Some("(")
+                        && (toks[0].text != "dict"
+                            || matches!(toks.get(2).map(|t| t.text.as_str()), Some("key") | Some("read") | Some("del"))) =>
+                {
+                    // 必须推进行指针！否则外层 while 会把同一行反复解析（内存直接吃光）
+                    self.pos += 1;
+                    return match self.legacy_command(ln, &toks)? {
+                        Some(st) => Ok(Some(st)),
+                        None => Err(FloatError::new(
+                            format!(
+                                "「{}」这条命令没看懂。列表的写法是：add 值 to 列表 / insert 值 to 列表 at 下标 / replace 列表 下标 with 值 / del 列表 [下标] / read 列表 下标。\n  如果你是想做算术，那就不是这条 add：写成 c = add a b（c 要先写成空变量 int c）",
+                                toks[0].text
+                            ),
+                            self.line_span(ln),
+                        )),
+                    };
+                }
                 "报告" | "report" => {
                     self.pos += 1;
                     let mut ep = ExprParser::new(&toks[1..], &self.file);
@@ -623,10 +1503,85 @@ impl Parser {
                     }
                     return Ok(Some(Stmt::new(StmtKind::Print(args), self.line_span(ln))));
                 }
-                "class" => return Ok(Some(self.unsupported(ln, "class（类定义）这版 VM 还没实现"))),
-                "try" => return Ok(Some(self.unsupported(ln, "try / catch 这版 VM 还没实现"))),
-                "throw" => return Ok(Some(self.unsupported(ln, "throw 这版 VM 还没实现"))),
-                "import" => return Ok(Some(self.unsupported(ln, "import（模块）这版 VM 还没实现"))),
+                // 调试输出：`调试 报告 内容` / `调试 警告 内容` / `调试 报错 内容`
+                // （也认函数式写法 调试(报告, 内容)）。纯给开发者看的，不影响程序。
+                "调试" | "debug" => {
+                    let level_word = |s: &str| -> Option<u8> {
+                        match s {
+                            "报告" | "report" | "info" => Some(1),
+                            "警告" | "warn" | "warning" => Some(2),
+                            "报错" | "error" | "err" => Some(3),
+                            _ => None,
+                        }
+                    };
+                    self.pos += 1;
+                    let (level, rest): (u8, &[Token]) =
+                        if toks.get(1).map(|t| t.text.as_str()) == Some("(") {
+                            // 函数式：调试(报告, 内容)
+                            match toks.get(2).map(|t| t.text.as_str()).and_then(level_word) {
+                                Some(lv) => {
+                                    if toks.get(3).map(|t| t.text.as_str()) != Some(",") {
+                                        return Err(FloatError::new(
+                                            "调试(级别, 内容) 里级别后面要跟逗号，比如 调试(报告, \"好\")",
+                                            self.line_span(ln),
+                                        ));
+                                    }
+                                    let inner = &toks[4..];
+                                    if inner.last().map(|t| t.text.as_str()) != Some(")") {
+                                        return Err(FloatError::new("调试(…) 少了右括号", self.line_span(ln)));
+                                    }
+                                    (lv, &inner[..inner.len() - 1])
+                                }
+                                None => return Err(FloatError::new(
+                                    "调试 后面要写级别：报告 / 警告 / 报错，比如 调试(报告, \"好\")",
+                                    self.line_span(ln),
+                                )),
+                            }
+                        } else {
+                            match toks.get(1).map(|t| t.text.as_str()).and_then(level_word) {
+                                Some(lv) => (lv, &toks[2..]),
+                                None => return Err(FloatError::new(
+                                    "调试 后面要写级别：调试 报告 …（蓝）/ 调试 警告 …（黄）/ 调试 报错 …（红）",
+                                    self.line_span(ln),
+                                )),
+                            }
+                        };
+                    let mut ep = ExprParser::new(rest, &self.file);
+                    let args = if rest.is_empty() {
+                        Vec::new()
+                    } else if ep.at("(") {
+                        ep.parse_args()?
+                    } else {
+                        // 汇编式：调试 报告 x "个" / 调试 警告 a, "个" 都认
+                        ep.parse_loose_args()?
+                    };
+                    if !ep.at_end() {
+                        return Err(FloatError::new("调试 后面多了内容", self.line_span(ln)));
+                    }
+                    return Ok(Some(Stmt::new(StmtKind::Debug { level, args }, self.line_span(ln))));
+                }
+                "class" => {
+                    self.pos += 1;
+                    return Ok(Some(self.parse_class(ln, &toks)?));
+                }
+                "try" | "尝试" => return Ok(Some(self.parse_try(ln, &toks)?)),
+                "throw" | "抛出" => {
+                    self.pos += 1;
+                    let mut ep = ExprParser::new(&toks[1..], &self.file);
+                    let v = ep.parse_expr(0)?;
+                    if !ep.at_end() {
+                        return Err(FloatError::new("throw 后面多了内容", self.line_span(ln)));
+                    }
+                    return Ok(Some(Stmt::new(StmtKind::Throw(v), self.line_span(ln))));
+                }
+                // import 在进解析器之前就被展开成源码了（见 import.rs）。
+                // 还能走到这里 = 写在了缩进块里，那就明确告诉他写错位置了。
+                "import" | "引入" => {
+                    return Err(FloatError::new(
+                        "import 只能写在文件最外层（顶格），不能放进函数或 if 里面",
+                        self.line_span(ln),
+                    ))
+                }
                 "ask" => {
                     self.pos += 1;
                     let mut ep = ExprParser::new(&toks[1..], &self.file);
@@ -645,8 +1600,34 @@ impl Parser {
                     }
                     return Ok(Some(Stmt::new(StmtKind::Ask(prompt), self.line_span(ln))));
                 }
-                "wait" => return Ok(Some(self.unsupported(ln, "wait（挂起）这版 VM 还没实现"))),
-                "time" => return Ok(Some(self.unsupported(ln, "time read / time reset 这版 VM 还没实现"))),
+                "wait" => {
+                    // wait until (条件)：条件不成立就一直转，成立才往下走
+                    if toks.get(1).map(|t| t.text == "until").unwrap_or(false) {
+                        self.pos += 1;
+                        let cond = self.expr_of(&toks[2..])?;
+                        let body = self.parse_body_of(ln.indent);
+                        return Ok(Some(Stmt::new(StmtKind::WaitUntil { cond, body }, self.line_span(ln))));
+                    }
+                    self.pos += 1;
+                    // 纯 wait 秒：桌面版没有"等一会儿再刷新界面"这回事，直接跳过
+                    return Ok(Some(Stmt::new(StmtKind::Nop, self.line_span(ln))));
+                }
+                "time" => {
+                    match toks.get(1).map(|t| t.text.as_str()) {
+                        Some("read") => {
+                            self.pos += 1;
+                            return Ok(Some(Stmt::new(StmtKind::TimeRead, self.line_span(ln))));
+                        }
+                        Some("reset") => {
+                            self.pos += 1;
+                            return Ok(Some(Stmt::new(StmtKind::TimeReset, self.line_span(ln))));
+                        }
+                        _ => return Err(FloatError::new(
+                            "time 只有两种写法：time read（读秒数到 __last_time）、time reset（把计时器归零）",
+                            self.line_span(ln),
+                        )),
+                    }
+                }
                 _ => {}
             }
 
@@ -691,6 +1672,15 @@ impl Parser {
                 self.pos += 1;
                 return Ok(Some(Stmt::new(StmtKind::Destructure { names, value }, self.line_span(ln))));
             }
+        }
+
+        // 带返回类型的函数：`int add(a, b)`（返回类型写在函数名前面，和变量声明一个写法）
+        if is_ident
+            && TYPE_WORDS.contains(&word)
+            && toks.get(1).map(|t| t.is_ident()).unwrap_or(false)
+            && toks.get(2).map(|t| t.text == "(").unwrap_or(false)
+        {
+            return Ok(Some(self.parse_func_def(ln, &toks)?));
         }
 
         // 带类型的变量声明：int a = 1
@@ -775,8 +1765,93 @@ impl Parser {
         Ok(Some(Stmt::new(StmtKind::ExprStmt(first_expr), self.line_span(ln))))
     }
 
-    fn parse_if(&mut self, ln: &Line, toks: &[Token]) -> EResult<Stmt> {
+    /// try / catch / finally。
+    ///
+    /// ```text
+    /// try
+    ///     危险动作()
+    /// catch e
+    ///     print "出错了：" + e.消息
+    /// finally
+    ///     收尾()
+    /// ```
+    fn parse_try(&mut self, ln: &Line, toks: &[Token]) -> EResult<Stmt> {
+        if toks.len() > 1 {
+            return Err(FloatError::new(
+                "try 后面不用写条件，换行直接写块就行",
+                self.line_span(ln),
+            ));
+        }
         self.pos += 1;
+        let body = self.parse_body_of(ln.indent);
+        let mut catch_name: Option<Rc<str>> = None;
+        let mut catch_body: Option<Vec<Stmt>> = None;
+        let mut finally: Option<Vec<Stmt>> = None;
+
+        loop {
+            let next = match self.lines.get(self.pos) {
+                Some(l) => l.clone(),
+                None => break,
+            };
+            if next.skipped {
+                self.pos += 1;
+                continue;
+            }
+            let mut code = next.code.clone();
+            if let Some(rest) = code.strip_prefix('}') {
+                code = rest.trim().to_string();
+            }
+            if code.is_empty() || next.indent != ln.indent {
+                break;
+            }
+            let kw_end = code
+                .char_indices()
+                .find(|(_, c)| !c.is_alphanumeric() && *c != '_')
+                .map(|(i, _)| i)
+                .unwrap_or(code.len());
+            let kw = &code[..kw_end];
+            match kw {
+                "catch" | "捕获" => {
+                    if catch_body.is_some() || catch_name.is_some() {
+                        return Err(FloatError::new("一个 try 只能有一个 catch", self.line_span(&next)));
+                    }
+                    let mut rest = code[kw_end..].trim();
+                    rest = rest.trim_end_matches('{').trim();
+                    rest = rest.trim_start_matches('(').trim_end_matches(')').trim();
+                    if !rest.is_empty() {
+                        let name: String = rest
+                            .chars()
+                            .take_while(|c| c.is_alphanumeric() || *c == '_')
+                            .collect();
+                        if !name.is_empty() {
+                            catch_name = Some(Rc::from(name.as_str()));
+                        }
+                    }
+                    self.pos += 1;
+                    catch_body = Some(self.parse_body_of(next.indent));
+                }
+                "finally" | "最后" => {
+                    self.pos += 1;
+                    finally = Some(self.parse_body_of(next.indent));
+                    break;
+                }
+                _ => break,
+            }
+        }
+
+        if catch_body.is_none() && catch_name.is_none() && finally.is_none() {
+            return Err(FloatError::new(
+                "try 后面要跟 catch 或 finally，否则接住了错误也没人处理",
+                self.line_span(ln),
+            ));
+        }
+        Ok(Stmt::new(
+            StmtKind::Try { body, catch_name, catch_body, finally },
+            self.line_span(ln),
+        ))
+    }
+
+    fn parse_if(&mut self, ln: &Line, toks: &[Token]) -> EResult<Stmt> {        self.pos += 1;
         let mut rest = &toks[1..];
         let mut is_if_out = false;
         if rest.first().map(|t| t.text == "out").unwrap_or(false) {
@@ -785,11 +1860,8 @@ impl Parser {
         }
         let cond = if rest.is_empty() { None } else { Some(self.expr_of(rest)?) };
         if is_if_out {
-            let _cond = cond.ok_or_else(|| FloatError::new("if out 需要一个条件", self.line_span(ln)))?;
-            while self.pos < self.lines.len() && self.lines[self.pos].indent > ln.indent {
-                self.pos += 1;
-            }
-            return Ok(Stmt::new(StmtKind::Unsupported { what: "if out（条件跳出）这版 VM 还没实现".into() }, self.line_span(ln)));
+            let cond = cond.ok_or_else(|| FloatError::new("if out 需要一个条件，例如 if out (i > 3)", self.line_span(ln)))?;
+            return Ok(Stmt::new(StmtKind::IfOut(cond), self.line_span(ln)));
         }
         let cond = cond.ok_or_else(|| FloatError::new("if 后面要跟条件，例如 if (a > 1)", self.line_span(ln)))?;
         let mut branches = vec![(Some(cond), self.parse_body_of(ln.indent))];
@@ -951,11 +2023,26 @@ impl Parser {
 
     fn parse_func_def(&mut self, ln: &Line, toks: &[Token]) -> EResult<Stmt> {
         self.pos += 1;
-        let name_tok = toks.get(1).cloned().ok_or_else(|| FloatError::new("function 后面要跟函数名", self.line_span(ln)))?;
+        /* 两种写法都认：
+         *   `fn int add(a, b)`  —— 返回类型跟在 fn 后面（老写法）
+         *   `int add(a, b)`     —— 返回类型写在函数名前面（和变量声明一致）
+         */
+        let mut idx = 1usize;
+        let mut ret: Option<Rc<str>> = None;
+        if let (Some(t0), Some(t1)) = (toks.get(1), toks.get(2)) {
+            if t0.is_ident()
+                && TYPE_WORDS.contains(&t0.text.as_str())
+                && t1.is_ident()
+            {
+                ret = Some(Rc::from(t0.text.as_str()));
+                idx = 2;
+            }
+        }
+        let name_tok = toks.get(idx).cloned().ok_or_else(|| FloatError::new("function 后面要跟函数名", self.line_span(ln)))?;
         if !name_tok.is_ident() && name_tok.kind != TokKind::Kw {
             return Err(FloatError::new("function 后面要跟函数名", self.line_span(ln)));
         }
-        let mut ep = ExprParser::new(&toks[2..], &self.file);
+        let mut ep = ExprParser::new(&toks[idx + 1..], &self.file);
         let mut params: Vec<Param> = Vec::new();
         if ep.at("(") {
             ep.pos += 1;
@@ -1002,7 +2089,7 @@ impl Parser {
         }
         let body = self.parse_body_of(ln.indent);
         Ok(Stmt::new(
-            StmtKind::FuncDef { name: Rc::from(name_tok.text.as_str()), params, ret: None, body },
+            StmtKind::FuncDef { name: Rc::from(name_tok.text.as_str()), params, ret, body },
             self.line_span(ln),
         ))
     }
@@ -1017,3 +2104,23 @@ fn strip_parens(s: &str) -> String {
         t.to_string()
     }
 }
+
+/// 汇编式算术的命令词 → 对应运算符
+/// 这些内置函数支持汇编式传参（空格分隔）：`writefile "a.txt" "内容"`。
+/// 只放新加的文件/网络函数——老函数不动，零回退风险；
+/// now 没有参数，不在表里，用 `now()` 带括号调。中文别名一并认（兼容早期实现）。
+const LOOSE_ARG_BUILTINS: [&str; 21] = [
+    "readfile", "writefile", "appendfile", "hasfile", "fetch", "post",
+    "chdir", "listdir", "makedir", "removedir", "removefile", "renamefile", "getenv", "pathjoin", "runcmd",
+    "读文件", "写文件", "加文件", "有文件", "取网页", "发网页",
+];
+
+fn math_cmd_op(w: &str) -> Option<Op> {
+    Some(match w {
+        "add" => Op::Add,
+        "sub" => Op::Sub,
+        "mul" => Op::Mul,
+        "div" => Op::Div,
+        "mod" => Op::Mod,
+        _ => return None,
+    })}

@@ -1,6 +1,6 @@
 [package]
 name = "floatide"
-version = "0.15.0"
+version = "1.5.0"
 description = "Float Script 专用 IDE：代码世界（CW Script 系）语言的写作与调试"
 authors = ["小方工作室"]
 license = "MIT"
@@ -22,6 +22,10 @@ rfd = "0.14"
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
 base64 = "0.22"
 portable-pty = "0.8"
+# 取网页 / 发网页 的 HTTP 实现（内核保持零依赖，网络能力在这里注入）
+ureq = "2"
+# CW Script 的原生内核：IDE 的运行（F5）走这条，比旧解释器快 4~5 倍
+float-lang = { path = "float-lang" }
 
 [profile.release]
 opt-level = 2

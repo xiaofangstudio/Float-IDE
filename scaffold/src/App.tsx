@@ -44,11 +44,15 @@ export default function App() {
       setStartupChecked(true);
       return;
     }
+    // 兜底：不管查询成功、失败、还是卡住，最多 800ms 就放行 ——
+    // 界面绝不允许因为一个启动参数而停在空白页
+    const guard = window.setTimeout(() => { if (alive) setStartupChecked(true); }, 800);
     void (async () => {
       try {
         const p = await api.startupPath();
         if (alive && p) setStartup(p);
       } catch { /* 预览环境忽略 */ }
+      window.clearTimeout(guard);
       if (alive) setStartupChecked(true);
     })();
     return () => { alive = false; };
@@ -70,7 +74,7 @@ export default function App() {
       <div className="app-veil" />
       <WindowResizers />
       <div className="app-stage">
-        {page.kind === 'loading' && (startupChecked || !isTauri()) && <Loading onDone={onLoadingDone} />}
+        {page.kind === 'loading' && <Loading onDone={onLoadingDone} />}
         {page.kind === 'welcome' && (
           <Welcome
             onOpenProject={(dir) => setPage({ kind: 'ws', dir })}

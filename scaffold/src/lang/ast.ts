@@ -15,7 +15,7 @@ export type Span = {
   endCol: number;
 };
 
-export type TypeName = 'int' | 'float' | 'str' | 'bool' | 'list' | 'dict' | 'var';
+export type TypeName = 'int' | 'float' | 'str' | 'bool' | 'list' | 'dict' | 'ptr' | 'var';
 
 /* ───────────────────────────── 表达式 ───────────────────────────── */
 
@@ -30,6 +30,7 @@ export type Expr =
   | ({ k: 'dict'; entries: { key: Expr; val: Expr }[] } & Span)
   | ({ k: 'un'; op: string; a: Expr } & Span)
   | ({ k: 'bin'; op: string; a: Expr; b: Expr } & Span)
+  | ({ k: 'ternary'; cond: Expr; a: Expr; b: Expr } & Span)
   | ({ k: 'idx'; obj: Expr; index: Expr } & Span)
   | ({ k: 'member'; obj: Expr; name: string } & Span)
   | ({ k: 'call'; callee: Expr; args: Expr[] } & Span)
@@ -64,20 +65,22 @@ export type AssignOp = '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '**=';
 export type IfBranch = { cond: Expr | null; body: Stmt[]; line: number };
 
 export type Stmt =
-  | ({ k: 'decl'; type: TypeName; name: string; init: Expr | null } & Span)
+  | ({ k: 'decl'; type: TypeName; name: string; init: Expr | null; nameCol: number } & Span)
   | ({ k: 'assign'; target: Target; op: AssignOp; value: Expr } & Span)
   | ({ k: 'incdec'; target: Target; delta: 1 | -1; prefix: boolean } & Span)
   | ({ k: 'expr'; expr: Expr } & Span)
   | ({ k: 'print'; args: Expr[] } & Span)
   /** 报告：和 print 写法一样，但输出到右侧「报告」面板，不进控制台 */
   | ({ k: 'report'; args: Expr[] } & Span)
+  /** 调试输出：调试 报告/警告/报错 内容 —— 带颜色级别，纯给开发者看，不影响程序 */
+  | ({ k: 'debug'; level: 1 | 2 | 3; args: Expr[] } & Span)
   | ({ k: 'ask'; question: Expr } & Span)
   | ({ k: 'if'; branches: IfBranch[]; elseBody: Stmt[] | null } & Span)
   | ({ k: 'while'; cond: Expr; body: Stmt[] } & Span)
   | ({ k: 'repeat'; count: Expr; body: Stmt[] } & Span)
   | ({ k: 'forever'; body: Stmt[] } & Span)
-  | ({ k: 'forRange'; varName: string; from: Expr | null; to: Expr; step: Expr | null; inclusive: boolean; body: Stmt[] } & Span)
-  | ({ k: 'forIn'; varName: string; valueName: string | null; iter: Expr; body: Stmt[] } & Span)
+  | ({ k: 'forRange'; varName: string; nameCol: number; from: Expr | null; to: Expr; step: Expr | null; inclusive: boolean; body: Stmt[] } & Span)
+  | ({ k: 'forIn'; varName: string; nameCol: number; valueName: string | null; iter: Expr; body: Stmt[] } & Span)
   | ({ k: 'waitUntil'; cond: Expr; body: Stmt[] } & Span)
   | ({ k: 'wait'; seconds: Expr } & Span)
   | ({ k: 'break' } & Span)
@@ -88,9 +91,10 @@ export type Stmt =
   | ({ k: 'try'; body: Stmt[]; catchName: string | null; catchBody: Stmt[] | null; finallyBody: Stmt[] | null } & Span)
   | ({ k: 'destructure'; names: { name: string; line: number; col: number }[]; value: Expr } & Span)
   | ({ k: 'ifOut'; cond: Expr } & Span)
-  | ({ k: 'funcDef'; name: string; params: Param[]; retType: string | null; body: Stmt[] } & Span)
-  | ({ k: 'classDef'; name: string; base: string | null; fields: FieldDecl[]; methods: Stmt[] } & Span)
-  | ({ k: 'import'; target: string } & Span)
+  | ({ k: 'funcDef'; name: string; nameCol: number; params: Param[]; retType: string | null; body: Stmt[] } & Span)
+  | ({ k: 'classDef'; name: string; nameCol: number; base: string | null; fields: FieldDecl[]; methods: Stmt[] } & Span)
+  /** import "路径"：argCol/argEndCol 是那个字符串字面量的位置（补全/跳转要用） */
+  | ({ k: 'import'; target: string; argCol: number; argEndCol: number } & Span)
   | ({ k: 'listAdd'; value: Expr; target: Target } & Span)
   | ({ k: 'listInsert'; value: Expr; target: Target; index: Expr } & Span)
   | ({ k: 'listReplace'; target: Target; index: Expr; value: Expr } & Span)
@@ -133,4 +137,37 @@ export function isBlock(s: Stmt): boolean {
 /** 语句是否会产生一个可停靠的"执行步"（调试单步、变量快照） */
 export function isExecutable(s: Stmt): boolean {
   return s.k !== 'comment' && s.k !== 'funcDef' && s.k !== 'classDef' && s.k !== 'import' && s.k !== 'unknown';
+}
+
+/** 一条语句直接包含的子语句块（空数组 = 叶子语句）。
+ *  解析器用它把 span 补到函数体/类体的末尾，编辑器用它找"光标在哪个块里"。 */
+export function childBodies(s: Stmt): Stmt[][] {
+  switch (s.k) {
+    case 'if': return [...s.branches.map((b) => b.body), ...(s.elseBody ? [s.elseBody] : [])];
+    case 'while': case 'repeat': case 'forever': case 'forRange': case 'forIn':
+    case 'waitUntil': case 'funcDef':
+      return [s.body];
+    case 'try':
+      return [s.body, ...(s.catchBody ? [s.catchBody] : []), ...(s.finallyBody ? [s.finallyBody] : [])];
+    case 'classDef': return [s.methods];
+    default: return [];
+  }
+}
+
+/** 把语句的 span 延伸到它所有子语句的末尾（含嵌套）。
+ *  一条 AST 修复：大纲、重命名、光标语义、折叠、诊断的行号全都跟着对。 */
+export function withBodySpan(s: Stmt): Stmt {
+  let endLine = s.endLine;
+  let endCol = s.endCol;
+  const walk = (body: Stmt[]): void => {
+    for (const k of body) {
+      if (k.endLine > endLine || (k.endLine === endLine && k.endCol > endCol)) {
+        endLine = k.endLine;
+        endCol = k.endCol;
+      }
+      for (const child of childBodies(k)) walk(child);
+    }
+  };
+  for (const body of childBodies(s)) walk(body);
+  return endLine === s.endLine && endCol === s.endCol ? s : { ...s, endLine, endCol };
 }

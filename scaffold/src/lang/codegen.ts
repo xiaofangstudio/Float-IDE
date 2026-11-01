@@ -14,9 +14,8 @@
 import type { Expr, Param, Program, Stmt, Target, TypeName } from './ast';
 import { builtinList, getBuiltin } from './builtins';
 import {
-  cloneVal, deepEq, dict, fmtVal, isDict, isInstance, isList, toNum, toStr, truthy, typeName,
-  type Val
-} from './values';
+  cloneVal, deepEq, dict, fmtVal, isDict, isInstance, isList, toNum, toStr, truthy, typeName, ThrownValue,
+  type Val, isPtr } from './values';
 import { callBuiltinMethod, MethodError } from './methods';
 
 /* ───────────────────────────── 类型 ───────────────────────────── */
@@ -74,6 +73,8 @@ export class CompiledRuntime {
   out: (line: string) => void = () => {};
   /** 报告通道：进右侧「报告」面板，不进控制台 */
   rep: (line: string, sourceLine: number) => void = () => {};
+  /** 调试输出通道：level 1=报告(蓝) 2=警告(黄) 3=报错(红)，纯给开发者看 */
+  dbg: (level: 1 | 2 | 3, line: string, sourceLine: number) => void = () => {};
   private stack: string[] = [];
 
   /** 编译通道也要拦无限递归：否则用户只会看到一句「Maximum call stack size exceeded」，
@@ -115,11 +116,18 @@ export class CompiledRuntime {
   /** 报告：不带参数时报告当前所有变量（"现在都有什么"） */
   report(parts: Val[]): void {
     if (parts.length === 0) {
-      const rows = Object.entries(this.v).map(([k, v]) => `  ${k} = ${toStr(v)}（${typeName(v)}）`);
+      const rows = Object.entries(this.v)
+        .filter(([k]) => k !== 'ans' && !k.startsWith('__'))
+        .map(([k, v]) => `  ${k} = ${toStr(v)}（${typeName(v)}）`);
       this.rep(rows.length ? `当前变量：\n${rows.join('\n')}` : '当前变量：（还没有）', this.ln);
       return;
     }
     this.rep(parts.map((p) => toStr(p)).join(' '), this.ln);
+  }
+
+  /** 调试输出：三档颜色级别，纯给开发者看的，不影响程序 */
+  debugOutput(level: 1 | 2 | 3, parts: Val[]): void {
+    this.dbg(level, parts.map((p) => toStr(p)).join(' '), this.ln);
   }
 
   timeRead(): number { return (performance.now() - this.t0) / 1000; }
@@ -133,24 +141,24 @@ export class CompiledRuntime {
     return fn(this, null, ...args);
   }
 
-  /** catch 里拿到的错误对象：e.message / e.line / e.file */
+  /** catch 拿到的值：throw 抛什么就是什么；运行时错误给一张中英双键的字典 */
   errObj(e: unknown): Val {
+    if (e instanceof ThrownValue) return e.value;
     const d = dict();
-    if (e instanceof RuntimeError) {
-      d.map.set('message', e.message);
-      d.map.set('line', e.line || this.ln);
-      d.map.set('file', this.file);
-    } else {
-      d.map.set('message', e instanceof Error ? e.message : String(e));
-      d.map.set('line', this.ln);
-      d.map.set('file', this.file);
-    }
+    const line = e instanceof RuntimeError ? e.line || this.ln : this.ln;
+    const msg = e instanceof Error ? e.message : String(e);
+    d.map.set('message', msg);
+    d.map.set('消息', msg);
+    d.map.set('line', line);
+    d.map.set('行', line);
+    d.map.set('file', this.file);
+    d.map.set('类型', '运行时错误');
     return d;
   }
 
+  /** throw 的值原样带出去（和 Rust 内核一致） */
   throwVal(v: Val): never {
-    const msg = isDict(v) && v.map.has('message') ? toStr(v.map.get('message') as Val) : toStr(v);
-    throw new RuntimeError(msg, this.ln);
+    throw new ThrownValue(v);
   }
 
   badBreak(what: string): never {
@@ -257,6 +265,16 @@ export const O = {
     const d = O.num(b, '「/」');
     if (d === 0) throw new RuntimeError('除数不能为 0', 0);
     return O.num(a, '「/」') / d;
+  },
+  /** 整除：向下取整（-7 // 2 = -4，和 Python 一致） */
+  idiv(a: Val, b: Val): Val {
+    if (typeof a === 'number' && typeof b === 'number') {
+      if (b === 0) throw new RuntimeError('整除的除数不能为 0', 0);
+      return Math.floor(a / b);
+    }
+    const d = O.num(b, '「//」');
+    if (d === 0) throw new RuntimeError('整除的除数不能为 0', 0);
+    return Math.floor(O.num(a, '「//」') / d);
   },
   mod(a: Val, b: Val): Val {
     if (typeof a === 'number' && typeof b === 'number') {
@@ -757,6 +775,10 @@ ${body}
         // 报告走同一个运行时，只是换个回调：进右侧「报告」面板
         return `${ln}$.report([${s.args.map((a) => genExpr(a, ctx)).join(', ')}]);\n`;
 
+      case 'debug':
+        // 调试输出：级别 1=报告(蓝) 2=警告(黄) 3=报错(红)，纯给开发者看，不影响程序
+        return `${ln}$.debugOutput(${s.level}, [${s.args.map((a) => genExpr(a, ctx)).join(', ')}]);\n`;
+
       case 'ask': {
         const q = genExpr(s.question, ctx);
         return `${ln}$.v.ans = $.answerOf(yield { kind: 'ask', q: V.toStr(${q}) }); $.v.__last_ans = $.v.ans;\n`;
@@ -944,6 +966,10 @@ ${genBlock(s.body, c2)}  }
         if (e.op === '-') return `O.neg(${genExpr(e.a, ctx)})`;
         if (e.op === '+') return `O.num(${genExpr(e.a, ctx)}, '一元 +')`;
         return `O.bitnot(${genExpr(e.a, ctx)})`;
+      case 'ternary':
+        // JS 的 ?: 本来就是惰性的，直接照搬
+        return `(O.t(${genExpr(e.cond, ctx)}) ? ${genExpr(e.a, ctx)} : ${genExpr(e.b, ctx)})`;
+
       case 'bin': {
         const a = genExpr(e.a, ctx);
         const b = genExpr(e.b, ctx);
@@ -954,6 +980,7 @@ ${genBlock(s.body, c2)}  }
           case '-': return `O.sub(${a}, ${b})`;
           case '*': return `O.mul(${a}, ${b})`;
           case '/': return `O.div(${a}, ${b})`;
+          case '//': return `O.idiv(${a}, ${b})`;
           case '%': return `O.mod(${a}, ${b})`;
           case '**': return `O.pow(${a}, ${b})`;
           case '&': return `O.band(${a}, ${b})`;

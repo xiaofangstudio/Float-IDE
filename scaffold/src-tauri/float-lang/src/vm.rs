@@ -34,6 +34,16 @@ const STACK_MARGIN: usize = 256;
 /// 万一字节码算错了栈高度，最坏是读到 null，而不是越界访存。
 const STACK_PAD: usize = 64;
 
+/// try 的处理器：出错时从这里"跳回来"继续跑。
+/// 存的是出错瞬间要恢复的三样东西——去哪、栈多高、帧多深。
+struct Handler {
+    ip: u32,
+    sp: usize,
+    frames_len: usize,
+    iters_len: usize,
+    ranges_len: usize,
+}
+
 /// 调用帧。字段全是小整数：fib 这种一秒几百万次调用的场景，
 /// 帧多大就是成倍的差别（塞个 Rc<str> 名字进来，帧从 28 字涨到 72 字节，
 /// 每帧还要多一次引用计数）。
@@ -48,6 +58,9 @@ struct Frame {
     /// 进函数时迭代器栈 / 计数循环栈的深度，返回时截断回去
     iter_base: u32,
     range_base: u32,
+    /// 进函数时 try 处理器的深度：return 出门时要把函数里没散掉的 try 一起收掉，
+    /// 不然外层一旦报错会跳进一个已经废弃的 catch 里
+    hdl_base: u32,
     /// 函数在 chunk.fn_names 里的编号（报错的调用链要用）
     fn_id: u16,
     /// 这次调用实际传了几个实参（默认值打桩要用）
@@ -121,17 +134,42 @@ struct RangeLoop {
     is_global: bool,
 }
 
-/// 操作数栈：容量固定，用裸指针访问，Drop 时把真实用量同步回 Vec。
+/// 操作数栈：容量固定，用裸指针访问。
+///
+/// **关键设计**：底层是 `Vec<MaybeUninit<Value>>`，只有 `[0, sp)` 这一段是"活的值"，
+/// 析构时也只 drop 这一段。这样"从槽里把值搬走"（ptr::read）之后，
+/// 被搬走的格子天然不在存活区间内，不会被第二次 drop —— 不需要每次出栈都写一遍 null。
+/// （以前用 `Vec<Value>` + 收尾抹 null，既慢又容易漏，漏一次就是 Rc 计数下溢、
+///  堆被写坏、程序退出时崩。）
 struct OpStack {
-    buf: Vec<Value>,
+    buf: Vec<std::mem::MaybeUninit<Value>>,
     sp: usize,
 }
 
 impl OpStack {
     fn new() -> OpStack {
-        // 整块初始化成 null：len 固定，栈顶靠 sp 走，
-        // 好处是不用 set_len 收尾，也不会碰到未初始化内存。
-        OpStack { buf: vec![Value::Null; STACK_PAD + STACK_CAP], sp: STACK_PAD }
+        let n = STACK_PAD + STACK_CAP;
+        let mut buf: Vec<std::mem::MaybeUninit<Value>> = Vec::with_capacity(n);
+        // 只有栈底那一段（永远不参与运算的垫子）需要先初始化成 null，
+        // 其余格子保持"未初始化"，用多少写多少。
+        unsafe {
+            buf.set_len(n);
+            let p = buf.as_mut_ptr() as *mut Value;
+            for i in 0..STACK_PAD {
+                std::ptr::write(p.add(i), Value::Null);
+            }
+        }
+        OpStack { buf, sp: STACK_PAD }
+    }
+}
+
+impl Drop for OpStack {
+    fn drop(&mut self) {
+        // 只析构真正活着的值（栈底垫子 + 栈上内容）
+        let p = self.buf.as_mut_ptr() as *mut Value;
+        for i in 0..self.sp.min(self.buf.len()) {
+            unsafe { std::ptr::drop_in_place(p.add(i)) };
+        }
     }
 }
 
@@ -163,6 +201,10 @@ pub struct Vm {
     frames: Vec<Frame>,
     iters: Vec<IterState>,
     ranges: Vec<RangeLoop>,
+    /// try 的处理器栈（出错就弹回最近的一层）
+    handlers: Vec<Handler>,
+    /// `throw` 抛出来的原值：catch 拿到的就是它（没 throw 过就是运行时错误）
+    thrown: Option<Value>,
     /// 每个指令位置一格调用缓存
     call_ic: Vec<CallIc>,
     /// 手动内存对账表
@@ -175,6 +217,11 @@ pub struct Vm {
     /// 预设输入（IDE 里接输入框，测试里喂脚本化输入）
     inputs: Vec<String>,
     input_pos: usize,
+    /// 交互模式：ask 没有预设输入时"挂起等人回答"，而不是直接给空串
+    interactive: bool,
+    need_input: bool,
+    /// 计时器基准（毫秒）：time read 报的是距这里的秒数
+    time_base: f64,
 }
 
 impl Vm {
@@ -188,6 +235,8 @@ impl Vm {
             frames: Vec::new(),
             iters: Vec::new(),
             ranges: Vec::new(),
+            handlers: Vec::new(),
+            thrown: None,
             call_ic: vec![CallIc::default(); chunk_len],
             allocs: Vec::new(),
             reports: Vec::new(),
@@ -196,6 +245,9 @@ impl Vm {
             max_steps: DEFAULT_MAX_STEPS,
             inputs: Vec::new(),
             input_pos: 0,
+            interactive: false,
+            need_input: false,
+            time_base: now_millis(),
         }
     }
 
@@ -256,6 +308,27 @@ impl Vm {
         std::mem::take(&mut self.out)
     }
 
+    /// 交互模式：ask 没有预设输入时先挂起，等 IDE 把回答送进来再重跑。
+    pub fn set_interactive(&mut self, on: bool) {
+        self.interactive = on;
+    }
+
+    /// 这次停下是不是因为"等人输入"
+    pub fn needs_input(&self) -> bool {
+        self.need_input
+    }
+
+    /// 取走 ask 的提问文本（就是挂起前最后打印的那一行；调试行不算提问）
+    pub fn take_prompt(&mut self) -> Option<String> {
+        let last = self
+            .out
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty() && !l.starts_with('\u{1}'))
+            .map(|l| l.trim().to_string());
+        last
+    }
+
     /// 预置输入队列：脚本里的 ask 依次取用，取完给空串。
     pub fn set_inputs(&mut self, inputs: Vec<String>) {
         self.inputs = inputs;
@@ -282,6 +355,23 @@ impl Vm {
         self.chunk.lines.get(ip - 1).copied().unwrap_or(0)
     }
 
+    /// 合并源码里的行号 → (哪个文件, 那个文件里的第几行)。
+    /// 没走 import 时两者一样，直接返回主文件。
+    fn origin(&self, line: u32) -> (Rc<str>, u32) {
+        let i = line as usize - 1;
+        match (self.chunk.line_file.get(i), self.chunk.line_local.get(i)) {
+            (Some(f), Some(local)) => (
+                self.chunk
+                    .files
+                    .get(*f as usize)
+                    .cloned()
+                    .unwrap_or_else(|| Rc::clone(&self.chunk.file)),
+                *local,
+            ),
+            _ => (Rc::clone(&self.chunk.file), line),
+        }
+    }
+
     /// 拼一条中文报错：**第几行** + 原因 + 调用链。
     ///
     /// 用户说过"报错也要是中文"，所以这里不出现英文单词，调用链也按
@@ -293,7 +383,13 @@ impl Vm {
         let mut msg = msg.into();
         let line = self.line_of(ip);
         if line > 0 {
-            msg = format!("第 {} 行：{}", line, msg);
+            let (fname, local) = self.origin(line);
+            if fname == self.chunk.file {
+                msg = format!("第 {} 行：{}", local, msg);
+            } else {
+                // 错误出在 import 进来的库里：得说清是哪个文件，不然行号对不上
+                msg = format!("{} 第 {} 行：{}", fname, local, msg);
+            }
         }
         // 调用链：由外到内，"谁在第几行调了下一个"
         let mut trace = Vec::new();
@@ -319,11 +415,19 @@ impl Vm {
     }
 
     pub fn run(&mut self) -> Result<RunOutcome, FloatError> {
+        // 收尾不需要再扫栈抹 null：OpStack 的 Drop 只析构 [0, sp) 这段活值，
+        // 被 ptr::read 搬走的格子天然不在里面。
+        self.run_inner()
+    }
+
+    fn run_inner(&mut self) -> Result<RunOutcome, FloatError> {
         self.globals = vec![Value::Null; self.chunk.n_globals as usize];
         self.stack.sp = STACK_PAD;
         self.frames.clear();
         self.iters.clear();
         self.ranges.clear();
+        self.handlers.clear();
+        self.thrown = None;
         self.allocs.clear();
         self.reports.clear();
         self.out.clear();
@@ -336,18 +440,72 @@ impl Vm {
             call_ip: 0,
             iter_base: 0,
             range_base: 0,
+            hdl_base: 0,
             fn_id: u16::MAX,
             argc: 0,
         });
-        unsafe { self.exec() }
+        // try/catch 的落地方式：exec 里所有报错照旧 `return Err(…)`，
+        // 由这里统一接住——有 catch 就把现场倒回去、把错误值压栈、接着跑。
+        // 好处是 40 多个报错点一个都不用改，热路径也没有任何额外判断。
+        let mut start_ip = 0usize;
+        let mut start_sp = STACK_PAD;
+        loop {
+            match unsafe { self.exec(start_ip, start_sp) } {
+                Ok(o) => return Ok(o),
+                Err(e) => {
+                    // 「等人输入」不是真错误：不能交给 catch 处理，直接冒到上层
+                    if self.need_input {
+                        return Err(e);
+                    }
+                    match self.handlers.pop() {
+                    None => return Err(e),
+                    Some(h) => {
+                        // 回到 try 那一刻的现场
+                        self.frames.truncate(h.frames_len);
+                        self.iters.truncate(h.iters_len);
+                        self.ranges.truncate(h.ranges_len);
+                        self.stack.sp = h.sp;
+                        // 错误值占住栈顶，catch 那边用 SetLocal 取走
+                        let v = match self.thrown.take() {
+                            Some(v) => v,
+                            None => self.error_value(&e),
+                        };
+                        if h.sp < self.stack.buf.len() {
+                            // 用裸写：这一格虽然不在存活区间里，但里面可能是已搬走的残值
+                            unsafe {
+                                let p = self.stack.buf.as_mut_ptr() as *mut Value;
+                                std::ptr::write(p.add(h.sp), v);
+                            }
+                            start_sp = h.sp + 1;
+                        } else {
+                            return Err(e);
+                        }
+                        // 报错点可能在函数里，回来时 base 要跟着 frame 重算
+                        start_ip = h.ip as usize;
+                    }
+                    }
+                }
+            }
+        }
+    }
+
+    /// catch 接到的"运行时错误"长什么样：一个小字典，键是中文的。
+    /// （`throw` 抛出来的东西则原样传过去，不做包装。）
+    fn error_value(&self, e: &FloatError) -> Value {
+        let mut d = crate::value::Dict::new();
+        d.set(Rc::from("消息"), Value::string(e.message.clone()));
+        d.set(Rc::from("message"), Value::string(e.message.clone()));
+        d.set(Rc::from("行"), Value::Int(e.span.line as i64));
+        d.set(Rc::from("类型"), Value::string("运行时错误".to_string()));
+        Value::Dict(Rc::new(std::cell::RefCell::new(d)))
     }
 
     /// 执行主体。全程用裸指针读写操作数栈和全局槽。
     ///
     /// 安全性：sp 只在 [0, STACK_CAP) 内移动（每轮开头统一检查余量 256 格），
     /// 槽号来自编译期，全局槽长度在 reset 后不变。
-    unsafe fn exec(&mut self) -> Result<RunOutcome, FloatError> {
-        let sptr = self.stack.buf.as_mut_ptr();
+    unsafe fn exec(&mut self, start_ip: usize, start_sp: usize) -> Result<RunOutcome, FloatError> {
+        let sptr = self.stack.buf.as_mut_ptr() as *mut Value;
         let gptr = self.globals.as_mut_ptr();
         let glen = self.globals.len();
         // 指令区在整个运行期不变，直接拿裸指针取指，省掉每条指令的边界检查。
@@ -359,10 +517,10 @@ impl Vm {
         let kptr = self.chunk.consts.as_ptr();
         let klen = self.chunk.consts.len();
 
-        let mut ip = 0usize;
-        let mut sp = STACK_PAD;
+        let mut ip = start_ip;
+        let mut sp = start_sp;
         // 局部变量基址缓存：GetLocal/SetLocal 是最高频指令，不能每次都查 frames
-        let mut base = 0usize;
+        let mut base = self.frames.last().map(|f| f.locals_base as usize).unwrap_or(0);
         let mut fuel = FUEL;
         let _sync = SpSync { stack: &mut self.stack as *mut OpStack, sp: &mut sp as *mut usize };
 
@@ -411,7 +569,7 @@ impl Vm {
                 }
                 Op::SetLocal(i) => {
                     sp -= 1;
-                    let v = std::ptr::read(sptr.add(sp));
+                    let v = take(sptr, sp);
                     let idx = base + i as usize;
                     if idx < sp {
                         *sptr.add(idx) = v;
@@ -425,12 +583,12 @@ impl Vm {
                 }
                 Op::SetGlobal(i) => {
                     sp -= 1;
-                    let v = std::ptr::read(sptr.add(sp));
+                    let v = take(sptr, sp);
                     if (i as usize) < glen {
                         *gptr.add(i as usize) = v;
                     }
                 }
-                Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod | Op::Pow => {
+                Op::Add | Op::Sub | Op::Mul | Op::Div | Op::IDiv | Op::Mod | Op::Pow => {
                     if sp < 2 {
                         return Err(self.err_at(ip, "运算缺少操作数"));
                     }
@@ -442,6 +600,8 @@ impl Vm {
                             Op::Sub => x.checked_sub(y).map(Value::Int),
                             Op::Mul => x.checked_mul(y).map(Value::Int),
                             Op::Div if y != 0 && x % y == 0 => Some(Value::Int(x / y)),
+                            // 整除向下取整：-7 // 2 = -4（Rust 的 / 是向零截断，得自己算）
+                            Op::IDiv if y != 0 => Some(Value::Int(floor_div_i64(x, y))),
                             Op::Mod if y != 0 => Some(Value::Int(x % y)),
                             _ => None,
                         };
@@ -452,9 +612,9 @@ impl Vm {
                         }
                     }
                     sp -= 1;
-                    let b = std::ptr::read(sptr.add(sp));
+                    let b = take(sptr, sp);
                     sp -= 1;
-                    let a = std::ptr::read(sptr.add(sp));
+                    let a = take(sptr, sp);
                     let v = match arith(op, &a, &b) {
                         Ok(v) => v,
                         Err(m) => return Err(self.err_at(ip, m)),
@@ -482,9 +642,9 @@ impl Vm {
                         continue;
                     }
                     sp -= 1;
-                    let b = std::ptr::read(sptr.add(sp));
+                    let b = take(sptr, sp);
                     sp -= 1;
-                    let a = std::ptr::read(sptr.add(sp));
+                    let a = take(sptr, sp);
                     let v = match compare(op, &a, &b) {
                         Ok(v) => v,
                         Err(m) => return Err(self.err_at(ip, m)),
@@ -494,9 +654,9 @@ impl Vm {
                 }
                 Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr => {
                     sp -= 1;
-                    let b = std::ptr::read(sptr.add(sp));
+                    let b = take(sptr, sp);
                     sp -= 1;
-                    let a = std::ptr::read(sptr.add(sp));
+                    let a = take(sptr, sp);
                     let x = match a.as_int() {
                         Some(v) => v,
                         None => return Err(self.err_at(ip, "位运算需要整数")),
@@ -518,7 +678,7 @@ impl Vm {
                 }
                 Op::Neg => {
                     sp -= 1;
-                    let a = std::ptr::read(sptr.add(sp));
+                    let a = take(sptr, sp);
                     let v = match a {
                         Value::Int(i) => Value::Int(-i),
                         Value::Float(f) => Value::Float(-f),
@@ -532,13 +692,13 @@ impl Vm {
                 }
                 Op::Not => {
                     sp -= 1;
-                    let a = std::ptr::read(sptr.add(sp));
+                    let a = take(sptr, sp);
                     std::ptr::write(sptr.add(sp), Value::Bool(!a.truthy()));
                     sp += 1;
                 }
                 Op::BitNot => {
                     sp -= 1;
-                    let a = std::ptr::read(sptr.add(sp));
+                    let a = take(sptr, sp);
                     let x = match a.as_int() {
                         Some(v) => v,
                         None => return Err(self.err_at(ip, "按位取反需要整数")),
@@ -568,7 +728,7 @@ impl Vm {
                 }
                 Op::JumpIfFalse(t) => {
                     sp -= 1;
-                    let v = std::ptr::read(sptr.add(sp));
+                    let v = take(sptr, sp);
                     if !v.truthy() {
                         ip = t as usize;
                     }
@@ -889,6 +1049,7 @@ impl Vm {
                             call_ip: ip as u32,
                             iter_base: self.iters.len() as u32,
                             range_base: self.ranges.len() as u32,
+                            hdl_base: self.handlers.len() as u32,
                             fn_id: fid,
                             argc: n.min(nparams) as u8,
                         });
@@ -902,14 +1063,77 @@ impl Vm {
                 Op::CallMethod(name_idx, nargs) => {
                     let name = self.chunk.name_at(name_idx);
                     let n = nargs as usize;
+                    // ── 类实例：查 __m_类_方法，receiver 直接当 self（第 0 个参数）──
+                    let recv_idx = sp.saturating_sub(n + 1);
+                    let cls = match &*sptr.add(recv_idx) {
+                        Value::Dict(d) => d.borrow().get("__cls").map(|v| v.to_display()),
+                        _ => None,
+                    };
+                    if let Some(mut cls) = cls {
+                        // 沿着 __base 往上找：子类没写的方法用父类的
+                        let mut found = None;
+                        for _ in 0..16 {
+                            let want_name = format!("__m_{}_{}", cls, name);
+                            if let Some(slot) = self.chunk.global_names.iter().position(|g| &**g == want_name.as_str()) {
+                                found = Some(slot);
+                                break;
+                            }
+                            let parent = match &*sptr.add(recv_idx) {
+                                Value::Dict(d) => d.borrow().get("__base").map(|v| v.to_display()),
+                                _ => None,
+                            };
+                            match parent {
+                                Some(p) => cls = p,
+                                None => break,
+                            }
+                        }
+                        if let Some(slot) = found {
+                            let fv = (*gptr.add(slot)).clone();
+                            if let Value::Func(f) = fv {
+                                let (entry, nlocals, nparams, fid) = (f.entry, f.nlocals, f.params.len(), f.id);
+                                if self.frames.len() >= MAX_DEPTH {
+                                    return Err(self.err_at(ip, format!("递归太深了（超过 {} 层）", MAX_DEPTH)));
+                                }
+                                // 实参不够就用默认值补
+                                if n + 1 < nparams {
+                                    for k in (n + 1)..nparams {
+                                        std::ptr::write(
+                                            sptr.add(sp),
+                                            f.defaults.get(k).cloned().unwrap_or(Value::Null),
+                                        );
+                                        sp += 1;
+                                    }
+                                }
+                                let want = nlocals.max(nparams);
+                                while sp < recv_idx + want {
+                                    std::ptr::write(sptr.add(sp), Value::Null);
+                                    sp += 1;
+                                }
+                                self.frames.push(Frame {
+                                    base: recv_idx as u32,
+                                    locals_base: recv_idx as u32,
+                                    ret_ip: ip as u32,
+                                    call_ip: ip as u32,
+                                    iter_base: self.iters.len() as u32,
+                                    range_base: self.ranges.len() as u32,
+                                    hdl_base: self.handlers.len() as u32,
+                                    fn_id: fid,
+                                    argc: (n + 1).min(nparams) as u8,
+                                });
+                                base = recv_idx;
+                                ip = entry;
+                                continue;
+                            }
+                        }
+                    }
                     let mut args = Vec::with_capacity(n);
                     for _ in 0..n {
                         sp -= 1;
-                        args.push(std::ptr::read(sptr.add(sp)));
+                        args.push(take(sptr, sp));
                     }
                     args.reverse();
                     sp -= 1;
-                    let recv = std::ptr::read(sptr.add(sp));
+                    let recv = take(sptr, sp);
                     let v = match call_method(&recv, &name, &args) {
                         Ok(v) => v,
                         Err(m) => return Err(self.err_at(ip, m)),
@@ -922,7 +1146,7 @@ impl Vm {
                 }
                 Op::Return => {
                     sp -= 1;
-                    let v = std::ptr::read(sptr.add(sp));
+                    let v = take(sptr, sp);
                     match leave_frame(self, sptr, &mut sp, &mut base) {
                         FrameExit::Cont(rip) => {
                             std::ptr::write(sptr.add(sp), v);
@@ -1063,6 +1287,7 @@ impl Vm {
                             call_ip: ip as u32,
                             iter_base: self.iters.len() as u32,
                             range_base: self.ranges.len() as u32,
+                            hdl_base: self.handlers.len() as u32,
                             fn_id: fid,
                             argc: n.min(nparams) as u8,
                         });
@@ -1095,9 +1320,9 @@ impl Vm {
                 }
                 Op::Index => {
                     sp -= 1;
-                    let idx = std::ptr::read(sptr.add(sp));
+                    let idx = take(sptr, sp);
                     sp -= 1;
-                    let obj = std::ptr::read(sptr.add(sp));
+                    let obj = take(sptr, sp);
                     let v = match index_get(&obj, &idx) {
                         Ok(v) => v,
                         Err(m) => return Err(self.err_at(ip, m)),
@@ -1107,11 +1332,11 @@ impl Vm {
                 }
                 Op::IndexSet => {
                     sp -= 1;
-                    let val = std::ptr::read(sptr.add(sp));
+                    let val = take(sptr, sp);
                     sp -= 1;
-                    let idx = std::ptr::read(sptr.add(sp));
+                    let idx = take(sptr, sp);
                     sp -= 1;
-                    let obj = std::ptr::read(sptr.add(sp));
+                    let obj = take(sptr, sp);
                     if let Err(m) = index_set(&obj, &idx, val) {
                         return Err(self.err_at(ip, m));
                     }
@@ -1119,7 +1344,7 @@ impl Vm {
                 Op::Member(name_idx) => {
                     let name = self.chunk.name_at(name_idx);
                     sp -= 1;
-                    let obj = std::ptr::read(sptr.add(sp));
+                    let obj = take(sptr, sp);
                     let v = match member_get(&obj, &name) {
                         Ok(v) => v,
                         Err(m) => return Err(self.err_at(ip, m)),
@@ -1130,9 +1355,9 @@ impl Vm {
                 Op::MemberSet(name_idx) => {
                     let name = self.chunk.name_at(name_idx);
                     sp -= 1;
-                    let val = std::ptr::read(sptr.add(sp));
+                    let val = take(sptr, sp);
                     sp -= 1;
-                    let obj = std::ptr::read(sptr.add(sp));
+                    let obj = take(sptr, sp);
                     if let Err(m) = member_set(&obj, &name, val) {
                         return Err(self.err_at(ip, m));
                     }
@@ -1142,6 +1367,10 @@ impl Vm {
                         let v = self.inputs[self.input_pos].clone();
                         self.input_pos += 1;
                         v
+                    } else if self.interactive {
+                        // 没有现成答案：标记"等人回答"，让上层把提问抛给界面
+                        self.need_input = true;
+                        return Err(self.err_at(ip, "__need_input__"));
                     } else {
                         String::new()
                     };
@@ -1198,17 +1427,50 @@ impl Vm {
                     self.out.push_str(&line);
                     self.out.push('\n');
                 }
+                Op::Debug { n, level } => {
+                    let n = n as usize;
+                    let at = sp.saturating_sub(n);
+                    let items = take_tail(sptr, &mut sp, at);
+                    let mut line = String::new();
+                    for (i, v) in items.iter().enumerate() {
+                        if i > 0 {
+                            line.push(' ');
+                        }
+                        line.push_str(&v.to_display());
+                    }
+                    // 级别标记（\u{1} + 级别数字 + 空格）：界面据此上色，
+                    // 1 = 报告（蓝），2 = 警告（黄），3 = 报错（红）。纯展示，不影响程序。
+                    let lv = match level {
+                        2 => '2',
+                        3 => '3',
+                        _ => '1',
+                    };
+                    self.out.push('\u{1}');
+                    self.out.push(lv);
+                    self.out.push(' ');
+                    self.out.push_str(&line);
+                    self.out.push('\n');
+                }
+                Op::TimeRead => {
+                    // 距上次 time reset 过了多少秒（毫秒精度，按 float 给）
+                    let now = now_millis();
+                    std::ptr::write(sptr.add(sp), Value::Float((now - self.time_base) / 1000.0));
+                    sp += 1;
+                }
+                Op::TimeReset => {
+                    self.time_base = now_millis();
+                }
                 /* ── 计数循环 ── */
                 Op::RangeInit { var, is_global, inclusive } => {
                     if sp < 3 {
                         return Err(self.err_at(ip, "for 循环的起止值不完整"));
                     }
                     sp -= 1;
-                    let step = std::ptr::read(sptr.add(sp));
+                    let step = take(sptr, sp);
                     sp -= 1;
-                    let to = std::ptr::read(sptr.add(sp));
+                    let to = take(sptr, sp);
                     sp -= 1;
-                    let from = std::ptr::read(sptr.add(sp));
+                    let from = take(sptr, sp);
                     let state = match (&from, &to, &step) {
                         (Value::Int(f), Value::Int(t), Value::Int(s)) => {
                             if *s == 0 {
@@ -1302,7 +1564,7 @@ impl Vm {
                 }
                 Op::IterInit => {
                     sp -= 1;
-                    let it = std::ptr::read(sptr.add(sp));
+                    let it = take(sptr, sp);
                     let (src, len) = match iter_source(&it) {
                         Ok(v) => v,
                         Err(m) => return Err(self.err_at(ip, m)),
@@ -1327,6 +1589,29 @@ impl Vm {
                 }
                 Op::IterEnd => {
                     self.iters.pop();
+                }
+                Op::TryBegin(h) => {
+                    // 记下现场：出错时 run() 会把这三样倒回来再跳到 h
+                    self.handlers.push(Handler {
+                        ip: h,
+                        sp,
+                        frames_len: self.frames.len(),
+                        iters_len: self.iters.len(),
+                        ranges_len: self.ranges.len(),
+                    });
+                }
+                Op::TryEnd => {
+                    self.handlers.pop();
+                }
+                Op::Throw => {
+                    sp -= 1;
+                    let v = take(sptr, sp);
+                    // read 之后这一格就是"已移走"的残值，必须立刻置 null，
+                    // 否则析构时会被 drop 第二次
+                    std::ptr::write(sptr.add(sp), Value::Null);
+                    let shown = v.to_display();
+                    self.thrown = Some(v);
+                    return Err(self.err_at(ip, shown));
                 }
             }
         }
@@ -1361,6 +1646,10 @@ unsafe fn leave_frame(
     if vm.ranges.len() != frame.range_base as usize {
         vm.ranges.truncate(frame.range_base as usize);
     }
+    // 函数里没跑完的 try 一并收掉，否则它会一直躺在处理器栈上
+    if vm.handlers.len() != frame.hdl_base as usize {
+        vm.handlers.truncate(frame.hdl_base as usize);
+    }
     drop_from(sptr, sp, frame.base as usize);
     *base = vm.frames.last().map(|f| f.locals_base as usize).unwrap_or(0);
     if vm.frames.is_empty() {
@@ -1369,17 +1658,53 @@ unsafe fn leave_frame(
     FrameExit::Cont(frame.ret_ip as usize)
 }
 
+/// 整数整除（向下取整）。Rust 的 `/` 是向零截断，做不到 `-7 // 2 = -4`，
+/// 所以按"商的符号和除数不一致且有余数就再减 1"补正。
+#[inline]
+fn floor_div_i64(x: i64, y: i64) -> i64 {
+    let q = x / y;
+    if x % y != 0 && ((x < 0) != (y < 0)) {
+        q - 1
+    } else {
+        q
+    }
+}
+
+/// 当前时间的毫秒数（给 time read / time reset 用）。
+/// 浏览器（wasm）里没有系统时钟，给 0：time read 会一直读到 0，不会崩。
+#[cfg(not(target_arch = "wasm32"))]
+fn now_millis() -> f64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as f64)
+        .unwrap_or(0.0)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn now_millis() -> f64 {
+    0.0
+}
+
 /// 把 [from, sp) 这段值取成一个 Vec，栈顶退到 from
 #[inline]
 unsafe fn take_tail(ptr: *mut Value, sp: &mut usize, from: usize) -> Vec<Value> {
     let mut out = Vec::with_capacity(sp.saturating_sub(from));
     let mut i = from;
     while i < *sp {
-        out.push(std::ptr::read(ptr.add(i)));
+        out.push(take(ptr, i));
         i += 1;
     }
     *sp = from;
     out
+}
+
+/// 从栈槽里"拿走"一个值。
+/// 槽里剩下的旧字节不用管：OpStack 只析构 [0, sp) 这段活值，
+/// 搬走之后这一格就不再被 drop（这也是它能做到零开销的原因）。
+#[inline]
+unsafe fn take(ptr: *mut Value, i: usize) -> Value {
+    std::ptr::read(ptr.add(i))
 }
 
 /// 把栈从 sp 收回到 to，逐个析构（Rc 要正确减引用）
@@ -1477,7 +1802,7 @@ fn bop_to_op(bop: u8) -> Option<Op> {
     })
 }
 
-fn arith(op: Op, a: &Value, b: &Value) -> Result<Value, String> {
+pub(crate) fn arith(op: Op, a: &Value, b: &Value) -> Result<Value, String> {
     // 字符串：+ 就是拼接
     if op == Op::Add {
         if matches!(a, Value::Str(_)) || matches!(b, Value::Str(_)) {
@@ -1523,6 +1848,12 @@ fn arith(op: Op, a: &Value, b: &Value) -> Result<Value, String> {
                 }
                 Value::Int(x % y)
             }
+            Op::IDiv => {
+                if y == 0 {
+                    return Err("整除的除数为 0".into());
+                }
+                Value::Int(floor_div_i64(x, y))
+            }
             Op::Pow => {
                 if y >= 0 && y < 63 {
                     match x.checked_pow(y as u32) {
@@ -1547,6 +1878,13 @@ fn arith(op: Op, a: &Value, b: &Value) -> Result<Value, String> {
                 return Err("除数为 0".into());
             }
             Value::Float(x / y)
+        }
+        // 整除：浮点也向下取整（7.5 // 2 = 3.0，和 Python 一致）
+        Op::IDiv => {
+            if y == 0.0 {
+                return Err("整除的除数为 0".into());
+            }
+            Value::Float((x / y).floor())
         }
         Op::Mod => {
             if y == 0.0 {

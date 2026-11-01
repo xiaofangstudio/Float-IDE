@@ -13,7 +13,9 @@ export type ProjectMeta = {
 
 export type DetectInfo = { browser: string | null; ffmpeg: string | null };
 
-export type ConsoleLine = { kind: 'out' | 'err' | 'info'; text: string; ts: number };
+/** 控制台行：out=普通输出、err=红色错误、info=蓝色信息；
+ * dbg-* 是「调试 报告/警告/报错」三档（蓝/黄/红），纯给开发者看的 */
+export type ConsoleLine = { kind: 'out' | 'err' | 'info' | 'dbg-report' | 'dbg-warn' | 'dbg-error'; text: string; ts: number };
 
 export type VarRow = { name: string; type: string; value: string };
 

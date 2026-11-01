@@ -1,0 +1,59 @@
+### range 当值用
+print(range(5))
+print(range(1, 4))
+### 列表方法
+list xs = [3,1]
+print(xs.add(2))
+print(xs.sort())
+print(xs.join("-"))
+print(xs.clear())
+### 字典 set/items
+dict d = {"a": 1}
+d.set("b", 2)
+print(len(d))
+for kv in d.items()
+    print(kv[0])
+### 字符串方法
+print("ab".includes("b"))
+print("abcdef".substring(1, 3))
+### wait until
+int i = 0
+wait until (i >= 3)
+    i++
+print(i)
+### if out
+for i in range(10)
+    if out (i == 3)
+    print(i)
+### time read
+time reset
+time read
+print(type(__last_time))
+### 三元
+int a = 1
+print(a > 0 ? "正" : "负")
+### 幂与整除
+print(2 ** 10)
+print(7 -- 2)
+### 负数下标
+list xs = [1,2,3]
+print(xs[-1])
+### 类 super init
+class A
+    int n = 0
+
+    fn init(v)
+        self.n = v
+
+class B extends A
+    fn init(v)
+        super(v * 2)
+
+B b = new B(3)
+print(b.n)
+### 嵌套循环 break
+for i in range(3)
+    for j in range(3)
+        if (j == 1)
+            break
+    print(i)

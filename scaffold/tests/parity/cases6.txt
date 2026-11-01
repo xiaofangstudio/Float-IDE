@@ -1,0 +1,32 @@
+### 两个斜杠是整除
+print(7 // 2)
+print(-7 // 2)
+print(7 // -2)
+print(7.5 // 2)
+print(8 // 2)
+### 整除与加减乘混用
+int a = 7
+int b = 2
+print(a // b + 1)
+print(a + b // 2)
+print(a * 2 // 3)
+### 整除除零要报错
+try
+    print(1 // 0)
+catch e
+    print("接住了")
+### 注释不能吃掉自减
+int i = 3
+i--
+print(i)
+int j = 5
+j-- -- 说明文字
+print(j)
+### 行尾注释
+int hp = 100 -- 血量
+print(hp)
+### 字符串里两个减号不注释
+print("a--b")
+### idiv 与 // 结果一致
+print(idiv(7, 2), 7 // 2)
+print(idiv(-7, 2), -7 // 2)

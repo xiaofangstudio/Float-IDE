@@ -2,7 +2,8 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import * as monaco from 'monaco-editor';
 import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
 import jsonWorker from 'monaco-editor/esm/vs/language/json/json.worker?worker';
-import { api } from '../core/tauri';
+import { api, isTauriEnv } from '../core/tauri';
+import { normPath, setSourceProvider } from '../core/sources';
 import type { ProblemItem } from '../core/types';
 import { registerFloatLanguage, LANG_ID, validateModel } from '../lang/floatlang';
 import { loadSettings, SETTINGS_EVENT, type Settings } from '../ui/settings';
@@ -129,6 +130,21 @@ monaco.editor.defineTheme('float-dark', {
 
 export type DiffSpec = { title: string; base: string; current: string; lang: string };
 
+/** 当前所有打开的编辑器缓冲区（路径 → 屏幕上的内容）。
+ *
+ * 为什么必须有这个：F5 以前是**重新从磁盘读一遍**再跑。
+ * 文件没保存（或者保存失败）时，屏幕上是你刚写的代码、跑的却是磁盘上的旧文件——
+ * 用户看到的就是"我写的东西没被执行"，这是最容易让人不信任语言的那种 bug。 */
+let liveModels: Map<string, monaco.editor.ITextModel> = new Map();
+
+export function openBuffers(): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const [p, m] of liveModels) {
+    if (!m.isDisposed()) out.set(p, m.getValue());
+  }
+  return out;
+}
+
 /** 一个「文档标签页」：不是文件，而是一个整页界面（教程 / 插件 / MCP / 设置…）。
  *  IDE 里这些东西应该是标签页，不是浮在编辑器上的卡片。 */
 export type DocTab = {
@@ -164,6 +180,9 @@ export type EditorHandle = {
   toggleBreakpoint: () => void;
   /** 当前激活文件路径 */
   currentPath: () => string | null;
+  /** 所有打开的文件缓冲区（路径 → 当前内容，含未保存改动）。
+   *  工程索引、搜索、跳转定义都吃这一份，保证看到的就是屏幕上的代码。 */
+  allBuffers: () => { path: string; text: string }[];
   /** 光标所在行列（代码导航用） */
   cursor: () => { line: number; col: number } | null;
   /** 当前编辑器全文（插件 API 用） */
@@ -200,14 +219,20 @@ type Props = {
   onProblems?: (items: ProblemItem[]) => void;
   /** 当前激活文件名（标题栏用） */
   onActiveFile?: (name: string) => void;
+  /** 缓冲区有变化（输入 / 切标签 / 外部覆盖）：
+   *  右侧大纲、搜索索引这些"读内存"的 UI 全靠它触发刷新，
+   *  谁也不许再回头读磁盘上的旧文件。 */
+  onBuffersChange?: () => void;
 };
 
-export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoints, execPos, onCursor, onProblems, onActiveFile }: Props) {
+export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoints, execPos, onCursor, onProblems, onActiveFile, onBuffersChange }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const diffHostRef = useRef<HTMLDivElement>(null);
   const edRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
   const diffEdRef = useRef<monaco.editor.IDiffEditor | null>(null);
   const modelsRef = useRef<Map<string, monaco.editor.ITextModel>>(new Map());
+  // 登记到模块作用域，让"运行"能拿到屏幕上的内容（而不是磁盘上的旧内容）
+  liveModels = modelsRef.current;
   const bpDecorRef = useRef<Set<string>>(new Set());
   const execDecorRef = useRef<Set<string>>(new Set());
   const diffModelsRef = useRef<{ original: monaco.editor.ITextModel; modified: monaco.editor.ITextModel } | null>(null);
@@ -320,7 +345,15 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
         insertMode: 'replace',
         snippetsPreventQuickSuggestions: false
       },
-      quickSuggestions: { other: true, comments: false, strings: true },
+      /* 字符串里不弹补全：写 print("fang") 的时候冒出一堆候选特别烦 */
+      quickSuggestions: { other: true, comments: false, strings: false },
+      /* 自动配对：打左引号/左括号就把右边的补上，光标落在中间。
+       * 打右半边时"覆盖"已有的那个字符，不会变成两个。 */
+      autoClosingBrackets: 'always',
+      autoClosingQuotes: 'always',
+      autoClosingOvertype: 'always',
+      autoSurround: 'languageDefined',
+      autoIndent: 'full',
       quickSuggestionsDelay: 80,
       acceptSuggestionOnEnter: 'on',
       tabCompletion: 'on',
@@ -339,10 +372,29 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
     diffEdRef.current = diffEd;
 
     // 点击行号左侧空白 → 切换断点
+    /* 右方向键：光标正好在 `)` `]` `}` `"` `'` 前面时，一下跳到它后面。
+     * 这样"打引号 → 往中间填字 → 按右键"就能直接出到外面继续写，
+     * 不用再挪一下（PyCharm 的手感）。不是这种情况就走正常的光标右移。 */
+    ed.addCommand(monaco.KeyCode.RightArrow, () => {
+      const sel = ed.getSelection();
+      const pos = ed.getPosition();
+      const model = ed.getModel();
+      if (!pos || !model || !sel || !sel.isEmpty()) {
+        ed.trigger('keyboard', 'cursorRight', null);
+        return;
+      }
+      const line = model.getLineContent(pos.lineNumber);
+      const ch = line[pos.column - 1]; // 光标右边那个字符
+      if (ch && ')]}"\''.indexOf(ch) >= 0) {
+        ed.setPosition({ lineNumber: pos.lineNumber, column: pos.column + 1 });
+        return;
+      }
+      ed.trigger('keyboard', 'cursorRight', null);
+    });
+
     ed.onDidChangeCursorPosition((e) => {
       cursorCb.current?.(e.position.lineNumber, e.position.column);
-    });
-    ed.onMouseDown((e) => {
+    });    ed.onMouseDown((e) => {
       if (e.target.type === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN && e.target.position) {
         const path = activePathRef.current;
         const line = e.target.position.lineNumber;
@@ -510,11 +562,67 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
   }, [saveOne]);
 
   useEffect(() => {
+    /* Ctrl/Cmd + S：捕获阶段拦下来，先于浏览器"保存网页"和 Monaco 的默认动作。
+     * 这里只处理保存；撤销/复制/粘贴/剪切全部交给 Monaco 原生实现
+     * （它们本来就是编辑器里最稳的那部分，自己接管反而会出岔子）。 */
     const onKey = (e: KeyboardEvent): void => {
-      if (e.ctrlKey && e.code === 'KeyS') { e.preventDefault(); void saveAllRef.current(); }
+      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+      if (e.code === 'KeyS' && !e.shiftKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        void saveAllRef.current();
+      }
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
+  }, []);
+
+  /* 把缓冲区登记成"源码内存源"：插件 / 预览 / 任何读文件的地方
+   * 都会先问这里，改了没存盘也能读到。 */
+  useEffect(() => {
+    setSourceProvider((path) => {
+      const want = normPath(path);
+      for (const [p2, m] of modelsRef.current) {
+        if (normPath(p2) === want) return m.getValue();
+      }
+      return null;
+    });
+    return () => setSourceProvider(null);
+  }, []);
+
+  useEffect(() => {
+    /* 退出即自动保存：关窗口时先把未保存的缓冲区写回磁盘，再真正关掉。
+     * 桌面版走 Tauri 的 onCloseRequested（能 await，保证写完再退）；
+     * 浏览器里没有这个事件，就用 beforeunload 兜底。 */
+    let disposed = false;
+    void (async () => {
+      if (!isTauriEnv()) return;
+      try {
+        const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        const win = getCurrentWindow();
+        const un = await win.onCloseRequested(async (e) => {
+          if (disposed) return;
+          if (dirtyRef.current.size === 0) return;   // 没改动就别拦
+          e.preventDefault();
+          try {
+            await saveAllRef.current();
+          } finally {
+            disposed = true;
+            await win.destroy();
+          }
+        });
+        return un;
+      } catch {
+        /* 拿不到窗口事件就算了，下面的 beforeunload 仍然有效 */
+      }
+    })();
+
+    const onBeforeUnload = (): void => {
+      // 浏览器兜底：同步触发保存（异步可能来不及，但至少不会静默丢弃）
+      if (dirtyRef.current.size > 0) void saveAllRef.current();
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
   }, []);
 
   const closeDiff = useCallback((): void => {
@@ -541,8 +649,14 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
     setDiffSpec(spec);
   }, []);
 
+  /* 回调走 ref：onDidChangeContent 闭包是模型级长命的，别让它拖住最新 props */
+  const buffersChangeRef = useRef(onBuffersChange);
+  buffersChangeRef.current = onBuffersChange;
+
   const notifyActive = useCallback((p: string | null): void => {
     onActiveFile?.(p ? (p.split(/[\\/]/).pop() ?? '') : '');
+    // 切了文件：右侧大纲要立刻换成新文件的内存内容
+    buffersChangeRef.current?.();
   }, [onActiveFile]);
 
   const openFile = useCallback(async (path: string): Promise<void> => {
@@ -561,7 +675,11 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
         m.onDidChangeContent(() => {
           setDirty((s) => new Set(s).add(path));
           if (timer) window.clearTimeout(timer);
-          timer = window.setTimeout(() => { validateModel(m); reportProblems(m, path); }, 280);
+          timer = window.setTimeout(() => {
+            validateModel(m); reportProblems(m, path);
+            // 缓冲区内容变了：大纲 / 搜索索引跟着内存走，不等保存
+            buffersChangeRef.current?.();
+          }, 280);
           // 自动保存（设置里可关）——走和手动保存同一条串行通道，避免互相踩
           if (loadSettings().autoSave && path.toLowerCase().endsWith('.cw')) {
             if (saveTimer) window.clearTimeout(saveTimer);
@@ -692,6 +810,7 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
       openDoc, closeDoc, newFile,
       activeDocId: () => activeDocRef.current,
       currentPath: () => activePathRef.current,
+      allBuffers: () => [...modelsRef.current.entries()].map(([p, m]) => ({ path: p, text: m.getValue() })),
       cursor: () => {
         const pos = edRef.current?.getPosition();
         return pos ? { line: pos.lineNumber, col: pos.column } : null;

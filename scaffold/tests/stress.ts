@@ -12,8 +12,9 @@ const log = (ok: boolean, name: string, extra = ''): void => {
   else { fail++; console.log(`  FAIL ${name}${extra ? '  — ' + extra : ''}`); }
 };
 
-async function run(src: string): Promise<{ out: string[]; err: string | null }> {
-  const map = new Map<string, string>([['main.cw', src]]);
+async function run(src: string, sources?: Map<string, string>): Promise<{ out: string[]; err: string | null }> {
+  const map = sources ?? new Map<string, string>([['main.cw', src]]);
+  if (!map.has('main.cw')) map.set('main.cw', src);
   (globalThis as any).__floatSources = map;
   const out: string[] = [];
   let err: string | null = null;
@@ -131,6 +132,75 @@ for (const d of [20, 60, 150]) {
   const t0 = Date.now();
   const { out, err } = await run(src);
   log(err === null && out[0] === '19999', '2 万行单文件可执行', `${Date.now() - t0}ms${err ? ' ERR:' + err : ''}`);
+}
+
+/* ── 11. 单文件 5 万行（真·大工程规模） ── */
+{
+  let src = '';
+  for (let i = 0; i < 25000; i++) src += `int y${i} = ${i % 997}\n`;
+  src += 'int total = 0\n';
+  for (let i = 0; i < 25000; i++) src += `total = total + y${i}\n`;
+  src += 'print(total > 0)\n';
+  const lines = src.split('\n').length;
+  const t0 = Date.now();
+  try {
+    const p2 = parseProgram('main.cw', src);
+    log(p2.diagnostics.length === 0, `5 万行单文件解析（${lines} 行）`, `${Date.now() - t0}ms`);
+  } catch (e) { log(false, `5 万行单文件解析（${lines} 行）`, String(e).slice(0, 80)); }
+
+  const t1 = Date.now();
+  const { out, err } = await run(src);
+  log(err === null && out[0] === 'true', '5 万行单文件可执行', `${Date.now() - t1}ms${err ? ' ERR:' + err.slice(0, 60) : ''}`);
+}
+
+/* ── 12. 1000 个文件（扁平引用，真·超多文件） ── */
+{
+  const n = 1000;
+  const map = new Map<string, string>();
+  let entry = '';
+  for (let i = 0; i < n; i++) {
+    map.set(`m${i}.cw`, `fn f${i}()\n    return ${i}\n`);
+    entry += `import "m${i}.cw"\n`;
+  }
+  entry += 'int total = 0\n';
+  for (let i = 0; i < n; i++) entry += `total = total + f${i}()\n`;
+  entry += 'print(total)\n';
+  map.set('main.cw', entry);
+  const t0 = Date.now();
+  const { out, err } = await run(entry, map);
+  const want = String((n - 1) * n / 2);
+  log(err === null && out[0] === want, `1000 个文件（扁平 import）跑通`,
+    `${Date.now() - t0}ms · ${out[0] ?? err}`.slice(0, 80));
+}
+
+/* ── 12b. 超深 import 链：给明确报错，不许崩栈 ── */
+{
+  const n = 400;
+  const map = new Map<string, string>();
+  for (let i = 0; i < n; i++) {
+    map.set(`d${i}.cw`, i + 1 < n ? `import "d${i + 1}.cw"\nfn g${i}(x)\n    return x\n` : `fn g${n - 1}(x)\n    return x\n`);
+  }
+  const entry = 'import "d0.cw"\nprint("ok")\n';
+  map.set('main.cw', entry);
+  const { err } = await run(entry, map);
+  log(err !== null && /import/.test(err), '超深 import 链给中文报错（不崩栈）',
+    (err ?? '未报错，危险').slice(0, 60));
+}
+
+/* ── 13. 10 万次函数调用（不超时、结果正确） ── */
+{
+  const src = `function add1(x)\n    return x + 1\nint acc = 0\nfor i in range(100000)\n    acc = add1(acc)\nprint(acc)\n`;
+  const t0 = Date.now();
+  const { out, err } = await run(src);
+  log(err === null && out[0] === '100000', '10 万次函数调用', `${Date.now() - t0}ms${err ? ' ERR:' + err.slice(0, 60) : ''}`);
+}
+
+/* ── 14. 3 万次方法调用 + 大字典 ── */
+{
+  const src = `dict d = {}\nfor i in range(30000)\n    d.set(join("k", i), i)\nprint(len(d))\nint s = 0\nfor i in range(1000)\n    s = s + 1\nprint(s)\n`;
+  const t0 = Date.now();
+  const { out, err } = await run(src);
+  log(err === null && out[0] === '30000' && out[1] === '1000', '3 万键字典', `${Date.now() - t0}ms${err ? ' ERR:' + err.slice(0, 60) : ''}`);
 }
 
 console.log(`\n压力探针：${pass} 通过 / ${fail} 失败`);

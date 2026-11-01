@@ -1,5 +1,8 @@
 import * as monaco from 'monaco-editor';
 import { INSTRUCTIONS, SPECIAL_VARS, KEYWORDS, TYPE_WORDS, SNIPPETS, BUILTIN_METHODS, LANG_ID } from './spec';
+import { buildCompletions, type CompletionKind } from './completions';
+import { contextAt } from './context';
+import { isTauriEnv } from '../core/tauri';
 
 /* 插件贡献的片段与关键词。插件系统启动后调用 setPluginContributions 注入，
  * 补全里和内置片段一视同仁 —— 这样 plugin.json 里声明的 snippets 是真的能用，不是摆设。 */
@@ -43,6 +46,81 @@ export function analysisOf(model: monaco.editor.ITextModel): Analysis {
   return analysis;
 }
 
+/* ── import 进来的符号 ──
+ * 补全只看当前模型的话，库文件里定义的函数就补不出来。
+ * 这里顺着 import 把库也分析一遍：优先用编辑器里已经打开的模型（没存盘也算），
+ * 没打开就去读一次盘并缓存，下次补全就有了。 */
+
+const diskCache = new Map<string, string>();
+const pending = new Set<string>();
+
+function modelDir(model: monaco.editor.ITextModel): string {
+  const p = decodeURIComponent(model.uri.path);
+  const i = p.lastIndexOf('/');
+  return i > 0 ? p.slice(0, i) : '';
+}
+
+function findImported(model: monaco.editor.ITextModel, want: string): string | null {
+  const base = (want.split(/[\\/]/).pop() || want).toLowerCase();
+  const wantPath = want.replace(/\\/g, '/').toLowerCase();
+  for (const m of monaco.editor.getModels()) {
+    const p = decodeURIComponent(m.uri.path).replace(/\\/g, '/').toLowerCase();
+    const name = p.split('/').pop() || '';
+    if (name === base || name === `${base}.cw` || p.endsWith(`/${wantPath}`)) return m.getValue();
+  }
+  const dir = modelDir(model);
+  const key = `${dir}/${want}`.replace(/\\/g, '/');
+  const hit = diskCache.get(key);
+  if (hit) return hit || null;
+  if (!pending.has(key)) {
+    pending.add(key);
+    void (async () => {
+      try {
+        if (!isTauriEnv()) return;
+        const { api } = await import('../core/tauri');
+        const text = await api.fsRead(key);
+        diskCache.set(key, text);
+      } catch {
+        diskCache.set(key, '');
+      } finally {
+        pending.delete(key);
+      }
+    })();
+  }
+  return null;
+}
+
+/** 当前文件 + 它 import 进来的文件，合成一份符号表 */
+export function analysisWithImports(model: monaco.editor.ITextModel): Analysis {
+  const a = analysisOf(model);
+  const seen = new Set<string>();
+  const visit = (code: string, depth: number): void => {
+    if (depth > 4) return;
+    const re = /^[\t ]*import[ \t]+["']?([^"'\s;)]+)/gm;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(code)) !== null) {
+      const want = m[1];
+      if (seen.has(want)) continue;
+      seen.add(want);
+      const src = findImported(model, want);
+      if (!src) continue;
+      const sub = analyze(want, src);
+      for (const f of sub.funcs) {
+        if (!a.funcs.some((x) => x.name === f.name)) a.funcs.push({ ...f, doc: `来自 ${want}` });
+      }
+      for (const c of sub.classes) {
+        if (!a.classes.some((x) => x.name === c.name)) a.classes.push(c);
+      }
+      for (const v of sub.vars) {
+        if (!a.vars.some((x) => x.name === v.name)) a.vars.push(v);
+      }
+      visit(src, depth + 1);
+    }
+  };
+  visit(model.getValue(), 0);
+  return a;
+}
+
 /* ───────────────────────────── 注册 ───────────────────────────── */
 
 let registered = false;
@@ -64,8 +142,9 @@ export function registerFloatLanguage(): void {
     types: TYPE_WORDS,
     tokenizer: {
       root: [
-        [/^--.*$/, 'comment.skip'],
-        [/\/\/.*$/, 'comment'],
+        // 注释只有 `--`（后面要跟空白或行尾，`i--` 自减不受影响）。
+        // `//` 不是注释，它是整除运算符，下面按 operator 上色。
+        [/(^|\s)--(?=\s|$).*$/, 'comment'],
         [/"(?:[^"\\]|\\.)*"/, 'string'],
         [/'(?:[^'\\]|\\.)*'/, 'string'],
         [/__last_[a-z]+/, 'variable.predefined'],
@@ -79,14 +158,15 @@ export function registerFloatLanguage(): void {
           { cases: { '@types': 'type', '@keywords': 'keyword', '@default': 'identifier' } }
         ],
         [/[{}()[\]]/, '@brackets'],
-        [/[+\-*/%<>=!&|^~]+/, 'operator'],
+        [/[+\-*/%<>=!&|^~?]+/, 'operator'],
         [/[;,.]/, 'delimiter']
       ]
     }
   });
 
   monaco.languages.setLanguageConfiguration(LANG_ID, {
-    comments: { lineComment: '//' },
+    // 注释只有 `--`（`//` 是整除运算符，拿它当注释会直接把代码变成算式）
+    comments: { lineComment: '--' },
     brackets: [['{', '}'], ['(', ')'], ['[', ']']],
     autoClosingPairs: [
       { open: '{', close: '}' }, { open: '(', close: ')' }, { open: '[', close: ']' },
@@ -98,7 +178,7 @@ export function registerFloatLanguage(): void {
     ],
     folding: { offSide: true },
     indentationRules: {
-      increaseIndentPattern: /^\s*(?:if|elif|else|while|for|repeat|forever|main loop|wait until|function|fn|class)\b.*$/,
+      increaseIndentPattern: /^\s*(?:if|elif|else|while|for|repeat|forever|main loop|wait until|function|fn|class)\b.*$|.*\{\s*$/,
       decreaseIndentPattern: /^\s*\}/
     }
   });
@@ -112,114 +192,93 @@ export function registerFloatLanguage(): void {
 
 function registerCompletion(): void {
   monaco.languages.registerCompletionItemProvider(LANG_ID, {
-    triggerCharacters: ['.', ' ', '('],
-    provideCompletionItems: (model, position) => {
-      const a = analysisOf(model);
-      const K = monaco.languages.CompletionItemKind;
-      const S = monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet;
-      const line = model.getLineContent(position.lineNumber);
-      const before = line.slice(0, position.column - 1);
+    triggerCharacters: ['.'],
+    provideCompletionItems: (model, position, context) => {
+      const a = analysisWithImports(model);
       const word = model.getWordUntilPosition(position);
       const range = {
         startLineNumber: position.lineNumber, startColumn: word.startColumn,
         endLineNumber: position.lineNumber, endColumn: word.endColumn
       };
 
-      const suggestions: monaco.languages.CompletionItem[] = [];
-      const seen = new Set<string>();
-      const add = (
-        label: string, kind: monaco.languages.CompletionItemKind, insertText: string,
-        detail: string, doc: string, snippet = false, sortText?: string
-      ): void => {
-        if (seen.has(label)) return;
-        seen.add(label);
-        suggestions.push({
-          label, kind, insertText, detail, range, sortText,
-          insertTextRules: snippet ? S : undefined,
-          documentation: { value: doc }
-        });
+      /* 光标语义只问一处：context.ts 用词法 + AST 判断
+       * （在注释里？在字符串里？在起名字？在 `对象.` 后面？） */
+      const ctx = contextAt(model.getValue(), position.lineNumber, position.column, a);
+
+      // import "…" 里补工程里的文件名
+      if (ctx.kind === 'importPath') {
+        const seenName = new Set<string>();
+        const files: string[] = [];
+        for (const m of monaco.editor.getModels()) {
+          const name = decodeURIComponent(m.uri.path).split('/').pop() ?? '';
+          if (!name.endsWith('.cw') || seenName.has(name)) continue;
+          seenName.add(name);
+          files.push(name);
+        }
+        files.sort();
+        return {
+          suggestions: files.map((name, i) => ({
+            label: name,
+            kind: monaco.languages.CompletionItemKind.File,
+            insertText: name,
+            filterText: name,
+            sortText: `${i}`.padStart(4, '0'),
+            range: {
+              startLineNumber: position.lineNumber,
+              startColumn: position.column - ctx.typed.length,
+              endLineNumber: position.lineNumber,
+              endColumn: position.column
+            },
+            documentation: { value: `引入 \`${name}\`` }
+          }))
+        };
+      }
+      // 字符串里 / 注释里不弹
+      if (ctx.kind === 'string' || ctx.kind === 'comment') return { suggestions: [] };
+      // 正在起名字：别拿 90 多个候选添乱
+      if (ctx.kind === 'naming') return { suggestions: [] };
+
+      /* 自动弹出（打字触发）且还没打出一个词时也不弹：
+       * 否则每敲一个空格/括号就刷新一次上百条候选，
+       * 上/下方向键会被候选列表抢走，光标根本没法一行一行走。
+       * 手动 Ctrl+Space 或者刚打了 `.` 时照常弹。 */
+      const ctxKind = (context as { triggerKind?: number } | undefined)?.triggerKind;
+      const explicit = ctxKind === 1; // CompletionTriggerKind.Invoke
+      if (!explicit && ctx.kind !== 'member' && word.word === '') return { suggestions: [] };
+
+      const items = buildCompletions({
+        word: word.word,
+        analysis: a,
+        context: ctx,
+        plugins: { snippets: pluginSnippets, keywords: pluginKeywords }
+      });
+
+      const kinds: Record<CompletionKind, monaco.languages.CompletionItemKind> = {
+        variable: monaco.languages.CompletionItemKind.Variable,
+        function: monaco.languages.CompletionItemKind.Function,
+        class: monaco.languages.CompletionItemKind.Class,
+        method: monaco.languages.CompletionItemKind.Method,
+        field: monaco.languages.CompletionItemKind.Field,
+        keyword: monaco.languages.CompletionItemKind.Keyword,
+        type: monaco.languages.CompletionItemKind.TypeParameter,
+        constant: monaco.languages.CompletionItemKind.Constant,
+        snippet: monaco.languages.CompletionItemKind.Snippet,
+        value: monaco.languages.CompletionItemKind.Value
       };
-
-      /* 成员补全：p. / self. */
-      const member = /([A-Za-z_\u4e00-\u9fa5][\w\u4e00-\u9fa5]*)\.\s*[A-Za-z_\u4e00-\u9fa5]*$/.exec(before);
-      if (member) {
-        const objName = member[1];
-        let clsName: string | null = null;
-        if (objName === 'self' || objName === 'this') {
-          clsName = classAtLine(a, position.lineNumber)?.name ?? null;
-        } else {
-          const v = a.vars.filter((x) => x.name === objName).pop();
-          clsName = v?.cls ?? null;
-        }
-        // 内建方法兜底（不知道类型时就都列出来，按 owner 标注）
-        for (const m of BUILTIN_METHODS) {
-          add(m.name, K.Method, `${m.name}($0)`, `${m.owner}.${m.name}()`, both(`${m.owner}.${m.name}()`, m.desc), true, '8');
-        }
-        if (clsName) {
-          for (const f of classFields(a, clsName)) {
-            add(f.name, K.Field, f.name, `${clsName}.${f.name}${f.type ? ` · ${f.type}` : ''}`, `字段 \`${f.name}\`${f.type ? `，类型 ${f.type}` : ''}`, false, '1');
-          }
-          for (const m of classMethods(a, clsName)) {
-            add(m.name, K.Method, `${m.name}($0)`, `${clsName}.${m.name}(${m.params.map((p) => p.name).join(', ')})`,
-              `方法 \`${m.name}(${m.params.map((p) => p.name).join(', ')})\`${m.retType ? ` → ${m.retType}` : ''}`, true, '2');
-          }
-        }
-        return { suggestions };
-      }
-
-      /* 关键字骨架 */
-      for (const sn of SNIPPETS) {
-        add(sn.label, K.Snippet, sn.body, sn.detail, both(sn.detail, sn.body), true, '5');
-      }
-
-      /* 插件贡献的片段（输入前缀就能展开） */
-      for (const sn of pluginSnippets) {
-        add(sn.prefix, K.Snippet, toMonacoSnippet(sn.body),
-          `片段 · ${sn.description ?? sn.prefix}`, both(sn.description ?? sn.prefix, sn.body), true, '5');
-      }
-      for (const kw of pluginKeywords) {
-        add(kw.label, K.Function, kw.insert ?? `${kw.label}($0)`, kw.detail ?? '', both(kw.detail ?? kw.label, kw.insert ?? ''), true, '5');
-      }
-
-      /* 本文件函数 */
-      for (const f of a.funcs) {
-        const sig = `${f.name}(${f.params.map((p) => p.name).join(', ')})`;
-        add(f.name, K.Function, `${f.name}($0)`, sig, both(sig, `第 ${f.line} 行定义${f.retType ? `，返回 ${f.retType}` : ''}`), true, '1');
-      }
-
-      /* 类 */
-      for (const c of a.classes) {
-        add(c.name, K.Class, `new ${c.name}($0)`, `class ${c.name}${c.base ? ` : ${c.base}` : ''}`,
-          both(`class ${c.name}`, `第 ${c.line} 行定义；用 new ${c.name}(…) 创建实例`), true, '2');
-        for (const m of c.methods) {
-          add(`${c.name}.${m.name}`, K.Method, `${m.name}($0)`, `${c.name}.${m.name}(${m.params.map((p) => p.name).join(', ')})`,
-            `方法 \`${m.name}\``, true, '6');
-        }
-      }
-
-      /* 变量 */
-      for (const v of a.vars) {
-        add(v.name, K.Variable, v.name, v.cls ? `${v.cls}` : v.type, `变量 \`${v.name}\`${v.cls ? `，类型 ${v.cls}` : `，类型 ${v.type}`}`, false, '3');
-      }
-
-      /* 内建函数 */
-      for (const b of BUILTINS) {
-        add(b.name, K.Function, `${b.name}($0)`, b.sig, both(b.sig, b.doc), true, '4');
-      }
-
-      /* 指令 */
-      for (const ins of INSTRUCTIONS) {
-        const first = ins.name.split(' ')[0];
-        if (!first) continue;
-        add(first, K.Keyword, ins.args.includes('(') ? `${first}($0)` : first, ins.args,
-          both(`**${ins.name}**`, `${ins.desc}${ins.result ? `\n\n结果写入 \`${ins.result}\`` : ''}`), false, '7');
-      }
-
-      /* 特殊变量 */
-      for (const sv of SPECIAL_VARS) {
-        add(sv.name, K.Constant, sv.name, '特殊变量', `特殊变量 \`${sv.name}\`：${sv.desc}`, false, '0');
-      }
-
+      const S = monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet;
+      const suggestions = items.map((it) => ({
+        label: it.labelDetail ? { label: it.label, detail: ` ${it.labelDetail}`, description: '' } : it.label,
+        kind: kinds[it.kind],
+        insertText: it.insertText,
+        detail: it.detail,
+        documentation: { value: both(it.detail, it.doc) },
+        // filterText 必须给：不然 Monaco 会拿 insertText（模板片段那一坨）去匹配
+        filterText: it.label,
+        sortText: it.sortText,
+        range,
+        // 只有模板片段才按 snippet 插入（带 ${1:xxx} 占位）
+        insertTextRules: it.kind === 'snippet' ? S : undefined
+      }));
       return { suggestions };
     }
   });
@@ -238,7 +297,7 @@ function registerHover(): void {
       if (!word) return null;
       const name = word.word;
       const lineText = model.getLineContent(position.lineNumber);
-      const a = analysisOf(model);
+      const a = analysisWithImports(model);
 
       const method = BUILTIN_METHODS.find((m) => m.name === name);
       if (method && /\.\s*$/.test(lineText.slice(0, word.startColumn - 1))) {

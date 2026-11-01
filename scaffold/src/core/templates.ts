@@ -1,37 +1,37 @@
-/* Float IDE 新建工程模板：空白 / 入门 / 进阶 / 类与对象 / 指针小游戏。 */
+/* Float IDE 新建工程模板：空白 / 入门 / 进阶 / 类与对象 / 指针示例。 */
 
 export type Template = { id: string; name: string; desc: string; files: Record<string, string> };
 
 const projectJson = (entry: string, name: string): string =>
   JSON.stringify({ name, entry, version: '0.2.0', kind: 'float' }, null, 2) + '\n';
 
-const TPL_BLANK = `// main.cw —— 从这里开始写你的 CW Script
+const TPL_BLANK = `-- main.cw —— 从这里开始写你的 CW Script
 print("你好，CW Script！")
 `;
 
-const TPL_STARTER = `// ─ 入门示例：变量 / 条件 / 循环 ─
+const TPL_STARTER = `-- ─ 入门示例：变量 / 条件 / 循环 ─
 
 ask "你叫什么名字？"
 print(join("你好，", ans))
 
-// 变量声明右边可以写任意表达式
+-- 变量声明右边可以写任意表达式
 int a = 7
 int b = 5
 int sum = a + b
 print(join("7 + 5 = ", sum))
 
-// 条件：> < == != && || !
+-- 条件：> < == != && || !
 if (sum > 10)
     print("结果比 10 大")
 else
     print("结果不超过 10")
 
-// 循环变量 i 能直接用，次数也可以是变量
+-- 循环变量 i 能直接用，次数也可以是变量
 int times = 3
 for i in range(times)
     print(join("第 ", i + 1, " 声问好"))
 
-// 遍历列表
+-- 遍历列表
 list fruits = ["苹果", "香蕉", "橘子"]
 for f in fruits
     print("水果：" + f)
@@ -39,23 +39,23 @@ for f in fruits
 print("入门示例结束")
 `;
 
-const TPL_ADVANCED = `// ─ 进阶示例：函数 / 集合 / 字典 / 计时 ─
+const TPL_ADVANCED = `-- ─ 进阶示例：函数 / 集合 / 字典 / 计时 ─
 
-// 带参数与返回值的函数，可在表达式里直接调用
+-- 带参数与返回值的函数，可在表达式里直接调用
 function priceWithTax(price, rate = 0.1)
     return round(price * (1 + rate))
 
 print("100 元含税：" + priceWithTax(100))
 print("100 元按 13%：" + priceWithTax(100, 0.13))
 
-// 递归
+-- 递归
 function fib(n)
     if (n < 2)
         return n
     return fib(n - 1) + fib(n - 2)
 print("fib(10) = " + fib(10))
 
-// 列表：字面量 + 指令 + 下标
+-- 列表：字面量 + 指令 + 下标
 list nums = [3, 1, 2]
 add 4 to nums
 print("长度：" + len(nums))
@@ -67,14 +67,14 @@ for v in nums
     total += v
 print("求和：" + total)
 
-// 字典：键值对
+-- 字典：键值对
 dict scores = {"小明": 90, "小红": 95}
 scores["小刚"] = 88
 for who, score in scores
     print(join(who, "：", score))
 print("平均分：" + (90 + 95 + 88) / 3)
 
-// 计时：time reset 清零，time read 读取（单位秒）
+-- 计时：time reset 清零，time read 读取（单位秒）
 time reset
 wait 0.3
 time read
@@ -83,7 +83,7 @@ print(join("耗时（秒）：", __last_time))
 print("进阶示例结束")
 `;
 
-const TPL_CLASS = `// ─ 类与对象 ─
+const TPL_CLASS = `-- ─ 类与对象 ─
 
 class Player
     str name = ""
@@ -127,7 +127,7 @@ print(wizard.info())
 print(wizard.fireball(hero))
 print(hero.info())
 
-// 对象可以放进列表统一处理
+-- 对象可以放进列表统一处理
 list team = [wizard, hero]
 for p in team
     print(join(p.name, " 还活着吗：", p.alive()))
@@ -138,21 +138,21 @@ function files(entry: string, name: string, main: string): Record<string, string
 }
 
 /** 指针实战：手动内存 + 小游戏。给"想看看 alloc 能干什么"的人一个入口 */
-const TPL_POINTER_GAME = `// ─ 指针小游戏：翻牌消消乐 ─
-// 牌桌用 alloc 申请：每张牌占两格（第 0 格是牌面，第 1 格是"翻开没有"）。
-// 手动内存是严格模式：程序结束前必须 free，忘了还就会报错。
+const TPL_POINTER_GAME = `-- ─ 指针示例：翻牌消消乐（alloc / free 手动内存）──
+-- 牌桌用 alloc 申请：每张牌占两格（第 0 格是牌面，第 1 格是"翻开没有"）。
+-- 手动内存是严格模式：程序结束前必须 free，忘了还就会报错。
 
 list 图案 = ["苹果", "苹果", "星星", "星星", "月亮", "月亮", "云朵", "云朵"]
 int 张数 = len(图案)
 
-// 洗牌
+-- 洗牌
 for i in range(张数 - 1)
     int j = rand(i, 张数 - 1)
     str t = 图案[i]
     图案[i] = 图案[j]
     图案[j] = t
 
-// 牌桌
+-- 牌桌
 ptr 牌桌 = alloc(张数 * 2)
 for i in range(张数)
     牌桌[i * 2] = 图案[i]
@@ -167,11 +167,22 @@ fn 显示()
             line += join(" [", i + 1, "] ")
     print(line)
 
+fn 是数字(s)
+    if (len(s) == 0)
+        return false
+    for c in s
+        if (c < "0" || c > "9")
+            return false
+    return true
+
+-- 返回：0 = 不玩了，-1 = 输入的不是序号，其它 = 牌号
 fn 读牌(prompt)
     ask prompt
     str raw = trim(ans)
     if (raw == "")
         return 0
+    if (!是数字(raw))
+        return -1
     return int(raw)
 
 int 还剩 = 张数
@@ -180,7 +191,7 @@ print("========================================")
 print("  翻牌消消乐：翻两张一样的就消掉")
 print("  直接回车 = 不玩了")
 print("========================================")
-报告 "游戏开始，共 4 对牌"
+report "游戏开始，共 4 对牌"
 
 while (还剩 > 0)
     轮数++
@@ -192,10 +203,16 @@ while (还剩 > 0)
     if (a == 0)
         print("下次再玩。")
         break
+    if (a < 0)
+        print("要输入 1~8 的数字。")
+        continue
     int b = 读牌("再翻第几张？")
     if (b == 0)
         print("下次再玩。")
         break
+    if (b < 0)
+        print("要输入 1~8 的数字。")
+        continue
 
     if (a < 1 || a > 张数 || b < 1 || b > 张数 || a == b)
         print("这两张不行，重来一轮。")
@@ -213,19 +230,19 @@ while (还剩 > 0)
     if (甲 == 乙)
         还剩 -= 2
         print(join("  两张都是「", 甲, "」，消掉！"))
-        报告 join("第 ", 轮数, " 轮消掉一对：", 甲, "（还剩 ", 还剩, " 张）")
+        report join("第 ", 轮数, " 轮消掉一对：", 甲, "（还剩 ", 还剩, " 张）")
     else
         牌桌[(a - 1) * 2 + 1] = false
         牌桌[(b - 1) * 2 + 1] = false
         print(join("  是「", 甲, "」和「", 乙, "」，不一样，翻回去。"))
 
-// 用完了必须还
+-- 用完了必须还
 free(牌桌)
 if (还剩 == 0)
     print(join("全部消完，一共 ", 轮数, " 轮。"))
-    报告 join("通关：", 轮数, " 轮")
+    report join("通关：", 轮数, " 轮")
 else
-    报告 "退出游戏"
+    report "退出游戏"
 `;
 
 export const TEMPLATES: Template[] = [
@@ -233,5 +250,5 @@ export const TEMPLATES: Template[] = [
   { id: 'starter', name: '入门示例', desc: '变量 / 条件 / 循环 / 列表，十行看懂 CW Script', files: files('main.cw', 'CW 入门', TPL_STARTER) },
   { id: 'advanced', name: '进阶示例', desc: '函数 / 集合 / 字典 / 计时，写法速查', files: files('main.cw', 'CW 进阶', TPL_ADVANCED) },
   { id: 'class', name: '类与对象', desc: '字段 / 方法 / 继承 / super，面向对象起步', files: files('main.cw', 'CW 类示例', TPL_CLASS) },
-  { id: 'pointer', name: '指针小游戏', desc: 'alloc 手动内存 + 报告面板，翻牌消消乐', files: files('main.cw', '指针翻牌', TPL_POINTER_GAME) }
+  { id: 'pointer', name: '指针示例', desc: 'alloc / free 手动内存，一格一格自己管', files: files('main.cw', '指针示例', TPL_POINTER_GAME) }
 ];

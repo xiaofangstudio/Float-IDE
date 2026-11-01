@@ -8,10 +8,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
  *    交回前端提示「文件已被外部修改」，而不是静默覆盖用户代码。
  */
 
-fn mtime_ms(p: &Path) -> u128 {
+fn mtime_ms(p: &Path) -> u64 {
     std::fs::metadata(p)
         .and_then(|m| m.modified())
-        .map(|t| t.duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0))
+        .map(|t| t.duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0))
         .unwrap_or(0)
 }
 
@@ -88,7 +88,7 @@ pub fn fs_read(path: String) -> Result<String, String> {
 #[derive(Serialize, Clone, Copy)]
 pub struct FileStat {
     #[serde(rename = "mtimeMs")]
-    pub mtime_ms: u128,
+    pub mtime_ms: u64,
     pub size: u64,
     pub exists: bool,
 }
@@ -112,7 +112,7 @@ pub fn fs_stat(path: String) -> FileStat {
 pub fn fs_write_checked(
     path: String,
     contents: String,
-    expect_mtime_ms: u128,
+    expect_mtime_ms: u64,
 ) -> Result<FileStat, String> {
     let p = Path::new(&path);
     let cur = mtime_ms(p);
@@ -135,19 +135,19 @@ pub fn fs_write(path: String, contents: String) -> Result<(), String> {
  * 第二个实例打开时会被明确告知，而不是默默抢锁。
  */
 
-const LOCK_FRESH_MS: u128 = 12_000;
+const LOCK_FRESH_MS: u64 = 12_000;
 
-fn now_ms() -> u128 {
+fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
+        .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }
 
 #[derive(Serialize, serde::Deserialize, Clone)]
 pub struct LockInfo {
     pub id: String,
-    pub ts: u128,
+    pub ts: u64,
     pub pid: u32,
 }
 

@@ -13,11 +13,13 @@ import { parseProgram } from './parse';
 import { getBuiltin, emptyDict } from './builtins';
 import { compileProgram, CompiledRuntime, RuntimeError as CodeRuntimeError, StopSignal as CodeStopSignal, isCInst } from './codegen';
 import { callBuiltinMethod, MethodError } from './methods';
+
+/** import 最大嵌套层数（和 Rust 内核一致：超过就报错，不让递归吃栈） */
+const MAX_IMPORT_DEPTH = 100;
 import {
   cloneVal, collectFields, deepEq, dict, findMethod, fmtVal, instance, isDict, isInstance,
-  isList, toNum, toStr, truthy, typeName,
-  type ClassDef, type FuncDef, type Instance, type Val
-} from './values';
+  isList, toNum, toStr, truthy, typeName, ThrownValue,
+  type ClassDef, type FuncDef, type Instance, type Val, isPtr } from './values';
 
 /* 语言核心不该绑死 DOM：浏览器里是 window，Node（测试 / 以后可能的 CLI）里退到 globalThis。
  * 这样同一份运行时在任何宿主都能跑，不需要在测试里硬塞 window 桩。 */
@@ -33,7 +35,9 @@ function hostSetTimeout(fn: () => void, ms: number): void {
 /** 函数调用最深允许叠多少层。超了就报「递归太深」，而不是让 JS 爆栈。 */
 const MAX_CALL_DEPTH = 400;
 
-export type OutLine = { kind: 'out' | 'err' | 'info'; text: string };
+/** 控制台输出行：out=普通、err=红色错误、info=蓝色提示；
+ * dbg-* 是调试输出的三档：报告(蓝)/警告(黄)/报错(红)，纯给开发者看。 */
+export type OutLine = { kind: 'out' | 'err' | 'info' | 'dbg-report' | 'dbg-warn' | 'dbg-error'; text: string };
 export type CtlState = 'idle' | 'running' | 'paused' | 'done';
 export type VarsSnapshot = { name: string; type: string; value: string }[];
 
@@ -182,11 +186,14 @@ export class Runner {
   private programs = new Map<string, Program>();
   private imported = new Set<string>();
   private lastNode: Stmt | null = null;
+  /** 当前 import 嵌套层数（防递归吃栈） */
+  private importDepth = 0;
 
   constructor(
     private entryFile: string,
     private hook: Hook,
-    private importRoot: string,
+    /** 工程根目录（解析 import 用）；不传按入口文件所在目录处理 */
+    private importRoot: string = '',
     /** 显式指定的源码表（插件/一次性脚本用）。不传则用宿主的 __floatSources。
      *  有了它，插件跑一段代码就不会把主工程的源码表顶掉。 */
     private explicitSources: Map<string, string> | null = null
@@ -364,6 +371,10 @@ export class Runner {
         rt.file = entry;
         rt.out = (line) => this.hook.output({ kind: 'out', text: line });
         rt.rep = (line, srcLine) => this.hook.report?.(line, srcLine);
+        rt.dbg = (level, line) => {
+          const kind = level === 2 ? 'dbg-warn' : level === 3 ? 'dbg-error' : 'dbg-report';
+          this.hook.output({ kind, text: line });
+        };
         this.crt = rt;
         this.gen = unit.main(rt) as unknown as SigGen;
         this.hook.output({ kind: 'info', text: '运行开始（编译执行）' });
@@ -458,6 +469,13 @@ export class Runner {
         file: this.crt?.file ?? this.entryFile,
         line: e.line || 1, col: 1, endLine: e.line || 1, endCol: 1
       }, e.frames);
+    }
+    // 没被 catch 住的 throw：把抛出来的值本身说清楚，别只报一句 "throw"
+    if (e instanceof ThrownValue) {
+      e = new FloatError(`没有被接住的 throw：${this.errMessageOf(e.value)}`, {
+        file: this.entryFile, line: this.lastNode?.line ?? 1, col: 1,
+        endLine: this.lastNode?.line ?? 1, endCol: 1
+      });
     }
     const msg = e instanceof FloatError
       ? this.formatError(e)
@@ -565,11 +583,24 @@ export class Runner {
         return 'normal';
 
       case 'import': {
+        // import 是"执行"层面递归的：A import B、B import C…链子一长就会把 JS 栈打穿。
+        // 到 100 层明确报错（和 Rust 内核同一个上限），别让用户看到 Maximum call stack。
+        if (this.importDepth >= MAX_IMPORT_DEPTH) {
+          throw new FloatError(
+            `import 嵌套超过 ${MAX_IMPORT_DEPTH} 层了，停下来。多半是库文件一层层互相 import；` +
+            '把公共部分抽成一个单独的库，别让引用链这么长。', s);
+        }
         const program = await this.loadImport(s.target, s.file, s);
         yield { kind: 'stmt', node: s, depth };
         if (!program) return 'normal';
         this.preregister(program.body);
-        const sig = yield* this.execBlock(program.body, this.globals, depth);
+        this.importDepth += 1;
+        let sig: Signal;
+        try {
+          sig = yield* this.execBlock(program.body, this.globals, depth);
+        } finally {
+          this.importDepth -= 1;
+        }
         if (sig === 'stop') return sig;
         if (sig === 'return') return 'normal';
         return 'normal';
@@ -630,11 +661,21 @@ export class Runner {
         return 'normal';
       }
 
+      case 'debug': {
+        // 调试输出：级别 1=报告(蓝) 2=警告(黄) 3=报错(红)，纯给开发者看，不影响程序
+        yield { kind: 'stmt', node: s, depth };
+        const parts: string[] = [];
+        for (const a of s.args) parts.push(toStr(yield* this.evalExpr(a, env)));
+        const kind = s.level === 2 ? 'dbg-warn' : s.level === 3 ? 'dbg-error' : 'dbg-report';
+        this.hook.output({ kind, text: parts.join(' ') });
+        return 'normal';
+      }
+
       case 'report': {
         yield { kind: 'stmt', node: s, depth };
         if (s.args.length === 0) {
           // 不给参数就报告"现在都有什么"：把当前所有变量列一遍
-          const snap = this.varsSnapshot();
+          const snap = this.varsSnapshot().filter((v) => v.name !== 'ans' && !v.name.startsWith('__'));
           const body = snap.length
             ? snap.map((v) => `  ${v.name} = ${v.value}（${v.type}）`).join('\n')
             : '  （还没有任何变量）';
@@ -775,7 +816,8 @@ export class Runner {
       case 'throw': {
         yield { kind: 'stmt', node: s, depth };
         const v = yield* this.evalExpr(s.value, env);
-        throw new FloatError(this.errMessageOf(v), s);
+        // 原值原样抛出去，catch 拿到的就是它（和 Rust 内核一致）
+        throw new ThrownValue(v);
       }
 
       case 'try': {
@@ -945,17 +987,25 @@ export class Runner {
     }
   }
 
-  /** 把任意错误转成脚本里可读的字典：e.message / e.line / e.file */
+  /** 把任意错误转成脚本里可读的字典：e.message / e.消息、e.line / e.行。
+   *  `throw` 抛出来的值原样交出去（和 Rust 内核一致）。 */
   private errorObjectOf(e: unknown): Val {
+    if (e instanceof ThrownValue) return e.value;
     const msg = e instanceof FloatError ? e.message : e instanceof Error ? e.message : String(e);
     const span = e instanceof FloatError ? e.span : undefined;
+    const line = span?.line ?? 0;
     const d = dict();
+    // 中英双键：写 e.message 和 e.消息 都能读到（两端一致）
     d.map.set('message', msg);
-    d.map.set('line', span?.line ?? 0);
+    d.map.set('消息', msg);
+    d.map.set('line', line);
+    d.map.set('行', line);
     d.map.set('file', span?.file ?? '');
+    d.map.set('类型', '运行时错误');
     return d;
   }
 
+  /** 未捕获的 throw：给一句人话 */
   private errMessageOf(v: Val): string {
     if (isDict(v) && v.map.has('message')) return toStr(v.map.get('message') as Val);
     return toStr(v);
@@ -1046,6 +1096,11 @@ export class Runner {
         throw new FloatError(`未知一元运算符 ${e.op}`, e);
       }
       case 'bin': return yield* this.evalBin(e, env);
+      case 'ternary': {
+        // 只算被选中的那一支（另一支完全不求值）
+        const c = yield* this.evalExpr(e.cond, env);
+        return truthy(c) ? yield* this.evalExpr(e.a, env) : yield* this.evalExpr(e.b, env);
+      }
       case 'idx': {
         const obj = yield* this.evalExpr(e.obj, env);
         const idx = yield* this.evalExpr(e.index, env);
@@ -1137,6 +1192,12 @@ export class Runner {
         const d = this.numOr(b, '/', e);
         if (d === 0) throw new FloatError('除数不能为 0', e);
         return this.numOr(a, '/', e) / d;
+      }
+      case '//': {
+        // 整除：向下取整（-7 // 2 = -4，和 Python 一致）
+        const d = this.numOr(b, '//', e);
+        if (d === 0) throw new FloatError('整除的除数不能为 0', e);
+        return Math.floor(this.numOr(a, '//', e) / d);
       }
       case '%': {
         const d = this.numOr(b, '%', e);
@@ -1444,7 +1505,11 @@ export class Runner {
     const sources = this.sources();
     const root = this.importRoot.replace(/\\/g, '/').replace(/\/+$/, '');
     const baseDir = fromFile.includes('/') ? fromFile.replace(/\\/g, '/').replace(/\/[^/]*$/, '') : root;
-    const join = (a: string, b: string): string => a.replace(/\/+$/, '') + '/' + b;
+    // 根目录是空串时（没有工程目录的场景）不能拼出 "/m0.cw" 这种带前导斜杠的假路径
+    const join = (a: string, b: string): string => {
+      const head = a.replace(/\/+$/, '');
+      return head === '' ? b : head + '/' + b;
+    };
     const candidates = target.includes('.')
       ? [join(baseDir, target), join(root, target)]
       : [join(baseDir, target + '.cw'), join(root, target + '.cw'), join(join(baseDir, target), 'main.cw'), join(join(root, target), 'main.cw')];

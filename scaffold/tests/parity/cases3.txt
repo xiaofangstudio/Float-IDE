@@ -1,0 +1,93 @@
+### 老式命令全套
+list xs = [1,2]
+add 3 to xs
+insert 0 to xs at 0
+replace xs 1 with 9
+read xs 1
+print(__last_read)
+len xs
+print(__last_len)
+del xs 0
+print(xs.join(","))
+### dict 老命令
+dict d = {}
+dict d key "a" = 1
+dict d read "a"
+print(__last_read)
+dict d del "a"
+print(len(d))
+### 计数循环含端点与步长
+int s = 0
+for i = 1 to 5
+    s += i
+print(s)
+int t = 0
+for i = 0 to 10 step 5
+    t += i
+print(t)
+### repeat 与 continue
+int n = 0
+repeat(5)
+    if (n == 2)
+        continue
+    n++
+print(n)
+### forever 加 break
+int k = 0
+forever
+    k++
+    if (k >= 3)
+        break
+print(k)
+### try catch finally
+fn f()
+    try
+        throw "坏了"
+    catch e
+        return "接住:" + e
+    finally
+        print("finally 跑了")
+
+print(f())
+### 类字段与方法
+class P
+    str name = "默认"
+    int hp = 10
+
+    fn hit(d)
+        self.hp -= d
+        return self.hp
+
+P p = new P()
+p.name = "小方"
+print(p.name, p.hit(3))
+### 类继承与 super init
+class A
+    int n = 0
+
+    fn init(v)
+        self.n = v
+
+class B extends A
+    fn init(v)
+        super(v * 2)
+
+B b = new B(3)
+print(b.n)
+### 导入同目录文件
+import "helper.cw"
+print(helperAdd(2, 3))
+### 多返回值与解构
+fn two()
+    return [7, 8]
+
+list r = two()
+print(r[0], r[1])
+### 字符串插值混合运算
+int a = 2
+int b = 3
+print("{a} + {b} = {a + b}")
+### stop 变体
+print("前")
+stop now
+print("后")

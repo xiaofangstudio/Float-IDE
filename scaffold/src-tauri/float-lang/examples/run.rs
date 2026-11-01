@@ -2,7 +2,7 @@
 //!
 //! 输入文件按行给 `ask` 的答案；不给就用同名 .in 文件（存在的话）。
 
-use float_lang::{bytecode, parser, Vm};
+use float_lang::Vm;
 use std::env;
 use std::fs;
 
@@ -39,16 +39,15 @@ fn main() {
         None => Vec::new(),
     };
 
-    let prog = parser::parse_program(path, &src);
-    if let Some(e) = prog.errors.first() {
-        eprintln!("语法错误（第 {} 行）：{}", e.span.line, e.message);
-        std::process::exit(1);
-    }
-    let (chunk, _f, errs) = bytecode::compile(&prog);
-    if let Some(e) = errs.first() {
-        eprintln!("编译错误：{}", e.message);
-        std::process::exit(1);
-    }
+    // 走 api::compile_source：import 的展开、行号归属都在里面处理
+    let base = std::path::Path::new(path).parent();
+    let chunk = match float_lang::api::compile_source(path, &src, base) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("编译错误：{}", e);
+            std::process::exit(1);
+        }
+    };
     let mut vm = Vm::new(chunk);
     vm.set_inputs(inputs);
     let t = std::time::Instant::now();

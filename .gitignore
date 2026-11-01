@@ -34,3 +34,9 @@ _selftest-dom.html
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# ===== 测试用的打包产物（每次跑测试都会重新生成）=====
+scaffold/tests/.*.mjs
+scaffold/tests/parity/.run-ts.mjs
+scaffold/tests/parity/rust.json
+scaffold/tests/parity/ts.json

@@ -3,9 +3,10 @@
  * 编辑器补全、悬停、成员提示、大纲都吃这一份分析结果，不再用正则扫源码。
  */
 
-import type { Diagnostic, Param, Program, Stmt } from './ast';
+import type { Diagnostic, Expr, Param, Program, Stmt } from './ast';
 import { parseProgram } from './parse';
 import { semanticDiagnostics } from './sema';
+import { checkTypes } from './types';
 
 export type FuncSym = {
   name: string;
@@ -56,6 +57,30 @@ export function analyze(file: string, src: string): Analysis {
   const vars: VarSym[] = [];
   const outline: OutlineItem[] = [];
 
+  /** 同名变量只留一个（补全里重复列三遍很难看） */
+  const pushVar = (name: string, type: string, line: number, cls: string | null): void => {
+    const at = vars.findIndex((v) => v.name === name);
+    if (at >= 0) {
+      if (cls && !vars[at].cls) vars[at] = { name, type: type || vars[at].type, line: vars[at].line, cls };
+      return;
+    }
+    vars.push({ name, type, line, cls });
+  };
+
+  /** 从初值表达式猜个类型标签（补全里显示用，不求精确） */
+  const typeOfExpr = (e: Expr | null): { type: string; cls: string | null } => {
+    if (!e) return { type: 'var', cls: null };
+    switch (e.k) {
+      case 'list': return { type: 'list', cls: null };
+      case 'dict': return { type: 'dict', cls: null };
+      case 'str': return { type: 'str', cls: null };
+      case 'num': return { type: Number.isInteger(e.v) ? 'int' : 'float', cls: null };
+      case 'bool': return { type: 'bool', cls: null };
+      case 'new': return { type: 'var', cls: e.cls };
+      default: return { type: 'var', cls: null };
+    }
+  };
+
   const classTypeHint = (s: Extract<Stmt, { k: 'decl' }>): string | null => {
     if (s.init && s.init.k === 'new') return s.init.cls;
     if (s.type !== 'var' && s.type !== 'int' && s.type !== 'float' && s.type !== 'str' && s.type !== 'bool' && s.type !== 'list' && s.type !== 'dict') return s.type;
@@ -83,7 +108,7 @@ export function analyze(file: string, src: string): Analysis {
             funcs.push(sym);
             outline.push({ line: s.line, text: `${s.name}(${s.params.map((p) => p.name).join(', ')})`, icon: 'func', depth });
           }
-          for (const p of s.params) vars.push({ name: p.name, type: p.type ?? 'var', line: p.line, cls: null });
+          for (const p of s.params) pushVar(p.name, p.type ?? 'var', p.line, null);
           walk(s.body, owner, depth + 1);
           break;
         }
@@ -102,7 +127,7 @@ export function analyze(file: string, src: string): Analysis {
         }
         case 'decl': {
           const cls = classTypeHint(s);
-          vars.push({ name: s.name, type: s.type, line: s.line, cls });
+          pushVar(s.name, s.type, s.line, cls);
           if (depth === 0 && isClassDecl(s)) {
             const label = cls ?? (s.type === 'var' ? '' : s.type);
             outline.push({ line: s.line, text: `${label} ${s.name}`.trim(), icon: 'var', depth });
@@ -121,10 +146,34 @@ export function analyze(file: string, src: string): Analysis {
           break;
         case 'forRange':
         case 'forIn':
-          vars.push({ name: s.varName, type: 'int', line: s.line, cls: null });
-          if (s.k === 'forIn' && s.valueName) vars.push({ name: s.valueName, type: 'var', line: s.line, cls: null });
+          pushVar(s.varName, 'int', s.line, null);
+          if (s.k === 'forIn' && s.valueName) pushVar(s.valueName, 'var', s.line, null);
           walk(s.body, owner, depth);
           break;
+        case 'assign': {
+          // 没写类型关键字、直接 x = 1 的变量，以前根本不进符号表
+          if (s.target.k === 'var') {
+            const t = typeOfExpr(s.value);
+            pushVar(s.target.name, t.type, s.line, t.cls);
+          }
+          break;
+        }
+        case 'incdec': {
+          if (s.target.k === 'var') pushVar(s.target.name, 'int', s.line, null);
+          break;
+        }
+        case 'try': {
+          walk(s.body, owner, depth);
+          if (s.catchName) pushVar(s.catchName, 'var', s.line, null);
+          if (s.catchBody) walk(s.catchBody, owner, depth);
+          if (s.finallyBody) walk(s.finallyBody, owner, depth);
+          break;
+        }
+        case 'destructure': {
+          const t = typeOfExpr(s.value);
+          for (const n of s.names) pushVar(n.name, t.type, n.line, t.cls);
+          break;
+        }
         default:
           break;
       }
@@ -133,7 +182,12 @@ export function analyze(file: string, src: string): Analysis {
 
   walk(program.body, null, 0);
 
-  const diagnostics = [...program.diagnostics, ...semanticDiagnostics(file, program.body)];
+  // 语法错误、语义（未定义）、类型三路诊断合成一份
+  const diagnostics = [
+    ...program.diagnostics,
+    ...semanticDiagnostics(file, program.body),
+    ...checkTypes(file, program.body)
+  ];
   return { program, funcs, classes, vars, outline, diagnostics };
 }
 

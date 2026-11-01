@@ -1,5 +1,5 @@
-// 05 类与对象
-// class 里写字段和方法，init 是构造方法，self 指向当前实例
+-- 05 类与对象
+-- class 里写字段和方法，init 是构造方法，self 指向当前实例
 
 class Animal
     str name = ""
@@ -25,7 +25,7 @@ class Dog extends Animal
         super(name, 20)
         self.breed = breed
 
-    // 覆盖父类方法，方法里可以直接用 self.name
+    -- 覆盖父类方法，方法里可以直接用 self.name
     fn speak()
         return join(name, "（", breed, "）：汪！")
 
@@ -43,7 +43,7 @@ print(join("受伤后 ", d.hp))
 Cat c = new Cat("咪咪", 8)
 print(c.speak())
 
-// 对象可以放进列表，再逐个调用方法
+-- 对象可以放进列表，再逐个调用方法
 list pets
 add d to pets
 add c to pets

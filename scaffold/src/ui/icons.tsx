@@ -1,4 +1,7 @@
 import React, { useEffect, useState } from 'react';
+/* 应用图标：由 scripts/make-icons.py 从原图裁出超椭圆圆角，外面是透明的。
+ * 界面里一律用这张，别直接拿直角原图（会显得很"网页"）。 */
+import logoSrc from '../assets/logo.png';
 
 /* 内联 SVG 图标集：全站图标统一出处，禁止 emoji。 */
 
@@ -106,15 +109,14 @@ export const IconBp = ({ size, style }: P) => (
 
 export function Logo({ size = 84 }: { size?: number }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 96 96" fill="none">
-      <rect x="6" y="6" width="84" height="84" rx="22" fill="#ffffff" stroke="#c5d4ea" strokeWidth="2" />
-      {/* 水面波纹 + 浮标：Float */}
-      <path d="M18 62c6-5 12-5 18 0s12 5 18 0 12-5 18 0 12 5 18 0" stroke="#1f8fe8" strokeWidth="3" strokeLinecap="round" />
-      <path d="M22 72c5-4 11-4 16 0s11 4 16 0 11-4 16 0" stroke="#6fc0ff" strokeWidth="2.4" strokeLinecap="round" opacity=".8" />
-      <path d="M48 18v34" stroke="#16273d" strokeWidth="5" strokeLinecap="round" />
-      <path d="M48 22l14 10-14 10z" fill="#1f8fe8" />
-      <circle cx="48" cy="18" r="4.5" fill="#16273d" />
-    </svg>
+    <img
+      src={logoSrc}
+      width={size}
+      height={size}
+      alt="Float IDE"
+      draggable={false}
+      style={{ display: 'block', borderRadius: size * 0.225, userSelect: 'none' }}
+    />
   );
 }
 export const IconImage = ({ size, style }: P) => (

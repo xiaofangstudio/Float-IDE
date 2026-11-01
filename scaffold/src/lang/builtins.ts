@@ -52,11 +52,11 @@ const spec = (s: BuiltinSpec): BuiltinSpec => s;
 
 const REGISTRY: BuiltinSpec[] = [
   /* 数学 */
-  spec({ name: 'add', sig: 'add(a, b)', category: '数学', doc: '相加；任一参数是字符串时按拼接处理', min: 2, max: 2, writes: '__last_calc', fn: (a) => (typeof a[0] === 'string' || typeof a[1] === 'string' ? toStr(a[0]) + toStr(a[1]) : num(a[0], 'add') + num(a[1], 'add')) }),
-  spec({ name: 'sub', sig: 'sub(a, b)', category: '数学', doc: '相减', min: 2, max: 2, writes: '__last_calc', fn: (a) => num(a[0], 'sub') - num(a[1], 'sub') }),
-  spec({ name: 'mul', sig: 'mul(a, b)', category: '数学', doc: '相乘；字符串乘整数可重复', min: 2, max: 2, writes: '__last_calc', fn: (a) => (typeof a[0] === 'string' && typeof a[1] === 'number' ? a[0].repeat(Math.max(0, Math.trunc(a[1]))) : num(a[0], 'mul') * num(a[1], 'mul')) }),
-  spec({ name: 'div', sig: 'div(a, b)', category: '数学', doc: '相除（除数为 0 报错）', min: 2, max: 2, writes: '__last_calc', fn: (a) => div(num(a[0], 'div'), num(a[1], 'div')) }),
-  spec({ name: 'mod', sig: 'mod(a, b)', category: '数学', doc: '取余', min: 2, max: 2, writes: '__last_calc', fn: (a) => mod(num(a[0], 'mod'), num(a[1], 'mod')) }),
+  spec({ name: 'add', sig: 'add(a, b)', category: '数学', doc: '相加；任一参数是字符串时按拼接处理。也支持汇编式写法 c = add a b（空格分隔，可多个）', min: 2, max: 8, writes: '__last_calc', fn: (a) => a.slice(1).reduce((x, y) => (typeof x === 'string' || typeof y === 'string' ? toStr(x) + toStr(y) : num(x, 'add') + num(y, 'add')), a[0]) }),
+  spec({ name: 'sub', sig: 'sub(a, b)', category: '数学', doc: '相减。也支持汇编式写法 c = sub a b', min: 2, max: 8, writes: '__last_calc', fn: (a) => a.slice(1).reduce((x, y) => num(x, 'sub') - num(y, 'sub'), a[0]) }),
+  spec({ name: 'mul', sig: 'mul(a, b)', category: '数学', doc: '相乘；字符串乘整数可重复。也支持汇编式写法 c = mul a b', min: 2, max: 8, writes: '__last_calc', fn: (a) => a.slice(1).reduce((x, y) => (typeof x === 'string' && typeof y === 'number' ? x.repeat(Math.max(0, Math.trunc(y))) : num(x, 'mul') * num(y, 'mul')), a[0]) }),
+  spec({ name: 'div', sig: 'div(a, b)', category: '数学', doc: '相除（除数为 0 报错）。也支持汇编式写法 c = div a b', min: 2, max: 8, writes: '__last_calc', fn: (a) => a.slice(1).reduce((x, y) => div(num(x, 'div'), num(y, 'div')), a[0]) }),
+  spec({ name: 'mod', sig: 'mod(a, b)', category: '数学', doc: '取余。也支持汇编式写法 c = mod a b', min: 2, max: 8, writes: '__last_calc', fn: (a) => a.slice(1).reduce((x, y) => mod(num(x, 'mod'), num(y, 'mod')), a[0]) }),
   spec({ name: 'pow', sig: 'pow(a, b)', category: '数学', doc: 'a 的 b 次方', min: 2, max: 2, writes: '__last_calc', fn: (a) => Math.pow(num(a[0], 'pow'), num(a[1], 'pow')) }),
   spec({ name: 'rand', sig: 'rand(a, b)', category: '数学', doc: '[a, b] 之间的随机整数（含两端）', min: 2, max: 2, writes: '__last_calc', fn: (a) => {
     const lo = Math.trunc(Math.min(num(a[0], 'rand'), num(a[1], 'rand')));
@@ -167,8 +167,131 @@ const REGISTRY: BuiltinSpec[] = [
     return n;
   } }),
   spec({ name: 'str', sig: 'str(值)', category: '转换', doc: '转字符串', min: 1, max: 1, fn: (a) => toStr(a[0]) }),
-  spec({ name: 'bool', sig: 'bool(值)', category: '转换', doc: '转布尔', min: 1, max: 1, fn: (a) => truthy(a[0]) })
+  spec({ name: 'bool', sig: 'bool(值)', category: '转换', doc: '转布尔', min: 1, max: 1, fn: (a) => truthy(a[0]) }),
+
+  /* 时间 / 文件 / 网络（正式写法一律英文，不用中文关键字那一套） */
+  spec({ name: 'now', sig: 'now()', category: '时间', doc: '当前时间的毫秒级 Unix 时间戳（int）', min: 0, max: 0, writes: '__last_calc', fn: () => Date.now() }),
+  spec({ name: 'readfile', sig: 'readfile(路径)', category: '文件', doc: '读整个文本文件的内容（相对路径按脚本所在目录）；桌面版功能。也支持 readfile "路径"', min: 1, max: 1, writes: '__last_str', fn: (a) => desktopOnly('readfile', a) }),
+  spec({ name: 'writefile', sig: 'writefile(路径, 内容)', category: '文件', doc: '把内容写进文件（覆盖）；返回 true，桌面版功能。也支持 writefile "路径" "内容"', min: 2, max: 2, writes: '__last_str', fn: (a) => desktopOnly('writefile', a) }),
+  spec({ name: 'appendfile', sig: 'appendfile(路径, 内容)', category: '文件', doc: '把内容追加到文件末尾（没有就新建）；返回 true，桌面版功能', min: 2, max: 2, writes: '__last_str', fn: (a) => desktopOnly('appendfile', a) }),
+  spec({ name: 'hasfile', sig: 'hasfile(路径)', category: '文件', doc: '文件是否存在（true / false），桌面版功能', min: 1, max: 1, writes: '__last_cmp', fn: (a) => desktopOnly('hasfile', a) }),
+  spec({ name: 'fetch', sig: 'fetch(网址)', category: '网络', doc: 'GET 请求，返回响应正文（桌面版，10 秒超时）', min: 1, max: 1, writes: '__last_str', fn: (a) => desktopOnly('fetch', a) }),
+  spec({ name: 'post', sig: 'post(网址, 内容)', category: '网络', doc: 'POST 请求，把内容发出去并返回响应正文（桌面版）', min: 2, max: 2, writes: '__last_str', fn: (a) => desktopOnly('post', a) }),
+
+  /* 数学：三角函数 / 对数 / 整数组合 / 判断 / 常量 */
+  spec({ name: 'idiv', sig: 'idiv(a, b)', category: '数学', doc: '整除：向下取整的除法（7 idiv 2 = 3，-7 idiv 2 = -4）。语言里的 // 是注释，所以用这个函数名', min: 2, max: 2, writes: '__last_calc', fn: (a) => {
+    const x = num(a[0], 'idiv');
+    const y = num(a[1], 'idiv');
+    if (!y) bad('idiv 的除数不能是 0');
+    const q = Math.floor(x / y);
+    return q;
+  } }),
+  spec({ name: 'asin', sig: 'asin(x)', category: '数学', doc: '反正弦', min: 1, max: 1, writes: '__last_calc', fn: (a) => Math.asin(num(a[0], 'asin')) }),
+  spec({ name: 'acos', sig: 'acos(x)', category: '数学', doc: '反余弦', min: 1, max: 1, writes: '__last_calc', fn: (a) => Math.acos(num(a[0], 'acos')) }),
+  spec({ name: 'atan', sig: 'atan(x)', category: '数学', doc: '反正切', min: 1, max: 1, writes: '__last_calc', fn: (a) => Math.atan(num(a[0], 'atan')) }),
+  spec({ name: 'atan2', sig: 'atan2(y, x)', category: '数学', doc: '两参数反正切（象限也会认）', min: 2, max: 2, writes: '__last_calc', fn: (a) => Math.atan2(num(a[0], 'atan2'), num(a[1], 'atan2')) }),
+  spec({ name: 'log2', sig: 'log2(x)', category: '数学', doc: '以 2 为底的对数', min: 1, max: 1, writes: '__last_calc', fn: (a) => Math.log2(num(a[0], 'log2')) }),
+  spec({ name: 'log10', sig: 'log10(x)', category: '数学', doc: '以 10 为底的对数', min: 1, max: 1, writes: '__last_calc', fn: (a) => Math.log10(num(a[0], 'log10')) }),
+  spec({ name: 'log1p', sig: 'log1p(x)', category: '数学', doc: 'ln(1 + x)，x 很小时比 log(1+x) 准', min: 1, max: 1, writes: '__last_calc', fn: (a) => Math.log1p(num(a[0], 'log1p')) }),
+  spec({ name: 'expm1', sig: 'expm1(x)', category: '数学', doc: 'e 的 x 次方减 1，x 很小时比 exp(x)-1 准', min: 1, max: 1, writes: '__last_calc', fn: (a) => Math.expm1(num(a[0], 'expm1')) }),
+  spec({ name: 'hypot', sig: 'hypot(a, b, …)', category: '数学', doc: '平方和开方（勾股定理，可以给任意多个数）', min: 1, max: 99, writes: '__last_calc', fn: (a) => Math.hypot(...a.map((x) => num(x, 'hypot'))) }),
+  spec({ name: 'trunc', sig: 'trunc(x)', category: '数学', doc: '去掉小数部分（朝 0 取整）', min: 1, max: 1, writes: '__last_calc', fn: (a) => Math.trunc(num(a[0], 'trunc')) }),
+  spec({ name: 'sign', sig: 'sign(x)', category: '数学', doc: '符号：正数 1、负数 -1、0 是 0', min: 1, max: 1, writes: '__last_calc', fn: (a) => Math.sign(num(a[0], 'sign')) }),
+  spec({ name: 'gcd', sig: 'gcd(a, b)', category: '数学', doc: '最大公约数', min: 2, max: 2, writes: '__last_calc', fn: (a) => {
+    let x = Math.abs(Math.trunc(num(a[0], 'gcd')));
+    let y = Math.abs(Math.trunc(num(a[1], 'gcd')));
+    while (y) { const t = x % y; x = y; y = t; }
+    return x;
+  } }),
+  spec({ name: 'lcm', sig: 'lcm(a, b)', category: '数学', doc: '最小公倍数', min: 2, max: 2, writes: '__last_calc', fn: (a) => {
+    const x = Math.abs(Math.trunc(num(a[0], 'lcm')));
+    const y = Math.abs(Math.trunc(num(a[1], 'lcm')));
+    if (!x || !y) return 0;
+    let p = x, q = y;
+    while (q) { const t = p % q; p = q; q = t; }
+    return (x / p) * y;
+  } }),
+  spec({ name: 'factorial', sig: 'factorial(n)', category: '数学', doc: '阶乘（n 不超过 20）', min: 1, max: 1, writes: '__last_calc', fn: (a) => {
+    const n = Math.trunc(num(a[0], 'factorial'));
+    if (n < 0) bad('factorial 要一个不小于 0 的整数');
+    if (n > 20) bad(`factorial(${n}) 太大了（超过 20 会超出整数范围）`);
+    let acc = 1;
+    for (let i = 2; i <= n; i++) acc *= i;
+    return acc;
+  } }),
+  spec({ name: 'comb', sig: 'comb(n, k)', category: '数学', doc: '组合数 C(n, k)', min: 2, max: 2, writes: '__last_calc', fn: (a) => {
+    const n = Math.trunc(num(a[0], 'comb'));
+    const k = Math.trunc(num(a[1], 'comb'));
+    if (n < 0 || k < 0) bad('comb(n, k) 的两个参数都不能是负数');
+    if (k > n) return 0;
+    const kk = Math.min(k, n - k);
+    let acc = 1;
+    for (let i = 0; i < kk; i++) acc = (acc * (n - i)) / (i + 1);
+    return Math.round(acc);
+  } }),
+  spec({ name: 'perm', sig: 'perm(n, k)', category: '数学', doc: '排列数 P(n, k)', min: 2, max: 2, writes: '__last_calc', fn: (a) => {
+    const n = Math.trunc(num(a[0], 'perm'));
+    const k = Math.trunc(num(a[1], 'perm'));
+    if (n < 0 || k < 0) bad('perm(n, k) 的两个参数都不能是负数');
+    if (k > n) return 0;
+    let acc = 1;
+    for (let i = 0; i < k; i++) acc *= n - i;
+    return acc;
+  } }),
+  spec({ name: 'isqrt', sig: 'isqrt(n)', category: '数学', doc: '整数平方根（向下取整）', min: 1, max: 1, writes: '__last_calc', fn: (a) => {
+    const n = Math.trunc(num(a[0], 'isqrt'));
+    if (n < 0) bad('isqrt 要一个不小于 0 的整数');
+    return Math.floor(Math.sqrt(n));
+  } }),
+  spec({ name: 'isfinite', sig: 'isfinite(x)', category: '数学', doc: '是不是有限数', min: 1, max: 1, writes: '__last_cmp', fn: (a) => Number.isFinite(num(a[0], 'isfinite')) }),
+  spec({ name: 'isinf', sig: 'isinf(x)', category: '数学', doc: '是不是无穷大', min: 1, max: 1, writes: '__last_cmp', fn: (a) => !Number.isFinite(num(a[0], 'isinf')) }),
+  spec({ name: 'isnan', sig: 'isnan(x)', category: '数学', doc: '是不是"不是数"（NaN）', min: 1, max: 1, writes: '__last_cmp', fn: (a) => Number.isNaN(num(a[0], 'isnan')) }),
+  spec({ name: 'near', sig: 'near(a, b) / near(a, b, 容差)', category: '数学', doc: '两个数是不是足够接近（浮点比较别直接 == 用这个），默认相对误差 1e-9', min: 2, max: 3, writes: '__last_cmp', fn: (a) => {
+    const x = num(a[0], 'near');
+    const y = num(a[1], 'near');
+    const tol = a.length >= 3 ? Math.abs(num(a[2], 'near')) : 1e-9;
+    return Math.abs(x - y) <= tol * Math.max(Math.abs(x), Math.abs(y), 1);
+  } }),
+  spec({ name: 'degrees', sig: 'degrees(弧度)', category: '数学', doc: '弧度转角度', min: 1, max: 1, writes: '__last_calc', fn: (a) => (num(a[0], 'degrees') * 180) / Math.PI }),
+  spec({ name: 'radians', sig: 'radians(角度)', category: '数学', doc: '角度转弧度', min: 1, max: 1, writes: '__last_calc', fn: (a) => (num(a[0], 'radians') * Math.PI) / 180 }),
+  spec({ name: 'pi', sig: 'pi()', category: '数学', doc: '圆周率 π', min: 0, max: 0, writes: '__last_calc', fn: () => Math.PI }),
+  spec({ name: 'e', sig: 'e()', category: '数学', doc: '自然常数 e', min: 0, max: 0, writes: '__last_calc', fn: () => Math.E }),
+  spec({ name: 'tau', sig: 'tau()', category: '数学', doc: 'τ = 2π', min: 0, max: 0, writes: '__last_calc', fn: () => Math.PI * 2 }),
+  spec({ name: 'inf', sig: 'inf()', category: '数学', doc: '无穷大', min: 0, max: 0, writes: '__last_calc', fn: () => Infinity }),
+  spec({ name: 'nan', sig: 'nan()', category: '数学', doc: 'NaN（不是数）', min: 0, max: 0, writes: '__last_calc', fn: () => NaN }),
+
+  /* 操作系统（桌面版功能；pathjoin 是纯字符串运算，哪都能用） */
+  spec({ name: 'cwd', sig: 'cwd()', category: '系统', doc: '当前脚本所在目录（绝对路径）', min: 0, max: 0, writes: '__last_str', fn: (a) => desktopOnly('cwd', a) }),
+  spec({ name: 'chdir', sig: 'chdir(目录)', category: '系统', doc: '切换脚本的"当前目录"（只影响脚本自己，不改整个进程）', min: 1, max: 1, fn: (a) => desktopOnly('chdir', a) }),
+  spec({ name: 'listdir', sig: 'listdir(目录)', category: '系统', doc: '列出目录里的文件名（列表）', min: 0, max: 1, writes: '__last_read', fn: (a) => desktopOnly('listdir', a) }),
+  spec({ name: 'makedir', sig: 'makedir(目录)', category: '系统', doc: '创建目录（多层会一起建）', min: 1, max: 1, fn: (a) => desktopOnly('makedir', a) }),
+  spec({ name: 'removedir', sig: 'removedir(目录)', category: '系统', doc: '删除空目录（不递归，防误删）', min: 1, max: 1, fn: (a) => desktopOnly('removedir', a) }),
+  spec({ name: 'removefile', sig: 'removefile(路径)', category: '系统', doc: '删除文件', min: 1, max: 1, fn: (a) => desktopOnly('removefile', a) }),
+  spec({ name: 'renamefile', sig: 'renamefile(旧路径, 新路径)', category: '系统', doc: '改名 / 移动文件', min: 2, max: 2, fn: (a) => desktopOnly('renamefile', a) }),
+  spec({ name: 'exists', sig: 'exists(路径)', category: '系统', doc: '路径是否存在（文件或目录都算）', min: 1, max: 1, writes: '__last_cmp', fn: (a) => desktopOnly('exists', a) }),
+  spec({ name: 'isfile', sig: 'isfile(路径)', category: '系统', doc: '是不是文件', min: 1, max: 1, writes: '__last_cmp', fn: (a) => desktopOnly('isfile', a) }),
+  spec({ name: 'isdir', sig: 'isdir(路径)', category: '系统', doc: '是不是目录', min: 1, max: 1, writes: '__last_cmp', fn: (a) => desktopOnly('isdir', a) }),
+  spec({ name: 'filesize', sig: 'filesize(路径)', category: '系统', doc: '文件大小（字节）', min: 1, max: 1, writes: '__last_calc', fn: (a) => desktopOnly('filesize', a) }),
+  spec({ name: 'getenv', sig: 'getenv(名字)', category: '系统', doc: '读环境变量；没有就给空字符串', min: 1, max: 1, writes: '__last_str', fn: (a) => desktopOnly('getenv', a) }),
+  spec({ name: 'pathjoin', sig: 'pathjoin(a, b, …)', category: '系统', doc: '把路径片段拼起来（统一用 /）', min: 1, max: 99, writes: '__last_str', fn: (a) => a.map((x) => toStr(x).replace(/\\/g, '/').replace(/\/+$/, '')).filter(Boolean).join('/') }),
+  spec({ name: 'runcmd', sig: 'runcmd(命令)', category: '系统', doc: '跑一条系统命令，返回 {code, out}（out 含标准输出和错误输出）', min: 1, max: 1, fn: (a) => desktopOnly('runcmd', a) })
 ];
+
+/** 中文别名：早期实现留下的写法，只保证老脚本还能跑，不进补全、不进文档 */
+const ALIASES: Record<string, string> = {
+  读文件: 'readfile',
+  写文件: 'writefile',
+  加文件: 'appendfile',
+  有文件: 'hasfile',
+  时间戳: 'now',
+  取网页: 'fetch',
+  发网页: 'post'
+};
+
+/** 浏览器 demo 里给一句人话：这些功能要走桌面版（F5 走 Rust 内核才有宿主能力） */
+function desktopOnly(name: string, _args: Val[]): never {
+  throw bad(`${name} 是桌面版功能：用 Float IDE 按 F5 运行（Rust 内核提供文件/网络能力），浏览器预览里用不了`);
+}
 
 function typeOfVal(v: Val): string {
   if (v === null) return 'null';
@@ -195,11 +318,13 @@ function norm(v: Val): unknown {
 export const BUILTINS = new Map<string, BuiltinSpec>(REGISTRY.map((b) => [b.name, b]));
 
 export function getBuiltin(name: string): BuiltinSpec | undefined {
-  return BUILTINS.get(name);
+  const n = ALIASES[name] ?? name;
+  return BUILTINS.get(n);
 }
 
 export function isBuiltin(name: string): boolean {
-  return BUILTINS.has(name);
+  const n = ALIASES[name] ?? name;
+  return BUILTINS.has(n);
 }
 
 /** 给 IDE 补全/悬停用 */

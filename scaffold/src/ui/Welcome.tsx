@@ -40,6 +40,23 @@ function TplThumb({ tpl, active }: { tpl: Template; active: boolean }) {
       <line x1="92" y1="30" x2="130" y2="30" stroke={line} strokeWidth="1" opacity={0.6} />
       <line x1="92" y1="40" x2="130" y2="40" stroke={line} strokeWidth="1" opacity={0.6} />
     </svg>);
+  if (tpl.id === 'pointer') return (
+    /* 指针示例：三格内存 + 一个指向第 2 格的箭头，跟"空白工程"明显不是一个东西 */
+    <svg width="150" height="80" viewBox="0 0 150 80">
+      {[22, 60, 98].map((x, i) => (
+        <g key={x}>
+          <rect x={x} y="26" width="28" height="28" rx="4" fill="none" stroke={i === 1 ? line : '#1b3260'} strokeWidth="1.6" />
+          <text x={x + 14} y="44" fontSize={9.5} fill={i === 1 ? line : soft} textAnchor="middle" fontFamily="Consolas, monospace">
+            {i === 1 ? '42' : '·'}
+          </text>
+          <text x={x + 14} y="64" fontSize={8} fill={soft} textAnchor="middle" fontFamily="Consolas, monospace">+{i}</text>
+        </g>
+      ))}
+      <path d="M74 14v9M69 19l5-5 5 5" stroke={line} strokeWidth="1.4" fill="none" />
+      <text x="74" y="9" fontSize={8.5} fill={soft} textAnchor="middle" fontFamily="Consolas, monospace">ptr</text>
+    </svg>);
+
+  /* 空白工程：一张纸 */
   return (
     <svg width="150" height="80" viewBox="0 0 150 80">
       <rect x="24" y="16" width="102" height="48" rx="4" fill="none" stroke="#1b3260" strokeWidth="1.5" />

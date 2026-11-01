@@ -1,0 +1,24 @@
+-- 15 的库文件：公共函数放这里，别的脚本 import 进去就能用。
+-- 里面只写函数和常量，别写 print —— 库被引用时会先执行一遍。
+
+fn 圆面积(r)
+    return 3.14159 * r * r
+
+fn 圆周长(r)
+    return 2 * 3.14159 * r
+
+fn 阶乘(n)
+    if (n <= 1)
+        return 1
+    return n * 阶乘(n - 1)
+
+fn 是偶数(n)
+    return n % 2 == 0
+
+fn 平均(list xs)
+    if (len(xs) == 0)
+        throw "空列表算不了平均"
+    int 和 = 0
+    for x in xs
+        和 += x
+    return 和 / len(xs)

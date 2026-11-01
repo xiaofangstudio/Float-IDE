@@ -246,7 +246,8 @@ fn 语法错误会被报出来() {
 #[test]
 fn 空程序不炸() {
     assert_eq!(out(""), "");
-    assert_eq!(out("// 只有注释\n"), "");
+    assert_eq!(out("-- 只有注释\n"), "");
+    assert_eq!(out("-- 注释\n\n-- 又一行\n"), "");
 }
 
 #[test]
@@ -267,4 +268,187 @@ fn 循环里重复声明同一变量() {
     int k = i * 10
     print(k)";
     assert_eq!(out(src), "0\n10\n20\n");
+}
+
+/* ── 空变量 + 汇编式算术（add / sub / mul / div / mod，空格分隔） ── */
+
+#[test]
+fn 空变量按类型给中性初值() {
+    assert_eq!(out("int c\nprint(c)"), "0\n");
+    assert_eq!(out("float f\nprint(f)"), "0\n");
+    assert_eq!(out("str s\nprint(\"[\" + s + \"]\")"), "[]\n");
+    assert_eq!(out("bool b\nprint(b)"), "false\n");
+    assert_eq!(out("list xs\nprint(len(xs))"), "0\n");
+}
+
+#[test]
+fn 空变量能直接累加() {
+    let src = "int 总数\nfor i = 1 to 4\n    总数 += i\nprint(总数)";
+    assert_eq!(out(src), "10\n");
+}
+
+#[test]
+fn 汇编式算术两个数() {
+    let src = "int a = 2\nint b = 3\nint c\nc = add a b\nprint(c)";
+    assert_eq!(out(src), "5\n");
+}
+
+#[test]
+fn 汇编式算术能接多个数() {
+    assert_eq!(out("print(add 1 2 3 4)"), "10\n");
+    assert_eq!(out("print(sub 100 1 2 3)"), "94\n");
+    assert_eq!(out("print(mul 2 3 4)"), "24\n");
+    assert_eq!(out("print(div 100 5 2)"), "10\n");
+    assert_eq!(out("print(mod 10 3)"), "1\n");
+}
+
+#[test]
+fn 汇编式算术和运算符能混写() {
+    assert_eq!(out("print(add 1 2 + 10)"), "13\n");
+    assert_eq!(out("print(mul 2 3 - 1)"), "5\n");
+}
+
+#[test]
+fn 带括号的老写法仍然有效() {
+    assert_eq!(out("print(add(2, 3))"), "5\n");
+    assert_eq!(out("print(mul(2, 3))"), "6\n");
+}
+
+#[test]
+fn 只有一个数要报清楚() {
+    let e = err_of("print(add 1)");
+    assert!(e.contains("至少要两个"), "{}", e);
+}
+
+/* ── 交互式 ask：没答案时挂起，有答案时跑完 ── */
+
+#[test]
+fn 交互式运行会停在_ask_上等人回答() {
+    let src = "ask \"你叫啥\"\nprint(\"你好，\" + ans)";
+    let r1 = float_lang::api::run_interactive("m.cw", src, None, vec![], Default::default());
+    assert!(r1.error.is_none(), "不该当错误处理");
+    assert_eq!(r1.need_input.as_deref(), Some("你叫啥"));
+    // 挂起前的输出要留着（界面要显示前半段）
+    assert!(r1.output.contains("你叫啥"));
+
+    let r2 = float_lang::api::run_interactive(
+        "m.cw", src, None, vec!["小明".into()], Default::default(),
+    );
+    assert!(r2.need_input.is_none());
+    assert_eq!(r2.outcome.unwrap().output, "你叫啥\n小明\n你好，小明\n");
+}
+
+#[test]
+fn 交互式挂起不会被_try_吞掉() {
+    let src = "try\n    ask \"继续吗\"\ncatch e\n    print(\"不该进来\")";
+    let r = float_lang::api::run_interactive("m.cw", src, None, vec![], Default::default());
+    assert_eq!(r.need_input.as_deref(), Some("继续吗"));
+}
+
+#[test]
+fn 不挂起模式还是老行为_取完给空串() {
+    // 测试和自动化里不该卡住：没有输入就直接空串
+    assert_eq!(out("ask \"问题\"\nprint(\"[\" + ans + \"]\")"), "问题\n[]\n");
+}
+
+/* ── 嵌套：块、循环、异常、类都要能随便套 ── */
+
+#[test]
+fn 五层嵌套混搭块() {
+    let src = "int 命中 = 0
+for a = 1 to 2
+    for b = 1 to 2
+        while (b < 3)
+            if (a == 1)
+                if (b == 2)
+                    for c in range(2)
+                        try
+                            if (c == 1)
+                                throw \"内层错误\"
+                            命中 += 1
+                        catch e
+                            命中 += 10
+                        finally
+                            命中 += 100
+                else
+                    命中 += 1000
+            break
+print(命中)";
+    assert_eq!(out(src), "1211\n");
+}
+
+#[test]
+fn 继承类的方法里套循环和_try() {
+    let src = "class 角色
+    str 名 = \"甲\"
+    int 血 = 30
+    fn 掉血(n)
+        self.血 -= n
+        if (self.血 <= 0)
+            throw self.名 + \" 倒了\"
+        return self.血
+
+class 法师 extends 角色
+    fn 施法(次数)
+        int 结果 = 0
+        for i in range(次数)
+            try
+                结果 = self.掉血(8)
+            catch e
+                结果 = -1
+                break
+        return 结果
+
+法师 m = new 法师()
+print(m.施法(2))
+print(m.施法(6))";
+    assert_eq!(out(src), "14\n-1\n");
+}
+
+#[test]
+fn 嵌套列表字典都能遍历() {
+    let src = "dict 玩家表 = {\"甲\": [1, 2, 3], \"乙\": [4, 5]}
+for 名 in 玩家表
+    list 分 = 玩家表[名]
+    int 和 = 0
+    for v in 分
+        和 += v
+    print(名, 和)
+list 矩阵 = [[1,2],[3,4]]
+for 行 in 矩阵
+    for v in 行
+        print(v)";
+    assert_eq!(out(src), "甲 6\n乙 9\n1\n2\n3\n4\n");
+}
+
+#[test]
+fn 残缺代码不会卡死() {
+    // 语法错归错，但必须能返回，不能把编辑器挂住
+    let e = err_of("if (\n\nfor\nwhile");
+    assert!(!e.is_empty());
+}
+
+/* ── 类型标注不是装饰：一眼能看出来的错，编译期就拦住 ── */
+
+#[test]
+fn 类型不匹配在编译期就报错() {
+    let e = err_of("int a = \"字符串\"");
+    assert!(e.contains("int") && e.contains("str"), "{}", e);
+    let e2 = err_of("str s = 1");
+    assert!(e2.contains("str"), "{}", e2);
+    let e3 = err_of("list xs = 5");
+    assert!(e3.contains("list"), "{}", e3);
+    // 声明之后再赋错类型也要拦
+    let e4 = err_of("int n = 1\nn = \"x\"");
+    assert!(e4.contains("int"), "{}", e4);
+}
+
+#[test]
+fn 合理赋值不该被误报() {
+    // int 位置给 float 是允许的（float 是更宽的类型）
+    assert_eq!(out("float f = 1\nprint(f)"), "1\n");
+    // var 明确表示"不强制"，随便换类型
+    assert_eq!(out("var v = 1\nv = \"x\"\nprint(v)"), "x\n");
+    // 右边是变量/调用时静态看不出来，不拦
+    assert_eq!(out("str s = \"a\"\nint n = 2\nprint(s + \"b\", n + 1)"), "ab 3\n");
 }

@@ -158,7 +158,8 @@ impl Value {
             Value::Bool(_) => "bool",
             Value::Str(_) => "str",
             Value::List(_) => "list",
-            Value::Dict(_) => "dict",
+            // 带 __cls 的字典就是类的实例（class 降级方案的约定）
+            Value::Dict(d) => if d.borrow().get("__cls").is_some() { "class" } else { "dict" },
             Value::Ptr(_) => "ptr",
             Value::Func(_) | Value::Native(_) => "function",
         }

@@ -28,6 +28,88 @@ async function rep_(name: string, src: string, expect: string[]): Promise<void> 
 }
 
 async function main(): Promise<void> {
+  /* ── Math：三角 / 对数 / 整数 / 判断 / 常量 ── */
+  await t('三角与反三角', `
+print(near(sin(pi() / 2), 1))
+print(near(cos(pi()), -1))
+print(near(atan2(1, 1), pi() / 4))
+print(near(asin(1), pi() / 2))
+`, ['true', 'true', 'true', 'true']);
+  await t('对数与指数', `print(log2(8))\nprint(log10(1000))\nprint(near(expm1(0), 0))`, ['3', '3', 'true']);
+  await t('整数数学', `
+print(gcd(12, 18))
+print(lcm(4, 6))
+print(factorial(5))
+print(comb(5, 2))
+print(perm(5, 2))
+print(isqrt(17))
+print(trunc(-2.7))
+print(sign(-9))
+`, ['6', '12', '120', '10', '20', '4', '-2', '-1']);
+  await t('数值判断与常量', `
+print(isfinite(1.0))
+print(isnan(nan()))
+print(isinf(inf()))
+print(near(degrees(pi()), 180))
+`, ['true', 'true', 'true', 'true']);
+  await t('hypot 多维', `print(hypot(3, 4))\nprint(hypot(2, 3, 6))`, ['5', '7']);
+
+  /* ── OS：桌面版能力（浏览器里给明确提示） ── */
+  await t('pathjoin 是纯运算哪都能用', `print(pathjoin("a", "b", "c.txt"))`, ['a/b/c.txt']);
+  {
+    const r = await run(`try\n    makedir("x")\ncatch e\n    print("接住：" + e)\nend\n`);
+    eq('浏览器里系统函数给明确提示', r.out.filter((s) => s.startsWith('接住')).length >= 1, true);
+  }
+
+  /* ── 两个减号是整行注释（后来又恢复了） ── */
+  {
+    const r = await run(`-- 这行是注释\n`);
+    eq('两个减号是注释', r.err.length === 0, true);
+  }
+
+  /* ── alias / #define（类 #define 的文本替换） ── */
+  await t('alias 能替换名字', `alias 两次 = 2\nprint(两次)`, ['2']);
+  await t('#define 能替换名字', `#define 两次 2\nprint(两次)`, ['2']);
+  await t('alias 也能是英文名', `alias PI = 3.14\nprint(PI)`, ['3.14']);
+  await t('替换成一整条语句', `alias 打招呼 = print("你好")\n打招呼`, ['你好']);
+  await t('替换进函数体', `alias 双倍 = x * 2\nfn f(x)\n    return 双倍\n\nprint(f(21))`, ['42']);
+  await t('只换整词', `alias 值 = 1\nint 变量值 = 9\nprint(值, 变量值)`, ['1 9']);
+  await t('后面覆盖前面', `alias a = 1\nprint(a)\nalias a = 2\nprint(a)`, ['1', '2']);
+  await t('多轮展开', `alias a = b\nalias b = 9\nprint(a)`, ['9']);
+  await t('中文换写法仍然兼容', `换 两次 成 2\nprint(两次)`, ['2']);
+  {
+    const r = await run(`alias a = b\nalias b = a\nprint(a)\n`);
+    eq('别名成环会报错', r.err.some((e) => e.includes('环') || e.includes('别名')), true);
+  }
+
+  /* ── 调试输出（report=蓝 / warn=黄 / error=红，纯给开发者看，不影响程序） ── */
+  {
+    const r = await run(`debug report "普通消息"\ndebug warn "注意"\ndebug error "炸了"\nprint("还在跑")\n`);
+    eq('调试三档输出', r.dbg, ['[报告] 普通消息', '[警告] 注意', '[报错] 炸了']);
+    eq('调试不进普通输出也不中断', r.out, ['还在跑']);
+    eq('调试不报错', r.err, []);
+  }
+  {
+    const r = await run(`int a = 7\ndebug(warn, a, "个")\n`);
+    eq('调试函数式写法+多参数', r.dbg, ['[警告] 7 个']);
+  }
+  {
+    const r = await run(`调试 报错 "中文写法也认"\n`);
+    eq('调试中文写法兼容', r.dbg, ['[报错] 中文写法也认']);
+  }
+
+  /* ── 时间 / 文件 / 网络：英文名，桌面版能力 ── */
+  {
+    const r = await run(`int t = now()\nprint(t > 1700000000000)\nprint(type(now()))\n`);
+    eq('now 是毫秒级 int', r.out, ['true', 'int']);
+    eq('now 不报错', r.err, []);
+  }
+  {
+    // 浏览器（Node 测试环境）里文件/网络给明确的"桌面版才支持"，不许崩溃或静默
+    const r = await run(`try\n    writefile("x.txt", "内容")\ncatch e\n    print("接住：" + e)\nend\n`);
+    eq('浏览器里文件函数给明确提示', r.out.filter((s) => s.startsWith('接住')).length >= 1, true);
+  }
+
   /* ── 报告通道 ── */
   await t('报告不进控制台', `报告 "只是报告"\nprint("这句才进控制台")\n`, ['这句才进控制台']);
   await rep_('报告写进报告面板', `报告 "甲", 1\n报告 "乙"\n`, ['甲 1', '乙']);
@@ -302,13 +384,64 @@ function hello()
     eq(`${name}（解释不该报错）`, b.err, []);
   };
 
+  /* ── 注释两种写法 ── */
+  await both('两个减号是整行注释', `
+-- 这是注释
+int a = 1
+-- 又一行注释
+print(a)
+`, ['1']);
+  await both('缩进的注释也算注释', `
+if (true)
+    -- 块里的注释
+    print("ok")
+`, ['ok']);
+  await both('后缀自减照旧', `
+int i = 3
+i--
+print(i)
+`, ['2']);
+  await both('行尾注释用两个减号', `
+int b = 2 -- 行尾说明
+print(b)
+print("http://a.b")
+`, ['2', 'http://a.b']);
+  await both('两个斜杠是整除', `
+print(7 // 2)
+print(-7 // 2)
+print(7.5 // 2)
+`, ['3', '-4', '3']);
+
+  /* ── 三元表达式与整除 ── */
+  await both('三元基础', `
+int a = 3
+print(a > 0 ? "正" : "负")
+print(a > 10 ? "大" : "小")
+`, ['正', '小']);
+  await both('三元右结合（嵌套）', `
+int n = 0
+print(n < 0 ? "负" : n == 0 ? "零" : "正")
+`, ['零']);
+  await both('三元只算选中的那一支', `
+fn 炸()
+    throw "不该被求值"
+    return 1
+
+print(true ? "安全" : 炸())
+`, ['安全']);
+  await both('整除向下取整', `
+print(idiv(7, 2))
+print(idiv(-7, 2))
+print(idiv(7.5, 2))
+`, ['3', '-4', '3']);
+
   await both('try / catch / finally', `
 int done = 0
 try
     throw "出错了"
     print("不会执行")
 catch e
-    print("抓到：" + e.message)
+    print("抓到：" + e)
 finally
     done = 1
 print(done)
@@ -319,7 +452,9 @@ try
     int x = 1 - "a"
 catch e
     print(e.line > 0)
-`, ['true']);
+    print(e.行 > 0)
+    print(len(e.消息) > 0)
+`, ['true', 'true', 'true']);
 
   await both('函数里的错误能被上层捕获', `
 function risky(n)
@@ -329,7 +464,7 @@ function risky(n)
 try
     risky(5)
 catch err
-    print("捕获：" + err.message)
+    print("捕获：" + err)
 print("继续跑")
 `, ['捕获：太大了', '继续跑']);
 
@@ -549,6 +684,48 @@ print(a.nope)
   })();
   const long = await run(longSrc);
   eq('长代码（400 函数 + 1500 变量）执行正确', long.out[0] === '400' && long.out[1] === '1499', true);
+
+  /* ── 汇编式算术（add / sub / mul / div / mod，空格分隔，任意多个数）── */
+  await t('空变量：只声明不赋值，按类型给中性初值', 'int c\nprint c', ['0']);
+  await t('空变量能直接累加', 'int 总数\nfor i in range(4)\n    总数 += i\nprint 总数', ['6']);
+  await t('汇编式 add', 'int c\nint a = 2\nint b = 3\nc = add a b\nprint c', ['5']);
+  await t('汇编式 多操作数左结合', 'print add 1 2 3 4', ['10']);
+  await t('汇编式 sub / mul / div / mod',
+    'print sub 10 3\nprint mul 2 3 4\nprint div 100 5 2\nprint mod 10 3',
+    ['7', '24', '10', '1']);
+  await t('汇编式和运算符混写', 'int a = 2\nint b = 3\nprint add a b + 10', ['15']);
+  await t('带括号的老写法也还在', 'print add(2, 3)', ['5']);
+
+  /* ── 补全用的符号表：变量必须能被收集到（以前只有写了类型关键字的才算） ── */
+  {
+    const src = [
+      'fang = 1',
+      'list xs',
+      'dict d',
+      'x = "hi"',
+      'fn 打招呼(name)',
+      '    return name',
+      'try',
+      '    throw "e"',
+      'catch err',
+      '    print err',
+      'for i in range(3)',
+      '    print i'
+    ].join('\n');
+    const a = analyze('main.cw', src);
+    const names = a.vars.map((v) => v.name);
+    for (const want of ['fang', 'xs', 'd', 'x', 'err', 'i', 'name']) {
+      eq(`符号表里有 ${want}`, names.includes(want), true);
+    }
+    eq('符号表里没有重复的变量', names.length, new Set(names).size);
+    eq('类型推断：list / dict / str / int', [
+      a.vars.find((v) => v.name === 'xs')?.type,
+      a.vars.find((v) => v.name === 'd')?.type,
+      a.vars.find((v) => v.name === 'x')?.type,
+      a.vars.find((v) => v.name === 'fang')?.type
+    ], ['list', 'dict', 'str', 'int']);
+    eq('函数进了符号表', a.funcs.map((f) => f.name), ['打招呼']);
+  }
 
   /* ── 结果 ── */
   console.log(`\n通过 ${pass} 项，失败 ${failures.length} 项`);

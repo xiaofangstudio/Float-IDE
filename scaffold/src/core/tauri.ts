@@ -8,6 +8,12 @@ export type McpStatus = { running: boolean; port: number; project: string; tools
 
 export { listen };
 
+/** 是不是跑在 Tauri 桌面壳里（浏览器 demo 里为 false）。
+ *  全工程只此一处判断，别各文件自己写一份。 */
+export function isTauriEnv(): boolean {
+  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+}
+
 export const api = {
   /* 文件 */
   fsList: (dir: string) => invoke<FileEntry[]>('fs_list', { dir }),
@@ -18,7 +24,7 @@ export const api = {
   /** 带版本校验的写：expectMtimeMs 与磁盘不符时抛 CONFLICT，绝不静默覆盖 */
   fsWriteChecked: (path: string, contents: string, expectMtimeMs: number) =>
     invoke<{ mtimeMs: number; size: number; exists: boolean }>(
-      'fs_write_checked', { path, contents, expectMtimeMs: String(expectMtimeMs) }),
+      'fs_write_checked', { path, contents, expectMtimeMs }),
   fsMkdir: (path: string) => invoke<void>('fs_mkdir', { path }),
 
   /* 工程占用锁：防止两个 Float IDE 同时改同一个工程 */
@@ -28,6 +34,28 @@ export const api = {
   lockRelease: (dir: string, id: string) => invoke<void>('project_lock_release', { dir, id }),
   fsRename: (from: string, to: string) => invoke<void>('fs_rename', { from, to }),
   fsDelete: (path: string) => invoke<void>('fs_delete', { path }),
+
+  /* 语言内核（Rust） */
+  langRun: (
+    file: string,
+    source: string,
+    inputs: string[] = [],
+    /** 当前所有打开的文件（路径 → 源码）：没存盘的库文件也能被 import 到 */
+    extra: Record<string, string> = {}
+  ) =>
+    invoke<{
+      output: string;
+      reports: string[];
+      error: string | null;
+      error_line: number;
+      steps: number;
+      /** 有值 = 脚本停在某个 ask 上等人回答 */
+      needInput: string | null;
+    }>('lang_run', { file, source, inputs, extra }),
+  langCheck: (file: string, source: string) =>
+    invoke<{ severity: 'error' | 'warning' | 'info'; message: string; line: number; col: number }[]>(
+      'lang_check', { file, source }
+    ),
 
   /* 工程 */
   projectNew: (dir: string, name: string, files: Record<string, string>) =>

@@ -68,9 +68,9 @@ const KEYWORDS: [&str; 8] =
     ["new", "class", "extends", "function", "fn", "return", "import", "super"];
 
 /// 长的必须排在前面，靠顺序实现"最长匹配优先"
-const OPERATORS: [&str; 39] = [
+const OPERATORS: [&str; 40] = [
     "===", "!==", "**=", "<<=", ">>=", "==", "!=", "<=", ">=", "&&", "||", "**", "<<", ">>", "+=",
-    "-=", "*=", "/=", "%=", "++", "--", "=>", "+", "-", "*", "/", "%", "<", ">", "!", "~", "&", "|",
+    "-=", "*=", "/=", "%=", "++", "--", "//", "=>", "+", "-", "*", "/", "%", "<", ">", "!", "~", "&", "|",
     "^", "=", "?", ":", "@", "#",
 ];
 
@@ -122,10 +122,7 @@ pub fn tokenize_line(src: &str, line: u32, start_col: u32) -> Result<Vec<Token>,
             continue;
         }
 
-        // 行注释：// 之后全部丢弃
-        if c == '/' && i + 1 < n && chars[i + 1] == '/' {
-            break;
-        }
+        // 注意：`//` 不是注释，是整除运算符（注释在 code_part 里按 `--` 剥掉）
 
         // 字符串
         if c == '"' || c == '\'' {
@@ -289,7 +286,15 @@ pub fn tokenize_line(src: &str, line: u32, start_col: u32) -> Result<Vec<Token>,
     Ok(out)
 }
 
-/// 取一行里 `//` 之前的有效代码（跳过字符串内的 //）
+/// 取一行的有效代码，把 `--` 注释剥掉（跳过字符串里的 `--`）。
+///
+/// 消歧规则：`--` **左边是行首或空白**，并且**右边是空白或行尾**，才算注释。
+/// 这样三种写法都对得上：
+/// * `-- 整行注释`     → 注释
+/// * `int hp = 100 -- 血量` → 注释
+/// * `i--` / `i-- -- 注释`  → 自减运算符（左边不是空白，不当注释）
+///
+/// **`//` 不是注释**，它是整除运算符（`7 // 2` = 3）。
 pub fn code_part(line: &str) -> (String, Option<String>) {
     let chars: Vec<char> = line.chars().collect();
     let mut in_str: Option<char> = None;
@@ -312,10 +317,18 @@ pub fn code_part(line: &str) -> (String, Option<String>) {
             i += 1;
             continue;
         }
-        if c == '/' && i + 1 < chars.len() && chars[i + 1] == '/' {
-            let head: String = chars[..i].iter().collect();
-            let tail: String = chars[i + 2..].iter().collect();
-            return (head, Some(tail));
+        if c == '-' && i + 1 < chars.len() && chars[i + 1] == '-' {
+            let left_ok = i == 0 || chars[i - 1].is_whitespace();
+            let right = chars.get(i + 2).copied();
+            let right_ok = match right {
+                None => true,
+                Some(n) => n.is_whitespace(),
+            };
+            if left_ok && right_ok {
+                let head: String = chars[..i].iter().collect();
+                let tail: String = chars[i + 2..].iter().collect();
+                return (head, Some(tail));
+            }
         }
         i += 1;
     }
@@ -356,8 +369,16 @@ mod tests {
 
     #[test]
     fn 整行注释被丢弃() {
-        assert_eq!(texts("x = 1 // 这是注释"), vec!["x", "=", "1"]);
-        assert_eq!(texts("// 全注释"), Vec::<String>::new());
+        // 注释是 `--`（在 code_part 里剥），分词阶段已经看不到它
+        let (code, _) = code_part("x = 1 -- 这是注释");
+        assert_eq!(texts(code.trim()), vec!["x", "=", "1"]);
+        let (code, _) = code_part("-- 全注释");
+        assert_eq!(texts(code.as_str()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn 双斜杠是整除运算符() {
+        assert_eq!(texts("x = 7 // 2"), vec!["x", "=", "7", "//", "2"]);
     }
 
     #[test]
@@ -393,8 +414,33 @@ mod tests {
 
     #[test]
     fn code_part_跳过字符串内注释() {
-        let (code, comment) = code_part(r#"x = "a//b" // 真注释"#);
-        assert_eq!(code, r#"x = "a//b" "#);
+        // 字符串里的 `--` 不是注释
+        let (code, comment) = code_part(r#"x = "a--b" -- 真注释"#);
+        assert_eq!(code, r#"x = "a--b" "#);
         assert_eq!(comment.as_deref(), Some(" 真注释"));
+    }
+
+    #[test]
+    fn code_part_不把自减当注释() {
+        // `i--` 是自减（左边贴着标识符）
+        let (code, comment) = code_part("i--");
+        assert_eq!(code, "i--");
+        assert!(comment.is_none());
+        // `i-- -- 说明`：前一个是自减，后一个是注释
+        let (code, comment) = code_part("i-- -- 说明");
+        assert_eq!(code, "i-- ");
+        assert_eq!(comment.as_deref(), Some(" 说明"));
+        // 行尾注释（前面有空白）
+        let (code, comment) = code_part("int hp = 100 -- 血量");
+        assert_eq!(code, "int hp = 100 ");
+        assert_eq!(comment.as_deref(), Some(" 血量"));
+    }
+
+    #[test]
+    fn code_part_不把整除当注释() {
+        // `//` 是整除运算符，整行都是代码
+        let (code, comment) = code_part("a = 7 // 2");
+        assert_eq!(code, "a = 7 // 2");
+        assert!(comment.is_none());
     }
 }

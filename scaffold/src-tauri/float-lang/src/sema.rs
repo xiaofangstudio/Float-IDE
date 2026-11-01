@@ -118,6 +118,18 @@ impl Checker {
         }
     }
 
+    /// 循环变量这种"用完就换下一个"的名字，重复用不算问题，安静登记
+    fn declare_quiet(&mut self, name: &Rc<str>, line: u32) {
+        if !self.locals.is_empty() && self.locals.iter().any(|s| s.vars.contains_key(name)) {
+            return;
+        }
+        if self.globals.vars.contains_key(name) && self.locals.is_empty() {
+            self.globals.vars.insert(Rc::clone(name), line);
+            return;
+        }
+        self.scope().vars.insert(Rc::clone(name), line);
+    }
+
     fn declare(&mut self, name: &Rc<str>, line: u32, col: u32) {
         let existed = self.scope().vars.contains_key(name);
         if existed {
@@ -190,11 +202,22 @@ impl Checker {
                     self.expr(a);
                 }
             }
+            StmtKind::Debug { args, .. } => {
+                for a in args {
+                    self.expr(a);
+                }
+            }
             StmtKind::Ask(prompt) => {
                 if let Some(e) = prompt {
                     self.expr(e);
                 }
             }
+            StmtKind::WaitUntil { cond, body } => {
+                self.expr(cond);
+                self.block(body);
+            }
+            StmtKind::IfOut(cond) => self.expr(cond),
+            StmtKind::TimeRead | StmtKind::TimeReset => {}
             StmtKind::If { branches, else_body } => {
                 for (cond, body) in branches {
                     if let Some(c) = cond {
@@ -222,14 +245,14 @@ impl Checker {
                 if let Some(st) = step {
                     self.expr(st);
                 }
-                self.declare(var, line, col);
+                self.declare_quiet(var, line);
                 self.block(body);
             }
             StmtKind::ForIn { var, value_name, iter, body } => {
                 self.expr(iter);
-                self.declare(var, line, col);
+                self.declare_quiet(var, line);
                 if let Some(v) = value_name {
-                    self.declare(v, line, col);
+                    self.declare_quiet(v, line);
                 }
                 self.block(body);
             }
@@ -262,6 +285,24 @@ impl Checker {
                 let _ = before;
                 let sc = self.locals.pop().unwrap();
                 self.report_unused(&sc);
+            }
+            StmtKind::Try { body, catch_name, catch_body, finally } => {
+                self.block(body);
+                if let Some(n) = catch_name {
+                    self.declare(n, line, col);
+                }
+                if let Some(cb) = catch_body {
+                    self.block(cb);
+                }
+                if let Some(f) = finally {
+                    self.block(f);
+                }
+            }
+            StmtKind::Throw(v) => self.expr(v),
+            StmtKind::Group(list) => {
+                for st in list {
+                    self.stmt(st);
+                }
             }
             StmtKind::Nop => {}
             StmtKind::Unsupported { what } => {
@@ -356,6 +397,11 @@ impl Checker {
                 }
             }
             ExprKind::Un { a, .. } => self.expr(a),
+            ExprKind::Ternary { cond, a, b } => {
+                self.expr(cond);
+                self.expr(a);
+                self.expr(b);
+            }
             ExprKind::Bin { a, b, .. } => {
                 self.expr(a);
                 self.expr(b);

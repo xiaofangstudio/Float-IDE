@@ -1,0 +1,31 @@
+### 三元基础
+int a = 3
+print(a > 0 ? "正" : "负")
+print(a > 10 ? "大" : "小")
+### 三元嵌套
+int n = 5
+print(n < 0 ? "负" : n == 0 ? "零" : "正")
+### 三元惰性求值
+fn 炸()
+    throw "不该被求值"
+    return 1
+
+print(true ? "安全" : 炸())
+### 三元里放函数调用
+fn twice(x)
+    return x * 2
+
+print(1 > 0 ? twice(3) : twice(4))
+### 整除
+print(idiv(7, 2))
+print(idiv(-7, 2))
+print(idiv(8, 4))
+print(idiv(7.5, 2))
+### 整除当除数保护
+try
+    print(idiv(1, 0))
+catch e
+    print("接住了")
+### 三元与整除混用
+int v = 9
+print(idiv(v, 4) > 1 ? "大于一" : "不大于一")

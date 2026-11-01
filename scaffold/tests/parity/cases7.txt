@@ -1,0 +1,58 @@
+### 除零与取余
+try
+    print(1 / 0)
+catch e
+    print("除零被接住")
+print(7 % 3)
+print(-7 % 3)
+### 整除边界
+print(0 // 5)
+print(-1 // 2)
+print(1 // -2)
+### 字符串越界
+try
+    str s = "ab"
+    print(s[9])
+catch e
+    print("越界被接住")
+### 列表越界与负下标
+list xs = [1, 2, 3]
+print(xs[-1])
+print(xs[-3])
+try
+    print(xs[5])
+catch e
+    print("列表越界被接住")
+### 大数与浮点
+print(2 ** 40)
+print(1.5 + 2.5)
+print(10 / 4)
+print(near(0.1 + 0.2, 0.3))
+### 字符串与数字拼接
+print("n=" + 42)
+print(1 + 2 + "x")
+### 类型转换边界
+print(int("42"))
+print(float("1.5"))
+print(int(3.99))
+print(str(3.0))
+try
+    print(int("abc"))
+catch e
+    print("非法数字被接住")
+### 空集合
+list e1 = []
+dict e2 = {}
+print(len(e1), len(e2))
+print(e1.sum())
+print("".len())
+### 布尔与空值
+print(bool(0), bool(1), bool(""), bool("x"))
+print(type(null))
+print(null == null)
+### 逻辑运算短路
+fn boom()
+    throw "不该被调用"
+
+print(false && boom())
+print(true || boom())

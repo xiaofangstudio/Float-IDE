@@ -10,6 +10,7 @@
  */
 
 import { api } from '../core/tauri';
+import { readSource } from '../core/sources';
 import { BUILTIN_PLUGINS } from './builtin';
 import type {
   PluginCommand, PluginManifest, PluginPermission, PluginRecord, PluginSnippet
@@ -355,7 +356,7 @@ export class PluginHost {
       files: {
         read: async (rel: string): Promise<string> => {
           if (!allow('files:read')) throw new Error(`插件 ${rec.id} 没有 files:read 权限`);
-          return api.fsRead(joinPath(self.opts.projectDir, rel));
+          return readSource(joinPath(self.opts.projectDir, rel));
         },
         write: async (rel: string, text: string): Promise<void> => {
           if (!allow('files:write')) throw new Error(`插件 ${rec.id} 没有 files:write 权限`);

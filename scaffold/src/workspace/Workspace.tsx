@@ -1,10 +1,14 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../core/tauri';
+
+const isTauri = (): boolean =>
+  typeof window !== 'undefined' && '__TAURI_INTERNALS__' in (window as unknown as Record<string, unknown>);
 import { Runner, type CtlState, type OutLine } from '../lang/interp';
 import type { ConsoleLine, ProblemItem, ProjectMeta, VarRow, ReportRow } from '../core/types';
 import { analyze } from '../lang/analyze';
 import { setPluginContributions } from '../lang/floatlang';
-import { EditorPane, type EditorHandle, type DocTab } from '../ide/EditorPane';
+import { EditorPane, openBuffers, type EditorHandle, type DocTab } from '../ide/EditorPane';
+import { readSource } from '../core/sources';
 import { FileTree } from '../ide/FileTree';
 import { GitPanel } from '../ide/GitPanel';
 import { ConsoleDock } from '../ide/ConsoleDock';
@@ -55,6 +59,10 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
   const [dirtyCount, setDirtyCount] = useState(0);
   const [entrySrc, setEntrySrc] = useState('');
   const [entryFile, setEntryFile] = useState('');
+  /* 右侧面板实时内容：全部来自编辑器内存缓冲区，绝不回头读磁盘。
+   * entrySrc/entryFile 只是"编辑器还没打开任何文件"时的兜底（工程刚打开那一瞬间）。 */
+  const [panelFile, setPanelFile] = useState('');
+  const [panelSrc, setPanelSrc] = useState('');
   const [execMode, setExecMode] = useState<'编译执行' | '解释执行'>('编译执行');
   const [activeName, setActiveName] = useState('');
   const [activePath, setActivePath] = useState<string | null>(null);
@@ -144,13 +152,13 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
   /* 工程元信息 + 入口文件内容（大纲用） */
   const reloadEntry = useCallback(async (): Promise<void> => {
     try {
-      const raw = await api.fsRead(projectDir + '/project.json');
+      const raw = await readSource(projectDir + '/project.json');
       const m = JSON.parse(raw) as ProjectMeta;
       setMeta(m);
       document.title = `Float IDE — ${m.name}`;
       const ef = projectDir + '/' + (m.entry ?? 'main.cw');
       setEntryFile(ef);
-      try { setEntrySrc(await api.fsRead(ef)); } catch { setEntrySrc(''); }
+      try { setEntrySrc(await readSource(ef)); } catch { setEntrySrc(''); }
     } catch {
       // 没有 project.json 也照样能开（用户可能只是随手打开一个放脚本的文件夹）：
       // 入口优先用传进来的那个文件，其次找目录里第一个 .cw
@@ -167,7 +175,7 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
       document.title = `Float IDE — ${base}`;
       const ef = projectDir + '/' + entry;
       setEntryFile(ef);
-      try { setEntrySrc(await api.fsRead(ef)); } catch { setEntrySrc(''); }
+      try { setEntrySrc(await readSource(ef)); } catch { setEntrySrc(''); }
     }
   }, [projectDir, initialFile, pushLine]);
 
@@ -255,6 +263,34 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
     }
   }, [reloadEntry]);
 
+  /* 右侧面板的数据源同步：只认内存。
+   * 之前这里是一次性 api.fsRead 磁盘快照，用户改了代码大纲纹丝不动——
+   * 现在编辑器缓冲区一变（输入/切标签/外部覆盖）就把内存内容搬过来，
+   * 顺便把所有打开的文件（不只是当前这个）都灌进搜索索引：
+   * 搜索、跳转定义、重命名看到的同样是屏幕上的代码，哪怕还没存盘。 */
+  const indexedVerRef = useRef<Map<string, string>>(new Map());
+  const syncPanel = useCallback((): void => {
+    const ed = bus.current.editor;
+    const path = ed?.currentPath() ?? null;
+    if (!ed || !path) return;          // 没有活动文件：保留兜底显示
+    const src = ed.getValue(path);
+    if (src === null) return;
+    setPanelFile(path);
+    setPanelSrc(src);
+    const idx = indexRef.current;
+    if (!idx) return;
+    // 刷索引：内容没变就别重复 analyze（打字时 280ms 一刷，不防抖会卡）
+    let dirty = false;
+    for (const b of ed.allBuffers()) {
+      const seen = indexedVerRef.current.get(b.path);
+      if (seen === b.text) continue;
+      indexedVerRef.current.set(b.path, b.text);
+      idx.put(b.path, b.text);
+      dirty = true;
+    }
+    if (dirty) setIndexSize(idx.size);
+  }, []);
+
   /* 打开工程时先建一次索引（异步，不阻塞界面） */
   useEffect(() => {
     const idx = indexRef.current;
@@ -291,8 +327,71 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
       }
     };
     await walk(projectDir);
+    /* 磁盘读完之后，用**编辑器里打开着的缓冲区**覆盖同名文件。
+     * 顺序很关键：用户看到的是屏幕上的代码，跑的就必须是屏幕上的代码。
+     * 以前这里只有磁盘内容，文件没保存（或保存失败）时会去跑旧文件，
+     * 屏幕上写着 print("fang")、控制台却输出别的东西——那种"我写的代码没被执行"
+     * 是最伤信任的一类 bug，必须彻底断掉。 */
+    const norm = (x: string): string => x.replace(/\\/g, '/').replace(/\/+/g, '/').toLowerCase();
+    const canonical = new Map<string, string>();
+    for (const k of out.keys()) canonical.set(norm(k), k);
+    for (const [p, text] of openBuffers()) {
+      const k = norm(p);
+      const key = canonical.get(k) ?? p.replace(/\\/g, '/');
+      out.set(key, text);
+      canonical.set(k, key);
+    }
     return out;
   }, [projectDir]);
+
+  /* ── Rust 内核的交互式运行 ──
+   * ask 会让内核停下来、把提问交回来；用户答完把答案补进 runInputsRef 再跑一遍。
+   * 脚本对同样的输入是确定性的，所以重跑得到的就是同一条路径，VM 不用做"挂起/恢复"。
+   */
+  const runInputsRef = useRef<string[]>([]);
+  const rustRunRef = useRef<{
+    file: string; src: string; extra: Record<string, string>; alive: () => boolean;
+  } | null>(null);
+
+  const rustRunOnce = useCallback(async (): Promise<void> => {
+    const ctx = rustRunRef.current;
+    if (!ctx) return;
+    const r = await api.langRun(ctx.file, ctx.src, runInputsRef.current, ctx.extra);
+    if (!ctx.alive()) return;
+    setLines([]);
+    setRunProblems([]);
+    const out = r.output.split('\n');
+    // 挂起时最后一行是提问本身，下面会用「提问」行再显示一次，这里去掉避免重复
+    if (r.needInput !== null && r.needInput !== undefined && out.length && out[out.length - 1] === r.needInput) {
+      out.pop();
+    }
+    for (const line of out) {
+      if (line === '') continue;
+      // 调试输出的三档级别（\u{1} + 级别数字 + 空格 前缀）：报告=蓝、警告=黄、报错=红
+      if (line.startsWith('\u{1}1 ')) { pushLine({ kind: 'dbg-report', text: line.slice(3) }); continue; }
+      if (line.startsWith('\u{1}2 ')) { pushLine({ kind: 'dbg-warn', text: line.slice(3) }); continue; }
+      if (line.startsWith('\u{1}3 ')) { pushLine({ kind: 'dbg-error', text: line.slice(3) }); continue; }
+      pushLine({ kind: 'out', text: line });
+    }
+    if (r.needInput !== null && r.needInput !== undefined) {
+      setAskQ(r.needInput || '请回答');
+      setCtl('running');
+      return;
+    }
+    setAskQ(null);
+    rustRunRef.current = null;
+    if (r.reports.length > 0) {
+      setReports(r.reports.map((text) => ({ text, line: 0, ts: Date.now() })));
+      setTabRequest((t) => ({ tab: 'report', seq: t.seq + 1 }));
+    }
+    if (r.error) {
+      pushLine({ kind: 'err', text: r.error });
+      setRunProblems([{ severity: 'error', message: r.error, file: ctx.file, line: r.error_line, col: 1, from: 'run' }]);
+    } else {
+      pushLine({ kind: 'info', text: '运行结束' });
+    }
+    setCtl('done');
+  }, [pushLine, setAskQ, setCtl, setReports, setTabRequest, setLines, setRunProblems]);
 
   const startRun = useCallback(async (mode: 'run' | 'debug'): Promise<void> => {
     // 同步闸门：哪怕同一帧内被触发多次，也只有第一次能进来
@@ -321,6 +420,33 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
       setLines([]);
       setRunProblems([]);
       setReports([]);
+      // 新一轮运行：把上一轮没答完的提问清掉，别让旧提问接错人
+      setAskQ(null);
+      rustRunRef.current = null;
+
+      /* F5 走 Rust 内核，一套实现到底：class / try / import / ask 全在里面。
+       * ask 不再是"退回另一个引擎"的理由 —— 内核会停下来把提问交给界面，
+       * 拿到回答后补进 inputs 重跑（脚本是确定性的，重跑即是同一条路径）。 */
+      const entrySrc = sources.get(normEntry) ?? '';
+      const canNative = mode === 'run' && isTauri();
+      if (canNative) {
+        try {
+          rustRunRef.current = {
+            // 把当前所有打开的文件一起送过去：库文件改了还没存盘也能 import 到新内容
+            file: normEntry,
+            src: entrySrc,
+            extra: Object.fromEntries(sources),
+            alive
+          };
+          runInputsRef.current = [];
+          await rustRunOnce();
+          return;
+        } catch (e) {
+          pushLine({ kind: 'err', text: 'Rust 内核没起来：' + String(e) });
+          setCtl('done');
+          return;
+        }
+      }
       setExecMode(mode === 'debug' ? '解释执行' : '编译执行');
       const runner = new Runner(normEntry, {
         output: (l) => { if (alive()) pushLine(l); },
@@ -911,10 +1037,7 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
         <button className={`tool ${dockOpen && dockTab === 'terminal' ? 'on' : ''}`} onClick={() => { setDockOpen(true); setDockTab('terminal'); }} title="终端（Ctrl+`）"><IconTerminal size={15} /></button>
         <button className="tool" onClick={openSearch} title="在文件中查找（Ctrl+Shift+F）"><IconSearch size={15} /></button>
         <button className="tool book" onClick={() => openTutorial()} title="学习中心（Ctrl+Shift+H）"><IconBook size={15} /></button>
-        <button className="tool" onClick={() => openPluginsPage()} title="插件管理">
-          <IconPlug size={15} />
-          {pluginCommands.length > 0 && <span className="tool-badge">{pluginTick > 0 ? pluginCommands.length : 0}</span>}
-        </button>
+        <button className="tool" onClick={() => openPluginsPage()} title="插件管理"><IconPlug size={15} /></button>
         <button className="tool" onClick={() => openMcpPage()} title="MCP 服务器"><IconServer size={15} /></button>
         <button className="tool" onClick={() => openAppearancePage()} title="外观与背景"><IconImage size={15} /></button>
         <button className="tool" onClick={() => openSettingsPage()} title="偏好设置（Ctrl+Alt+S）"><IconSettings size={15} /></button>
@@ -957,15 +1080,17 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
               onActiveFile={(name) => {
                 setActiveName(name);
                 setActivePath(bus.current.editor?.currentPath() ?? null);
+                syncPanel();
               }}
+              onBuffersChange={syncPanel}
             />
           </div>
         </div>
         <Splitter dir="x" title="拖动调整大纲宽度" onDrag={(d) => setPanel('rightW', Math.min(520, Math.max(190, layout.rightW - d)))} />
         <SidePanels
-          source={entrySrc}
-          file={entryFile}
-          onReveal={(line) => bus.current.editor?.revealLine(entryFile, line)}
+          source={panelSrc || entrySrc}
+          file={panelFile || entryFile}
+          onReveal={(line) => bus.current.editor?.revealLine(panelFile || entryFile, line)}
           vars={vars}
           running={running}
           width={layout.rightW}
@@ -985,8 +1110,14 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
           lines={lines}
           askQuestion={askQ}
           onAnswer={(a) => {
-            const r = runnerRef.current;
             setAskQ(null);
+            // Rust 内核：答案补进 inputs 后从头重跑
+            if (rustRunRef.current) {
+              runInputsRef.current = [...runInputsRef.current, a];
+              void rustRunOnce();
+              return;
+            }
+            const r = runnerRef.current;
             pushLine({ kind: 'info', text: `> ${a}` });
             r?.resume(a);
           }}

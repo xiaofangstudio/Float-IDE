@@ -11,6 +11,8 @@ export type RunResult = {
   rep: string[];
   err: string[];
   info: string[];
+  /** `调试 报告/警告/报错` 的内容（带级别标签） */
+  dbg: string[];
   vars: VarsSnapshot;
   state: string;
 };
@@ -29,6 +31,7 @@ export async function run(src: string, opts: Opts = {}): Promise<RunResult> {
   const rep: string[] = [];
   const err: string[] = [];
   const info: string[] = [];
+  const dbg: string[] = [];
   const answers = [...(opts.answers ?? [])];
 
   let runner: Runner | null = null;
@@ -38,6 +41,9 @@ export async function run(src: string, opts: Opts = {}): Promise<RunResult> {
   const record = (l: OutLine): void => {
     if (l.kind === 'out') out.push(l.text);
     else if (l.kind === 'err') err.push(l.text);
+    else if (l.kind === 'dbg-report') dbg.push(`[报告] ${l.text}`);
+    else if (l.kind === 'dbg-warn') dbg.push(`[警告] ${l.text}`);
+    else if (l.kind === 'dbg-error') dbg.push(`[报错] ${l.text}`);
     else info.push(l.text);
   };
 
@@ -67,7 +73,7 @@ export async function run(src: string, opts: Opts = {}): Promise<RunResult> {
     out,
     rep,
     err,
-    info, vars: r.varsSnapshot(), state: r.state };
+    info, dbg, vars: r.varsSnapshot(), state: r.state };
 }
 
 /** 调试模式测试：记录每次暂停的行号，按 actions 逐步推进 */

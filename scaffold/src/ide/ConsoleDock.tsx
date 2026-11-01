@@ -69,20 +69,25 @@ export function ConsoleDock({ lines, askQuestion, onAnswer, running, stateText, 
         <div className="console-wrap">
           <div className="console-list" ref={listRef}>
             {lines.length === 0 && <div className="muted" style={{ padding: '6px 2px' }}>输出会显示在这里。F5 运行，F6 调试（支持断点与单步）。</div>}
-            {lines.map((l, i) => (
+            {lines.map((l, i) => {
               // 脚本自己的输出不打标签，看着就像真控制台；
+              // 调试输出三档带级别标签（报告/警告/报错，蓝/黄/红）；
               // 只有"错误 / 信息"这种系统消息才加前缀，免得满屏都是「输出」两个字。
-              l.kind === 'out' ? (
-                <div key={i} className="console-line out">
-                  <span style={{ whiteSpace: 'pre-wrap' }}>{l.text}</span>
-                </div>
-              ) : (
+              const dbgTag = l.kind === 'dbg-report' ? '报告' : l.kind === 'dbg-warn' ? '警告' : l.kind === 'dbg-error' ? '报错' : null;
+              if (l.kind === 'out') {
+                return (
+                  <div key={i} className="console-line out">
+                    <span style={{ whiteSpace: 'pre-wrap' }}>{l.text}</span>
+                  </div>
+                );
+              }
+              return (
                 <div key={i} className={`console-line ${l.kind}`}>
-                  <span className="console-tag">{l.kind === 'err' ? '错误' : '信息'}</span>
+                  <span className="console-tag">{dbgTag ?? (l.kind === 'err' ? '错误' : '信息')}</span>
                   <span style={{ whiteSpace: 'pre-wrap' }}>{l.text}</span>
                 </div>
-              )
-            ))}
+              );
+            })}
             {askQuestion !== null && (
               <div className="console-line info ask-row">
                 <span className="console-tag">提问</span>

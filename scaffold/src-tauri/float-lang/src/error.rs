@@ -45,7 +45,9 @@ impl FloatError {
 
 impl fmt::Display for FloatError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.span.line > 0 {
+        // 运行时错误在 err_at 里就已经带上「第 N 行：」了，这里不能再加一遍
+        let already = self.message.starts_with("第 ") && self.message.contains(" 行：");
+        if self.span.line > 0 && !already {
             write!(f, "第 {} 行：{}", self.span.line, self.message)
         } else {
             write!(f, "{}", self.message)
