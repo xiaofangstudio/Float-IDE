@@ -1319,6 +1319,21 @@ impl Compiler {
                     let idx = self.intern(name);
                     self.emit(Op::CallMethod(idx, args.len() as u8));
                 } else {
+                    /* C(...) 省略 new 也能实例化：类在解析阶段降级成了 __new_类_，
+                     * 所以名字查不到时先看有没有对应的构造函数（和 TS 引擎一致）。 */
+                    if let ExprKind::Var(name) = &callee.kind {
+                        if self.lookup(name).is_none() {
+                            let ctor: Rc<str> = Rc::from(format!("__new_{}_", name).as_str());
+                            if let Some(slot) = self.lookup(&ctor) {
+                                self.load(slot);
+                                for a in args {
+                                    self.expr(a);
+                                }
+                                self.emit(Op::Call(args.len() as u8));
+                                return;
+                            }
+                        }
+                    }
                     // f(args)：f 是全局变量时走 CallGlobal（省一条 GetGlobal，参数也不用挪位）
                     if let ExprKind::Var(name) = &callee.kind {
                         if let Some(Slot::Global(idx)) = self.lookup(name) {

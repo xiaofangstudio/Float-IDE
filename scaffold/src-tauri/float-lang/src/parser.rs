@@ -291,13 +291,20 @@ impl<'a> ExprParser<'a> {
             }
             let args = if self.at("(") { self.parse_args()? } else { Vec::new() };
             let span = Span::new(self.file, t.line, t.col, name_tok.end_col);
-            return Ok(Expr::new(ExprKind::New { class: Rc::from(name_tok.text.as_str()), args }, span));
+            let e = Expr::new(ExprKind::New { class: Rc::from(name_tok.text.as_str()), args }, span);
+            // new C().get() / new C()[0]：实例化之后还能继续接后缀
+            return self.parse_postfix_from(e);
         }
         self.parse_postfix()
     }
 
     fn parse_postfix(&mut self) -> EResult<Expr> {
-        let mut e = self.parse_primary()?;
+        let e = self.parse_primary()?;
+        self.parse_postfix_from(e)
+    }
+
+    /// 从一个已有的表达式继续吃后缀（.成员 / 调用 / 下标）
+    fn parse_postfix_from(&mut self, mut e: Expr) -> EResult<Expr> {
         loop {
             let t = match self.cur() {
                 Some(t) => t.clone(),

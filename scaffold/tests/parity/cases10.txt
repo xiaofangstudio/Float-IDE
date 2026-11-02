@@ -69,3 +69,28 @@ elif k == 2
     print("two")
 else
     print("other")
+### for 循环变量活到循环外（和 Python 一致）
+for i in range(3)
+    print(i)
+print(i)
+### 外层同名变量被循环复用
+int i = 99
+for i in range(2)
+    print(i)
+print(i)
+### for in 变量活到循环外
+for x in [7, 8]
+    print(x)
+print(x)
+### 类可以省略 new，也能链式调用
+class C
+    int v = 5
+    fn get()
+        return v
+print(C().get())
+print(new C().get())
+### 函数局部不外泄：读要报错（两边都报错算一致）
+fn f()
+    int local = 1
+f()
+print(local)

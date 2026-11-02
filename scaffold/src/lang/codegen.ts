@@ -864,31 +864,50 @@ ${body}
       }
 
       case 'forRange': {
-        const c2: Ctx = { ...ctx, inLoop: true, locals: new Set([...ctx.locals, s.varName]) };
+        /* 顶层脚本的变量都存在 $.v 里（没有 JS 局部变量），
+         * 所以顶层不能把循环变量当"局部名字"用，否则循环体里读 i 会变成裸变量。 */
+        const c2: Ctx = {
+          ...ctx, inLoop: true,
+          locals: ctx.top ? ctx.locals : new Set([...ctx.locals, s.varName])
+        };
         const from = s.from ? genExpr(s.from, ctx) : '0';
         const to = genExpr(s.to, ctx);
         const step = s.step ? genExpr(s.step, ctx) : '1';
         const cmp = s.inclusive
           ? '(__st > 0 ? __i < __end + 1e-9 : __i > __end - 1e-9)'
           : '(__st > 0 ? __i < __end : __i > __end)';
+        /* 循环变量必须活到循环外（Python / Rust 内核都这样），
+         * 所以不能在这里 `let` 一个新的：顶层写进 $.v，函数内写进函数开头声明的那个局部变量。 */
+        const setV = ctx.top || !ctx.locals.has(s.varName)
+          ? `$.v[${JSON.stringify(s.varName)}] = __i;`
+          : `${s.varName} = __i;`;
         return `${ln}{
   const __st = O.num(${step}, 'for 步长') || 1;
   const __end = O.num(${to}, 'for 终点');
   for (let __i = O.num(${from}, 'for 起点'); ${cmp}; __i += __st) {
     $.tick();
-    let ${s.varName} = __i;
+    ${setV}
 ${genBlock(s.body, c2)}  }
 }\n`;
       }
 
       case 'forIn': {
         const names = s.valueName ? [s.varName, s.valueName] : [s.varName];
-        const c2: Ctx = { ...ctx, inLoop: true, locals: new Set([...ctx.locals, ...names]) };
+        const c2: Ctx = {
+          ...ctx, inLoop: true,
+          locals: ctx.top ? ctx.locals : new Set([...ctx.locals, ...names])
+        };
         const iter = genExpr(s.iter, ctx);
+        const setK = ctx.top || !ctx.locals.has(s.varName)
+          ? `$.v[${JSON.stringify(s.varName)}] =`
+          : `${s.varName} =`;
         if (s.valueName) {
-          return `${ln}for (const __p of O.pairs(${iter})) {\n$.tick();\nlet ${s.varName} = __p[0], ${s.valueName} = __p[1];\n${genBlock(s.body, c2)}}\n`;
+          const setV = ctx.top || !ctx.locals.has(s.valueName)
+            ? `$.v[${JSON.stringify(s.valueName)}] =`
+            : `${s.valueName} =`;
+          return `${ln}for (const __p of O.pairs(${iter})) {\n$.tick();\n${setK} __p[0]; ${setV} __p[1];\n${genBlock(s.body, c2)}}\n`;
         }
-        return `${ln}for (const __x of O.each(${iter})) {\n$.tick();\nlet ${s.varName} = __x;\n${genBlock(s.body, c2)}}\n`;
+        return `${ln}for (const __x of O.each(${iter})) {\n$.tick();\n${setK} __x;\n${genBlock(s.body, c2)}}\n`;
       }
 
       case 'waitUntil': {

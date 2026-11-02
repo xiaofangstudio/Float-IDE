@@ -204,6 +204,8 @@ pub struct RunOutcome {
 pub struct Vm {
     chunk: Chunk,
     globals: Vec<Value>,
+    /// 全局槽有没有被真正赋过值：读一个从没声明/赋值的名字要报错，而不是悄悄给 null
+    gdefined: Vec<bool>,
     stack: OpStack,
     frames: Vec<Frame>,
     iters: Vec<IterState>,
@@ -240,6 +242,7 @@ impl Vm {
         Vm {
             chunk,
             globals: vec![Value::Null; n],
+            gdefined: vec![false; n],
             stack: OpStack::new(),
             frames: Vec::new(),
             iters: Vec::new(),
@@ -435,6 +438,7 @@ impl Vm {
 
     fn run_inner(&mut self) -> Result<RunOutcome, FloatError> {
         self.globals = vec![Value::Null; self.chunk.n_globals as usize];
+        self.gdefined = vec![false; self.chunk.n_globals as usize];
         self.stack.sp = STACK_PAD;
         self.frames.clear();
         self.iters.clear();
@@ -591,6 +595,10 @@ impl Vm {
                 }
                 Op::GetGlobal(i) => {
                     let idx = i as usize;
+                    if idx < glen && !self.gdefined[idx] {
+                        let name = self.chunk.global_names.get(idx).cloned().unwrap_or_else(|| Rc::from("?"));
+                        return Err(self.err_at(ip, format!("变量「{}」没有定义（先声明或赋值）", name)));
+                    }
                     let v = if idx < glen { (*gptr.add(idx)).clone() } else { Value::Null };
                     std::ptr::write(sptr.add(sp), v);
                     sp += 1;
@@ -600,6 +608,7 @@ impl Vm {
                     let v = take(sptr, sp);
                     if (i as usize) < glen {
                         *gptr.add(i as usize) = v;
+                        self.gdefined[i as usize] = true;
                     }
                 }
                 Op::Add | Op::Sub | Op::Mul | Op::Div | Op::IDiv | Op::Mod | Op::Pow => {
@@ -1701,6 +1710,7 @@ impl Vm {
                             if g {
                                 if var < glen {
                                     *gptr.add(var) = v;
+                                    self.gdefined[var] = true;
                                 }
                             } else {
                                 let idx = base + var;

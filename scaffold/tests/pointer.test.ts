@@ -172,6 +172,30 @@ for (const c of errCases) {
   }
 }
 
+/* ── 作用域：变量 / 列表 / 字典在块、函数、类里的可见性与可改性 ──
+ * 这些和 Rust 内核（tests/scope.rs）逐条对齐，改任何一边都会红。 */
+{
+  const cases: [string, string][] = [
+    ['for 变量活到循环外', 'for i in range(3)\n    print(i)\nprint(i)', '0|1|2|2'],
+    ['函数里的 for 变量也活到循环外', 'fn f()\n    for i in range(3)\n        print(i)\n    return i\nprint(f())', '0|1|2|2'],
+    ['外层同名变量被循环复用', 'int i = 99\nfor i in range(2)\n    print(i)\nprint(i)', '0|1|1'],
+    ['for in 变量活到循环外', 'for x in [7, 8]\n    print(x)\nprint(x)', '7|8|8'],
+    ['if / while 块内声明块外可见', 'if (true)\n    int a = 1\nprint(a)', '1'],
+    ['全局读写', 'int g = 1\nfn f()\n    g = 9\nf()\nprint(g)', '9'],
+    ['局部遮蔽全局', 'int g = 1\nfn f()\n    int g = 2\n    return g\nprint(f())\nprint(g)', '2|1'],
+    ['列表按引用传，重新赋值不影响外面', 'fn addone(list xs)\n    xs.push(9)\nlist a = [1]\naddone(a)\nprint(a)', '[1, 9]'],
+    ['类可以省略 new，也能链式调用', 'class C\n    int v = 5\n    fn get()\n        return v\nprint(C().get())\nprint(new C().get())', '5|5'],
+  ];
+  for (const [name, src, want] of cases) {
+    const a = await run(src);
+    ok(`作用域：${name}`, a.err === null && a.out.join('|') === want, `${a.err ?? ''} 实际 ${a.out.join('|')}`);
+  }
+  const leak = await run('fn f()\n    int local = 1\nf()\nprint(local)');
+  ok('作用域：函数局部不外泄（读要报错）', leak.err !== null && /没有定义/.test(leak.err), leak.err ?? '没报错');
+  const dictArg = await run('fn bump(dict d)\n    d["hp"] = d["hp"] + 1\ndict a = {"hp": 1}\nbump(a)\nprint(a["hp"])');
+  ok('作用域：字典传进函数能改', dictArg.out.join('|') === '2', dictArg.err ?? dictArg.out.join('|'));
+}
+
 console.log(`\n通过 ${pass} 项，失败 ${fail} 项`);
 if (fail) process.exit(1);
 console.log('全部通过');

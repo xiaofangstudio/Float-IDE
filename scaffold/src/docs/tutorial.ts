@@ -313,6 +313,23 @@ export const CHAPTERS: Chapter[] = [
           code: 'repeat(3)\n    print("滴答")\n\n-- forever 是无限循环，靠 out 跳出\nint n = 0\nforever\n    n++\n    if (n >= 3)\n        out\nprint(n)',
           out: '滴答\n滴答\n滴答\n3'
         }]
+      },
+      {
+        id: 'scope-rules',
+        title: '作用域：什么活到块外，什么出不来',
+        lead: '规则只有三条，记住就不容易踩坑。',
+        paras: [
+          '**1. 块里声明的变量，块外看得见**：if / while / for 里 `int x = …` 之后，外面可以直接用。',
+          '**2. for 的循环变量活到循环外**，值等于最后一次循环的那个数（和 Python 一样）。',
+          '**3. 函数里声明的变量出不了函数**：外面读它会报「变量没有定义」——这是好事，能挡住打错名字。'
+        ],
+        codes: [{
+          code: 'for i in range(3)\n    print(i)\nprint(i)   -- 2：循环变量活到循环外\n\nif (true)\n    int a = 1\nprint(a)      -- 1：块内声明块外可见',
+          out: '0\n1\n2\n2\n1'
+        }],
+        tips: [
+          { kind: 'note', text: '列表、字典是按引用传的：函数里改内容（xs.push / d["k"] = …）调用方看得见；但函数里写 xs = … 只是换了个名字指向，外面不变。' }
+        ]
       }
     ]
   },

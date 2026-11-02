@@ -134,7 +134,6 @@ try
     print(fetch("https://bad.example/x"))
 catch e
     print("接住了：" + e)
-end
 "#,
     );
     assert!(o.contains("接住了："), "网络错误应能被 catch：{}", o);

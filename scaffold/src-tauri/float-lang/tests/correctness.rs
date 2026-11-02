@@ -238,10 +238,11 @@ fn 自增作用在浮点上() {
 
 #[test]
 fn 函数内局部变量不外泄() {
-    assert_out(
-        "function f()\n    int hidden = 42\n    return hidden\nprint(f())\nprint(hidden)\n",
-        &["42", "null"],
-    );
+    /* 以前这里读出去是 null（悄悄放过去）；现在和 TS 引擎一致：
+     * 没这个变量就报「变量「hidden」没有定义」，不拿 null 糊弄人。 */
+    let e = run_text("function f()\n    int hidden = 42\n    return hidden\nprint(f())\nprint(hidden)\n")
+        .expect_err("读未定义变量应该报错");
+    assert!(e.message.contains("没有定义"), "实际：{}", e.message);
 }
 
 #[test]

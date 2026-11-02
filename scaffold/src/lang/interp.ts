@@ -779,7 +779,10 @@ export class Runner {
         const step = s.step ? toNum(yield* this.evalExpr(s.step, env)) : 1;
         if (step === null || step === 0) throw new FloatError('for 的步长必须是非 0 数字', s);
 
-        const loopEnv = new Env(env);
+        /* 循环变量和循环体里声明的变量都留在当前作用域：
+         * `for i in range(3)` 跑完 print(i) 应该是 2，不是「没有定义」。
+         * 这和 if / while 的现有语义、以及 Rust 内核完全一致。 */
+        const loopEnv = env;
         const end = s.inclusive ? to + (step > 0 ? 1e-9 : -1e-9) : to;
         let guard = 0;
         for (let v = from; step > 0 ? v < end : v > end; v += step) {
@@ -814,7 +817,7 @@ export class Runner {
         }
         if (pairs.length > 1_000_000) throw new FloatError('要遍历的集合超过 100 万个元素', s);
 
-        const loopEnv = new Env(env);
+        const loopEnv = env;
         for (const [k, v] of pairs) {
           if (s.valueName) {
             loopEnv.define(s.varName, k);
