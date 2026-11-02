@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { TUTORIAL_STATS } from '../docs/tutorial';
 import { api } from '../core/tauri';
 import { Runner } from '../lang/interp';
 import { TutorialPage } from '../docs/TutorialPage';
@@ -60,7 +61,7 @@ function TplThumb({ tpl, active }: { tpl: Template; active: boolean }) {
   return (
     <svg width="150" height="80" viewBox="0 0 150 80">
       <rect x="24" y="16" width="102" height="48" rx="4" fill="none" stroke="#1b3260" strokeWidth="1.5" />
-      <text x="75" y="38" fontSize={13} fill={soft} textAnchor="middle" fontWeight={600}>main.cw</text>
+      <text x="75" y="38" fontSize={13} fill={soft} textAnchor="middle" fontWeight={600}>main.co</text>
       <line x1="42" y1="52" x2="108" y2="52" stroke="#1b3260" strokeWidth="2" />
       <line x1="42" y1="52" x2="82" y2="52" stroke={line} strokeWidth="2" />
     </svg>
@@ -148,7 +149,7 @@ function NewProjectDialog({ preset, onClose, onOpenProject }: {
 async function runOnce(code: string): Promise<{ out: string[]; error: string | null }> {
   const out: string[] = [];
   let error: string | null = null;
-  const file = '__tutorial__.cw';
+  const file = '__tutorial__.co';
   const sources = new Map<string, string>([[file, code]]);
   await new Promise<void>((done) => {
     let settled = false;
@@ -191,7 +192,7 @@ function LearnPage({ onClose }: { onClose: () => void }) {
 
 export function Welcome({ onOpenProject, onOpenFile }: {
   onOpenProject: (dir: string) => void;
-  /** 直接打开一个 .cw 文件（会连带打开它所在的文件夹） */
+  /** 直接打开一个 .co 文件（会连带打开它所在的文件夹） */
   onOpenFile?: (file: string) => void;
 }) {
   const [recents, setRecents] = useState<RecentItem[]>([]);
@@ -220,9 +221,9 @@ export function Welcome({ onOpenProject, onOpenFile }: {
     onOpenProject(dir);
   };
 
-  /** 直接打开单个 .cw 文件：对话框里能看见脚本文件，不再只有文件夹 */
+  /** 直接打开单个 .co 文件：对话框里能看见脚本文件，不再只有文件夹 */
   const openSingleFile = async (): Promise<void> => {
-    const f = await api.pickOpenFile('打开 CW Script 文件', ['cw']);
+    const f = await api.pickOpenFile('打开文件（Copper / Markdown / JSON / TXT）', ['co', 'cw', 'md', 'json', 'txt', 'in']);
     if (!f) return;
     if (onOpenFile) onOpenFile(f);
     else onOpenProject(f.replace(/[\\/][^\\/]*$/, ''));
@@ -255,7 +256,7 @@ export function Welcome({ onOpenProject, onOpenFile }: {
       if (e.code === 'F1') { e.preventDefault(); setShortcuts(true); return; }
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
       if (mod && e.code === 'KeyN') { e.preventDefault(); setNewTpl(TEMPLATES[1]); return; }
-      if (mod && e.code === 'KeyO') { e.preventDefault(); if (e.shiftKey) void importZip(); else void openExisting(); return; }
+      if (mod && e.code === 'KeyO') { e.preventDefault(); if (e.shiftKey) void importZip(); else void openSingleFile(); return; }
       if (mod && e.altKey && e.code === 'KeyS') { e.preventDefault(); setSettings(true); return; }
     };
     window.addEventListener('keydown', onKey);
@@ -267,8 +268,7 @@ export function Welcome({ onOpenProject, onOpenFile }: {
       label: '文件',
       items: [
         { label: '新建工程', hint: 'Ctrl+N', run: () => setNewTpl(TEMPLATES[1]) },
-        { label: '打开工程（文件夹）', hint: 'Ctrl+O', run: () => void openExisting() },
-        { label: '打开文件…', hint: '', run: () => void openSingleFile() },
+        { label: '打开文件（.co / .md / .json / .txt）', hint: 'Ctrl+O', run: () => void openSingleFile() },
         { label: '导入工程包', hint: 'Ctrl+Shift+O', run: () => void importZip() },
         { sep: true, label: 's1' },
         { label: '退出', hint: 'Alt+F4', run: () => { void import('@tauri-apps/api/window').then((m) => m.getCurrentWindow().close()).catch(() => {}); } }
@@ -285,7 +285,7 @@ export function Welcome({ onOpenProject, onOpenFile }: {
       label: '帮助',
       items: [
         { label: '快捷键一览', hint: 'F1', run: () => setShortcuts(true) },
-        { label: '学习中心（CW Script 教程）', hint: 'Ctrl+Shift+H', run: () => setLearn(true) },
+        { label: '学习中心（Copper 教程）', hint: 'Ctrl+Shift+H', run: () => setLearn(true) },
         { label: '关于 Float IDE', run: () => setLearn(true) }
       ]
     }
@@ -293,10 +293,9 @@ export function Welcome({ onOpenProject, onOpenFile }: {
 
   const cards = [
     { icon: <IconPlus size={18} />, title: '新建工程', desc: '从模板起步', run: () => setNewTpl(TEMPLATES[1]) },
-    { icon: <IconFolder size={18} />, title: '打开工程', desc: '选择已有文件夹', run: () => void openExisting() },
-    { icon: <IconFile size={18} />, title: '打开 .cw 文件', desc: '直接挑一个脚本打开', run: () => void openSingleFile() },
+    { icon: <IconFile size={18} />, title: '打开文件', desc: '.co / .md / .json / .txt，连所在文件夹一起打开', run: () => void openSingleFile() },
     { icon: <IconImport size={18} />, title: '导入工程包', desc: '.float 一键搬入', run: () => void importZip() },
-    { icon: <IconBook size={18} />, title: '学习中心', desc: '13 章 · 51 节 · 可运行示例', run: () => setLearn(true) },
+    { icon: <IconBook size={18} />, title: '学习中心', desc: `${TUTORIAL_STATS.chapters} 章 · ${TUTORIAL_STATS.sections} 节 · 可运行示例`, run: () => setLearn(true) },
     { icon: <IconImage size={18} />, title: '外观背景', desc: '换一张自己的图', run: () => setShowAppearance(true) },
     { icon: <IconSearch size={18} />, title: '最近工程', desc: `${recents.length} 个记录`, run: () => { if (recents[0]) onOpenProject(recents[0].path); else setNewTpl(TEMPLATES[0]); } }
   ];
@@ -316,7 +315,7 @@ export function Welcome({ onOpenProject, onOpenFile }: {
           <div className="wc-acts">
             <button className="wc-act" onClick={() => setNewTpl(TEMPLATES[1])}><IconPlus size={15} /> 新建工程…</button>
             <button className="wc-act" onClick={() => void openExisting()}><IconFolder size={15} /> 打开文件夹…</button>
-            <button className="wc-act" onClick={() => void openSingleFile()}><IconFile size={15} /> 打开 .cw 文件…</button>
+            <button className="wc-act" onClick={() => void openSingleFile()}><IconFile size={15} /> 打开文件…</button>
             <button className="wc-act" onClick={() => void importZip()}><IconImport size={15} /> 导入工程包…</button>
           </div>
 
@@ -379,7 +378,7 @@ export function Welcome({ onOpenProject, onOpenFile }: {
       <div className="wc-foot">
         <span>v0.6.0 · 小方工作室 · MIT</span>
         <span className="grow" />
-        <span className="muted">CW Script</span>
+        <span className="muted">Copper</span>
       </div>
 
       {newTpl && <NewProjectDialog preset={newTpl} onClose={() => setNewTpl(null)} onOpenProject={onOpenProject} />}

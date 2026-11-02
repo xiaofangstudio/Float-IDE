@@ -1716,7 +1716,7 @@ input:focus, .sp-input:focus, .prompt-input:focus, .rename-input:focus {
 /* 文件树 */
 .fi { display: inline-flex; align-items: center; flex: none; }
 .fi.dir { color: #6b8fae; }
-.fi.cw { color: #1567c6; }
+.fi.co, .fi.cw { color: #1567c6; }
 .fi.json { color: #9a6b00; }
 .fi.md { color: #6e7f92; }
 .fi.other { color: var(--t3); }
@@ -1733,7 +1733,7 @@ input:focus, .sp-input:focus, .prompt-input:focus, .rename-input:focus {
 .outline-item.vr .outline-mark { color: #6e7f92; }
 
 [data-theme='dark'] .fi.dir { color: #7d9fbc; }
-[data-theme='dark'] .fi.cw { color: #6fb6ff; }
+[data-theme='dark'] .fi.co, [data-theme='dark'] .fi.cw { color: #6fb6ff; }
 [data-theme='dark'] .fi.json { color: #d9a441; }
 [data-theme='dark'] .fi.md { color: #8b9bad; }
 [data-theme='dark'] .outline-item .outline-mark.cls,
@@ -2109,4 +2109,48 @@ html, body, #root {
   min-width: 0;
   min-height: 0;
   overflow: auto;
+}
+
+/* ── 关于 Float IDE / Copper ─────────────────────────────── */
+.about-body { display: flex; flex-direction: column; gap: 16px; max-width: 760px; }
+.about-body section { border-bottom: 1px solid var(--line); padding-bottom: 14px; }
+.about-body section:last-child { border-bottom: none; padding-bottom: 0; }
+.about-body h4 { margin: 0 0 8px; font-size: 12.5px; color: var(--accent); letter-spacing: .5px; }
+.about-body p { margin: 0 0 8px; font-size: 13px; line-height: 1.75; color: var(--txt2, var(--txt)); }
+.about-body code {
+  font-family: var(--mono, ui-monospace, Consolas, monospace);
+  font-size: 12px; padding: 1px 5px; border-radius: 4px;
+  background: var(--s3, rgba(0,0,0,.05)); color: var(--txt);
+}
+.about-hero { display: flex; align-items: center; gap: 16px; border-bottom: 1px solid var(--line); padding-bottom: 16px; }
+.about-hero h3 { margin: 0 0 4px; font-size: 19px; font-weight: 700; letter-spacing: .2px; }
+.about-sub { font-size: 12px; color: var(--txt2, var(--muted)); line-height: 1.6; }
+.about-log { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.about-log li { display: flex; gap: 10px; align-items: flex-start; font-size: 12.5px; line-height: 1.65; color: var(--txt2, var(--txt)); }
+.about-ver {
+  flex: none; min-width: 46px; text-align: center; font-size: 11.5px; font-weight: 650;
+  padding: 1px 6px; border-radius: 4px; color: var(--accent);
+  background: var(--accent-weak, rgba(18,100,184,.1)); border: 1px solid var(--line);
+}
+.about-list { margin: 0 0 8px; padding-left: 18px; font-size: 12.5px; line-height: 1.75; color: var(--txt2, var(--txt)); }
+.about-list li { margin-bottom: 4px; }
+.about-list b, .about-body p b { color: var(--txt); font-weight: 650; }
+
+/* Copper 的 logo：吉祥物廿七，圆角与 Float IDE 的 Logo 组件完全一致（76 * 0.225） */
+.about-brand { display: flex; align-items: center; gap: 14px; margin: 4px 0 12px; }
+.about-brand h3 { margin: 0 0 3px; font-size: 17px; font-weight: 700; letter-spacing: .2px; }
+.about-logo {
+  width: 76px; height: 76px; flex: none;
+  border-radius: 17px;               /* 图里已经烘了超椭圆，这里再兜一层，和 Logo 同规格 */
+  overflow: hidden; user-select: none;
+}
+.about-logo img { width: 100%; height: 100%; display: block; object-fit: cover; }
+.about-assoc { font-size: 12px; color: var(--txt3, var(--muted)); }
+.about-assoc.on { color: var(--ok, #1f8f4e); }
+
+/* 文件树里的 .co：用 Copper 的图标（廿七），和资源管理器里一致 */
+.fi-img {
+  width: 13px; height: 13px; flex: none;
+  border-radius: 3.5px; object-fit: cover;
+  display: block;
 }

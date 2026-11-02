@@ -19,7 +19,8 @@ const MAX_IMPORT_DEPTH = 100;
 import {
   cloneVal, collectFields, deepEq, dict, findMethod, fmtVal, instance, isDict, isInstance,
   isList, toNum, toStr, truthy, typeName, ThrownValue,
-  type ClassDef, type FuncDef, type Instance, type Val, isPtr } from './values';
+  aliasPtr, cellPtr, shiftPtr,
+  type ClassDef, type FuncDef, type Instance, type PtrVal, type Val, isPtr } from './values';
 
 /* 语言核心不该绑死 DOM：浏览器里是 window，Node（测试 / 以后可能的 CLI）里退到 globalThis。
  * 这样同一份运行时在任何宿主都能跑，不需要在测试里硬塞 window 桩。 */
@@ -79,6 +80,8 @@ class StopSignal extends Error {
 class Env {
   vars = new Map<string, Val>();
   selfObj: Instance | null = null;
+  /** 这个作用域还活着吗（函数返回后置 false，用来抓悬空指针） */
+  alive = true;
 
   constructor(public parent: Env | null, public label = 'local') {
     if (parent) this.selfObj = parent.selfObj;
@@ -431,8 +434,10 @@ export class Runner {
       }
 
       this.steps++;
-      if (this.steps > 2_000_000) {
-        this.fail(new FloatError('执行步数超过 200 万，脚本可能陷入死循环（用 out / break / stop 结束）'));
+      /* 5000 万步 ≈ 普通笔记本上十几秒的计算量：真死循环照样抓得住，
+       * 但"大数反复减取模""几百万次迭代"这类正经计算不会再被误杀。 */
+      if (this.steps > 50_000_000) {
+        this.fail(new FloatError('执行步数超过 5000 万，脚本可能陷入死循环（用 out / break / stop 结束）'));
         return;
       }
       this.lastNode = y.node;
@@ -465,16 +470,21 @@ export class Runner {
   private fail(e: unknown): void {
     // 编译通道的错误带自己的行号，转成统一的 FloatError
     if (e instanceof CodeRuntimeError) {
+      /* 运算符（除零、类型不符之类）是从纯函数里抛出来的，它不知道自己在第几行，
+       * 这里用运行时当前语句行补上——否则所有运算符错误都报「第 1 行」。 */
+      const line = e.line || this.crt?.ln || 1;
       e = new FloatError(e.message, {
         file: this.crt?.file ?? this.entryFile,
-        line: e.line || 1, col: 1, endLine: e.line || 1, endCol: 1
+        line, col: 1, endLine: line, endCol: 1
       }, e.frames);
     }
     // 没被 catch 住的 throw：把抛出来的值本身说清楚，别只报一句 "throw"
     if (e instanceof ThrownValue) {
+      // 编译通道没有 lastNode，行号同样回落到运行时当前行
+      const line = this.crt?.ln ?? this.lastNode?.line ?? 1;
       e = new FloatError(`没有被接住的 throw：${this.errMessageOf(e.value)}`, {
-        file: this.entryFile, line: this.lastNode?.line ?? 1, col: 1,
-        endLine: this.lastNode?.line ?? 1, endCol: 1
+        file: this.crt?.file ?? this.entryFile, line, col: 1,
+        endLine: line, endCol: 1
       });
     }
     const msg = e instanceof FloatError
@@ -492,7 +502,12 @@ export class Runner {
 
   private formatError(e: FloatError): string {
     const where = e.span ? `（${this.shortFile(e.span.file)} 第 ${e.span.line} 行）` : '';
-    const lines = [`出错${where}：${e.message}`];
+    /* 彩蛋：第 27 行报错，吉祥物廿七（三脚橘猫，正好三条腿）就在这行瘸了。
+     * 行号已经写在喵里，这里只留文件名，不重复报第二遍行号。 */
+    const head = e.span && e.span.line === 27
+      ? `喵～第 27 行瘸了…（${this.shortFile(e.span.file)}）：${e.message}`
+      : `出错${where}：${e.message}`;
+    const lines = [head];
     for (const f of e.frames) lines.push(`    ${f}`);
     return lines.join('\n');
   }
@@ -789,6 +804,9 @@ export class Runner {
         } else if (typeof iter === 'string') {
           if (s.valueName) throw new FloatError('for a, b in … 只能用在字典上', s);
           for (let k = 0; k < iter.length; k++) pairs.push([k, iter[k]]);
+        } else if (isPtr(iter)) {
+          if (s.valueName) throw new FloatError('for a, b in … 只能用在字典上', s);
+          for (let k = Math.max(0, iter.idx); k < iter.buf.length; k++) pairs.push([k, iter.buf[k]]);
         } else if (isDict(iter)) {
           for (const [k, v] of iter.map) pairs.push([k, v]);
         } else {
@@ -1040,7 +1058,7 @@ export class Runner {
       const b = getBuiltin(name);
       if (b) {
         const args = yield* this.evalArgs(e.args, env);
-        const v = this.callBuiltin(name, args, s);
+        const v = await this.callBuiltin(name, args, s);
         if (b.writes) this.globals.assign(b.writes, v);
         return v;
       }
@@ -1088,6 +1106,13 @@ export class Runner {
         return obj;
       }
       case 'un': {
+        // 取地址 / 解引用要按"表达式"处理（&xs[i] 需要先求 obj 和下标）
+        if (e.op === '&') return yield* this.addrOf(e.a, env, e);
+        if (e.op === '*') {
+          const v = yield* this.evalExpr(e.a, env);
+          if (!isPtr(v)) throw new FloatError(`* 只能解引用指针，得到 ${fmtVal(v)}（取地址用 &）`, e);
+          return this.ptrRead(v, e);
+        }
         const v = yield* this.evalExpr(e.a, env);
         if (e.op === '-') { const n = toNum(v); if (n === null) throw new FloatError(`一元 - 需要数字，得到 ${fmtVal(v)}`, e); return -n; }
         if (e.op === '+') { const n = toNum(v); if (n === null) throw new FloatError(`一元 + 需要数字，得到 ${fmtVal(v)}`, e); return n; }
@@ -1124,7 +1149,7 @@ export class Runner {
             return yield* this.callUser(init.fn, args, self, e, init.owner);
           }
           const b = getBuiltin(name);
-          if (b) return this.callBuiltin(name, args, e);
+          if (b) return await this.callBuiltin(name, args, e);
           // 方法内裸名调用本类方法
           if (env.selfObj) {
             const m = findMethod(env.selfObj.cls, name);
@@ -1181,10 +1206,32 @@ export class Runner {
 
     switch (e.op) {
       case '+':
+        if (isPtr(a)) {
+          const n = toNum(b);
+          if (n === null) throw new FloatError(`指针只能加上整数格数，得到 ${fmtVal(b)}`, e);
+          return shiftPtr(a, Math.trunc(n));
+        }
+        if (isPtr(b)) {
+          const n = toNum(a);
+          if (n === null) throw new FloatError(`指针只能加上整数格数，得到 ${fmtVal(a)}`, e);
+          return shiftPtr(b, Math.trunc(n));
+        }
         if (typeof a === 'string' || typeof b === 'string') return toStr(a) + toStr(b);
         if (isList(a) && isList(b)) return [...a, ...b];
         return this.numOr(a, '+', e) + this.numOr(b, '+', e);
-      case '-': return this.numOr(a, '-', e) - this.numOr(b, '-', e);
+      case '-': {
+        // 指针相减 = 中间隔了几格；指针减整数 = 往回挪
+        if (isPtr(a) && isPtr(b)) {
+          if (a.buf !== b.buf) throw new FloatError('两个指针不在同一块内存上，不能相减', e);
+          return a.idx - b.idx;
+        }
+        if (isPtr(a)) {
+          const n = toNum(b);
+          if (n === null) throw new FloatError(`指针只能减整数格数，得到 ${fmtVal(b)}`, e);
+          return shiftPtr(a, -Math.trunc(n));
+        }
+        return this.numOr(a, '-', e) - this.numOr(b, '-', e);
+      }
       case '*':
         if (typeof a === 'string' && typeof b === 'number') return a.repeat(Math.max(0, Math.trunc(b)));
         return this.numOr(a, '*', e) * this.numOr(b, '*', e);
@@ -1224,7 +1271,7 @@ export class Runner {
 
   private numOr(v: Val, op: string, e: Span | Expr): number {
     const n = toNum(v);
-    if (n === null) throw new FloatError(`运算符「${op}」需要数字，得到 ${fmtVal(v)}`, spanOf(e));
+    if (n === null) throw new FloatError(`「${op}」需要数字，得到 ${fmtVal(v)}`, spanOf(e));
     return n;
   }
 
@@ -1240,7 +1287,9 @@ export class Runner {
     return x < y;
   }
 
-  private callBuiltin(name: string, args: Val[], e: Span | Expr): Val {
+  /** 大多数内建是同步的；文件这类要走 Tauri invoke，给了 afn 就 await。
+   *  两个调用点都在 async generator 里，await 不影响断点/单步的挂起。 */
+  private async callBuiltin(name: string, args: Val[], e: Span | Expr): Promise<Val> {
     const b = getBuiltin(name);
     if (!b) throw new FloatError(`内建函数「${name}」不存在`, spanOf(e));
     if (args.length < b.min || args.length > b.max) {
@@ -1248,10 +1297,90 @@ export class Runner {
       throw new FloatError(`${b.sig} 需要 ${range} 个参数，实际给了 ${args.length} 个`, spanOf(e));
     }
     try {
-      return b.fn(args);
+      return b.afn ? await b.afn(args) : b.fn(args);
     } catch (err) {
       throw new FloatError(err instanceof Error ? err.message : String(err), spanOf(e));
     }
+  }
+
+  /** `*p`：读出指针当前指的那一格 */
+  private ptrRead(p: PtrVal, e: Span | Expr): Val {
+    if (p.freed) throw new FloatError('这块内存已经 free 了，不能再读', spanOf(e));
+    if (p.cell) {
+      if (!p.cell.alive()) throw new FloatError('这个指针指向的变量已经离开作用域了（悬空指针）', spanOf(e));
+      return p.cell.get();
+    }
+    if (p.idx < 0 || p.idx >= p.buf.length) {
+      throw new FloatError(`指针指到第 ${p.idx} 格，越界了（这块一共 ${p.buf.length} 格）`, spanOf(e));
+    }
+    return p.buf[p.idx];
+  }
+
+  /** `*p = v`：写回指针当前指的那一格 */
+  private ptrWrite(p: PtrVal, v: Val, e: Span | Expr): void {
+    if (p.freed) throw new FloatError('这块内存已经 free 了，不能再写', spanOf(e));
+    if (p.cell) {
+      if (!p.cell.alive()) throw new FloatError('这个指针指向的变量已经离开作用域了（悬空指针）', spanOf(e));
+      p.cell.set(v);
+      return;
+    }
+    if (p.idx < 0 || p.idx >= p.buf.length) {
+      throw new FloatError(`指针指到第 ${p.idx} 格，越界了（这块一共 ${p.buf.length} 格）`, spanOf(e));
+    }
+    p.buf[p.idx] = cloneVal(v);
+  }
+
+  /** `&x` / `&xs[i]` / `&p[i]`：拿地址 */
+  private async *addrOf(inner: Expr, env: Env, e: Span | Expr): ValGen {
+    if (inner.k === 'var') {
+      const name = inner.name;
+      let owner: Env | null = env;
+      while (owner && !owner.vars.has(name)) owner = owner.parent;
+      if (owner) {
+        const held = owner;
+        return cellPtr({
+          get: () => held.vars.get(name) as Val,
+          set: (v) => held.vars.set(name, v),
+          alive: () => held.alive
+        });
+      }
+      if (env.selfObj && env.selfObj.fields.has(name)) {
+        const inst = env.selfObj;
+        return cellPtr({
+          get: () => inst.fields.get(name) as Val,
+          set: (v) => inst.fields.set(name, v),
+          alive: () => true
+        });
+      }
+      throw new FloatError(`& 取地址：变量「${name}」还没有定义`, spanOf(e));
+    }
+    if (inner.k === 'idx') {
+      const obj = yield* this.evalExpr(inner.obj, env);
+      const idxV = yield* this.evalExpr(inner.index, env);
+      const n = toNum(idxV);
+      if (n === null) throw new FloatError('& 取地址的下标必须是数字', spanOf(e));
+      const i = Math.trunc(n);
+      if (isList(obj)) {
+        if (i < 0 || i >= obj.length) {
+          throw new FloatError(`& 取地址：下标 ${i} 越界了（列表长度 ${obj.length}）`, spanOf(e));
+        }
+        return aliasPtr(obj, i);
+      }
+      if (isPtr(obj)) {
+        if (obj.freed) throw new FloatError('这块内存已经 free 了，不能再取地址', spanOf(e));
+        const at = obj.idx + i;
+        if (obj.cell) {
+          if (i !== 0) throw new FloatError('&变量 的指针只有一格，不能偏移', spanOf(e));
+          return obj;
+        }
+        if (at < 0 || at >= obj.buf.length) {
+          throw new FloatError(`& 取地址：第 ${at} 格越界了（这块一共 ${obj.buf.length} 格）`, spanOf(e));
+        }
+        return shiftPtr(obj, i);
+      }
+      throw new FloatError(`& 只能对列表元素或指针格子取地址，得到 ${fmtVal(obj)}`, spanOf(e));
+    }
+    throw new FloatError('& 只能取变量或元素的地址，例如 &x、&xs[0]、&p[1]', spanOf(e));
   }
 
   private indexGet(obj: Val, idx: Val, e: Span | Expr): Val {
@@ -1260,8 +1389,15 @@ export class Runner {
       const n = toNum(idx);
       if (n === null) throw new FloatError(`指针下标必须是数字，得到 ${fmtVal(idx)}`, spanOf(e));
       const i = Math.trunc(n);
-      const real = i < 0 ? obj.buf.length + i : i;
-      if (real < 0 || real >= obj.buf.length) throw new FloatError(`下标 ${i} 超出范围（长度 ${obj.buf.length}）`, spanOf(e));
+      if (obj.cell) {
+        if (i !== 0) throw new FloatError('&变量 的指针只有一格，p[0] 就是变量本身', spanOf(e));
+        return this.ptrRead(obj, e);
+      }
+      // 和 C 一致：p[k] 是"从当前位置再挪 k 格"，负数是往回
+      const real = obj.idx + i;
+      if (real < 0 || real >= obj.buf.length) {
+        throw new FloatError(`下标 ${i}（第 ${real} 格）越界了（这块一共 ${obj.buf.length} 格）`, spanOf(e));
+      }
       return obj.buf[real];
     }
     if (isList(obj)) {
@@ -1313,6 +1449,11 @@ export class Runner {
   }
 
   private async *readTarget(t: Target, env: Env, s: Stmt): ValGen {
+    if (t.k === 'deref') {
+      const p = yield* this.evalExpr(t.ptr, env);
+      if (!isPtr(p)) throw new FloatError(`* 只能解引用指针，得到 ${fmtVal(p)}`, s);
+      return this.ptrRead(p, s);
+    }
     if (t.k === 'var') {
       const v = env.lookup(t.name);
       if (v === undefined) throw new FloatError(`变量「${t.name}」没有定义`, s);
@@ -1332,6 +1473,12 @@ export class Runner {
     if (op !== '=') {
       const cur = yield* this.readTarget(t, env, s);
       next = this.applyCompound(op, cur, value, s);
+    }
+    if (t.k === 'deref') {
+      const p = yield* this.evalExpr(t.ptr, env);
+      if (!isPtr(p)) throw new FloatError(`* 只能解引用指针，得到 ${fmtVal(p)}`, s);
+      this.ptrWrite(p, next, s);
+      return 'normal';
     }
     if (t.k === 'var') {
       env.assign(t.name, next);
@@ -1356,8 +1503,15 @@ export class Runner {
       const n = toNum(idx);
       if (n === null) throw new FloatError('指针下标必须是数字', s);
       const i = Math.trunc(n);
-      const real = i < 0 ? obj.buf.length + i : i;
-      if (real < 0 || real >= obj.buf.length) throw new FloatError(`下标 ${i} 超出范围（长度 ${obj.buf.length}）`, s);
+      if (obj.cell) {
+        if (i !== 0) throw new FloatError('&变量 的指针只有一格，p[0] 就是变量本身', s);
+        this.ptrWrite(obj, next, s);
+        return 'normal';
+      }
+      const real = obj.idx + i;
+      if (real < 0 || real >= obj.buf.length) {
+        throw new FloatError(`下标 ${i}（第 ${real} 格）越界了（这块一共 ${obj.buf.length} 格）`, s);
+      }
       obj.buf[real] = cloneVal(next);
       return 'normal';
     }
@@ -1457,6 +1611,8 @@ export class Runner {
       this.frames.pop();
       this.ownerStack.pop();
       this.callDepth -= 1;
+      // 函数返回后它里面的变量就没了：指向它们的指针再解引用会报"悬空指针"
+      env.alive = false;
     }
   }
 
@@ -1510,9 +1666,15 @@ export class Runner {
       const head = a.replace(/\/+$/, '');
       return head === '' ? b : head + '/' + b;
     };
+    // Copper 的扩展名是 .co（旧 .cw 依然认），import 时后缀可省略
     const candidates = target.includes('.')
       ? [join(baseDir, target), join(root, target)]
-      : [join(baseDir, target + '.cw'), join(root, target + '.cw'), join(join(baseDir, target), 'main.cw'), join(join(root, target), 'main.cw')];
+      : [
+          join(baseDir, target + '.co'), join(root, target + '.co'),
+          join(baseDir, target + '.cw'), join(root, target + '.cw'),
+          join(join(baseDir, target), 'main.co'), join(join(root, target), 'main.co'),
+          join(join(baseDir, target), 'main.cw'), join(join(root, target), 'main.cw'),
+        ];
     for (const c of candidates) {
       const norm = c.replace(/\\/g, '/');
       if (sources.has(norm)) return norm;
@@ -1541,5 +1703,6 @@ function spanOf(e: Span | Expr): Span {
 function targetExpr(t: Target): Expr {
   if (t.k === 'var') return { k: 'var', name: t.name, file: t.file, line: t.line, col: t.col, endLine: t.endLine, endCol: t.endCol };
   if (t.k === 'member') return { k: 'member', obj: t.obj, name: t.name, file: t.file, line: t.line, col: t.col, endLine: t.endLine, endCol: t.endCol };
+  if (t.k === 'deref') return t.ptr;
   return { k: 'idx', obj: t.obj, index: t.index, file: t.file, line: t.line, col: t.col, endLine: t.endLine, endCol: t.endCol };
 }

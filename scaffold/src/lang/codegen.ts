@@ -242,6 +242,17 @@ export const O = {
   },
 
   add(a: Val, b: Val): Val {
+    // 指针运算：p + n / n + p
+    if (isPtr(a)) {
+      const n = toNum(b);
+      if (n === null) throw new RuntimeError(`指针只能加上整数格数，得到 ${fmtVal(b)}`, 0);
+      return { ...a, idx: a.idx + Math.trunc(n) };
+    }
+    if (isPtr(b)) {
+      const n = toNum(a);
+      if (n === null) throw new RuntimeError(`指针只能加上整数格数，得到 ${fmtVal(a)}`, 0);
+      return { ...b, idx: b.idx + Math.trunc(n) };
+    }
     if (typeof a === 'number' && typeof b === 'number') return a + b;
     if (typeof a === 'string' && typeof b === 'string') return a + b;
     if (typeof a === 'string' || typeof b === 'string') return toStr(a) + toStr(b);
@@ -249,6 +260,13 @@ export const O = {
     return O.num(a, '「+」') + O.num(b, '「+」');
   },
   sub(a: Val, b: Val): Val {
+    // 指针：p - n 往回挪；p - q = 隔了几格
+    if (isPtr(a)) {
+      if (isPtr(b)) return a.idx - b.idx;
+      const n = toNum(b);
+      if (n === null) throw new RuntimeError(`指针只能减整数格数，得到 ${fmtVal(b)}`, 0);
+      return { ...a, idx: a.idx - Math.trunc(n) };
+    }
     if (typeof a === 'number' && typeof b === 'number') return a - b;
     return O.num(a, '「-」') - O.num(b, '「-」');
   },
@@ -337,8 +355,15 @@ export const O = {
       const n = toNum(idx);
       if (n === null) throw new RuntimeError(`指针下标必须是数字，得到 ${fmtVal(idx)}`, 0);
       const i = Math.trunc(n);
-      const real = i < 0 ? obj.buf.length + i : i;
-      if (real < 0 || real >= obj.buf.length) throw new RuntimeError(`下标 ${i} 超出范围（长度 ${obj.buf.length}）`, 0);
+      if (obj.cell) {
+        if (i !== 0) throw new RuntimeError('&变量 的指针只有一格，p[0] 就是变量本身', 0);
+        if (!obj.cell.alive()) throw new RuntimeError('这个指针指向的变量已经离开作用域了（悬空指针）', 0);
+        return obj.cell.get();
+      }
+      const real = obj.idx + i;
+      if (real < 0 || real >= obj.buf.length) {
+        throw new RuntimeError(`下标 ${i}（第 ${real} 格）越界了（这块一共 ${obj.buf.length} 格）`, 0);
+      }
       return obj.buf[real];
     }
     if (Array.isArray(obj)) {
@@ -395,6 +420,24 @@ export const O = {
   },
 
   sidx(obj: Val, idx: Val, val: Val): void {
+    if (isPtr(obj)) {
+      if (obj.freed) throw new RuntimeError('这块内存已经 free 了，不能再写', 0);
+      const n = toNum(idx);
+      if (n === null) throw new RuntimeError('指针下标必须是数字', 0);
+      const i = Math.trunc(n);
+      if (obj.cell) {
+        if (i !== 0) throw new RuntimeError('&变量 的指针只有一格，p[0] 就是变量本身', 0);
+        if (!obj.cell.alive()) throw new RuntimeError('这个指针指向的变量已经离开作用域了（悬空指针）', 0);
+        obj.cell.set(val);
+        return;
+      }
+      const real = obj.idx + i;
+      if (real < 0 || real >= obj.buf.length) {
+        throw new RuntimeError(`下标 ${i}（第 ${real} 格）越界了（这块一共 ${obj.buf.length} 格）`, 0);
+      }
+      obj.buf[real] = val;
+      return;
+    }
     if (Array.isArray(obj)) {
       const n = toNum(idx);
       if (n === null) throw new RuntimeError('列表下标必须是数字', 0);
@@ -489,7 +532,13 @@ export const O = {
     if (isList(v)) return v;
     if (typeof v === 'string') return v.split('');
     if (isDict(v)) return [...v.map.keys()];
-    throw new RuntimeError(`for … in 只能遍历列表、字符串或字典，得到 ${fmtVal(v)}`, 0);
+    // 指针：从当前格遍历到末尾（解释器同语义）
+    if (isPtr(v)) {
+      if (v.freed) throw new RuntimeError('这块内存已经 free 了，不能再遍历', 0);
+      if (v.cell) return [v.cell.get()];
+      return v.buf.slice(Math.max(0, v.idx));
+    }
+    throw new RuntimeError(`for … in 只能遍历列表、字符串、字典或指针，得到 ${fmtVal(v)}`, 0);
   },
 
   /** 双变量 for：字典给 [键, 值] */
@@ -922,6 +971,9 @@ ${genBlock(s.body, c2)}  }
   function genRead(t: Target, ctx: Ctx): string {
     if (t.k === 'var') return readVar(t.name, ctx);
     if (t.k === 'member') return `O.mem(${genExpr(t.obj, ctx)}, ${JSON.stringify(t.name)})`;
+    // 指针取地址 / 解引用只在解释模式（F6 / Rust 内核）实现：编译模式交回解释器，
+    // 语义只有一份，不会出现"编译跑一套、解释跑另一套"
+    if (t.k === 'deref') throw new CompileError('*p 解引用交回解释模式');
     return `O.get(${genExpr(t.obj, ctx)}, ${genExpr(t.index, ctx)})`;
   }
 
@@ -944,6 +996,7 @@ ${genBlock(s.body, c2)}  }
       if (op === '=') return `O.smem(${obj}, ${JSON.stringify(t.name)}, ${valCode})`;
       return `(() => { const __o = ${obj}; O.smem(__o, ${JSON.stringify(t.name)}, O.comp(${JSON.stringify(op)}, O.mem(__o, ${JSON.stringify(t.name)}), ${valCode})); return null; })()`;
     }
+    if (t.k === 'deref') throw new CompileError('*p = 值 交回解释模式');
     const obj = genExpr(t.obj, ctx);
     const idx = genExpr(t.index, ctx);
     if (op === '=') return `O.sidx(${obj}, ${idx}, ${valCode})`;
@@ -962,6 +1015,7 @@ ${genBlock(s.body, c2)}  }
       case 'var': return readVar(e.name, ctx);
       case 'self': return '$.self';
       case 'un':
+        if (e.op === '&' || e.op === '*') throw new CompileError('指针取地址 / 解引用交回解释模式');
         if (e.op === '!') return `(!O.t(${genExpr(e.a, ctx)}))`;
         if (e.op === '-') return `O.neg(${genExpr(e.a, ctx)})`;
         if (e.op === '+') return `O.num(${genExpr(e.a, ctx)}, '一元 +')`;

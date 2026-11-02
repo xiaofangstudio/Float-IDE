@@ -77,11 +77,11 @@ function clamp(v, lo, hi)
 
 /* ── 内存文件系统：够真，能撑起新建/改名/删除/保存/查找的回归 ── */
 const files = new Map<string, string>([
-  [`${PROJECT}/project.json`, JSON.stringify({ name: '示例工程', entry: 'main.cw', version: '0.7.0', kind: 'float' }, null, 2)],
-  [`${PROJECT}/main.cw`, MAIN],
-  [`${PROJECT}/lib.cw`, LIB],
-  [`${PROJECT}/core/engine.cw`, '// 引擎\nfunction tick()\n    return 1\n'],
-  [`${PROJECT}/core/util/str.cw`, '// 字符串工具\nfunction pad(s, n)\n    return s\n'],
+  [`${PROJECT}/project.json`, JSON.stringify({ name: '示例工程', entry: 'main.co', version: '0.7.0', kind: 'float' }, null, 2)],
+  [`${PROJECT}/main.co`, MAIN],
+  [`${PROJECT}/lib.co`, LIB],
+  [`${PROJECT}/core/engine.co`, '// 引擎\nfunction tick()\n    return 1\n'],
+  [`${PROJECT}/core/util/str.co`, '// 字符串工具\nfunction pad(s, n)\n    return s\n'],
   [`${PROJECT}/README.md`, '# 示例工程\n\n这是 Float IDE 的界面预览工程。\n']
 ]);
 const dirs = new Set<string>([
@@ -370,7 +370,7 @@ async function selftest(): Promise<void> {
         okBtn?.click();
         await sleep(450);
         const fs = (window as unknown as { __demoFs: { read: (p: string) => string | undefined } }).__demoFs;
-        const created = fs.read('D:/demo/tools.cw');
+        const created = fs.read('D:/demo/tools.co');
         ok('新建文件真的落盘', created !== undefined, created ? `${created.length} 字节` : '没找到文件');
       }
     }

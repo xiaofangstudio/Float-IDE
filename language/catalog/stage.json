@@ -3,7 +3,7 @@
   "extension": "stage",
   "name": "Float Stage",
   "status": "archived",
-  "description": "从 CW Script 核心中剔除的舞台、角色、画笔、外观、碰撞、克隆、鼠标与联机指令。Float 核心不加载本扩展；未来以官网可实时更新的扩展包提供。",
+  "description": "从 Copper 核心中剔除的舞台、角色、画笔、外观、碰撞、克隆、鼠标与联机指令。Float 核心不加载本扩展；未来以官网可实时更新的扩展包提供。",
   "source": "代码世界-任务.html / parseLine()",
   "groups": [
     {

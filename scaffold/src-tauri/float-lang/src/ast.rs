@@ -69,6 +69,10 @@ pub enum Op {
     Neg,
     Not,
     BitNot,
+    /// &取地址
+    Addr,
+    /// *解引用
+    Deref,
 }
 
 impl Op {
@@ -155,6 +159,8 @@ pub enum Target {
     Var(Rc<str>),
     Member(Expr, Rc<str>),
     Idx(Expr, Expr),
+    /// *p = 值
+    Deref(Expr),
 }
 
 #[derive(Clone, Debug)]

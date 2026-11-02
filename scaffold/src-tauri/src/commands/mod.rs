@@ -5,3 +5,5 @@ pub mod terminal;
 pub mod git;
 pub mod plugins;
 pub mod mcp;
+pub mod watch;
+pub mod assoc;

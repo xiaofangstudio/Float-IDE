@@ -123,6 +123,14 @@ export function tokenizeLine(src: string, line: number, startCol = 1): Token[] {
       const start = i;
       while (i < src.length && isIdPart(src[i])) i++;
       const word = src.slice(start, i);
+      // and / or / not 是 && / || / ! 的关键字写法（AST 层同一个节点，短路语义一致）。
+      // 前面是 '.' 时不转换：obj.not / obj.and 是普通成员名。
+      const wordOp = word === 'and' ? '&&' : word === 'or' ? '||' : word === 'not' ? '!' : null;
+      const prev = out[out.length - 1];
+      if (wordOp && !(prev && prev.k === 'op' && prev.v === '.')) {
+        push('op', wordOp, startCol + start, startCol + i);
+        continue;
+      }
       push(KEYWORDS.has(word) ? 'kw' : 'ident', word, startCol + start, startCol + i);
       continue;
     }

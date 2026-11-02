@@ -291,14 +291,19 @@ fn dispatch(
     push(format!("→ {method}"));
 
     let result: Option<Result<Value, (i64, String)>> = match method {
-        "initialize" => Some(Ok(json!({
-            "protocolVersion": "2025-06-18",
-            "capabilities": {
-                "tools": { "listChanged": false },
-                "resources": { "subscribe": false, "listChanged": false }
-            },
-            "serverInfo": { "name": "float-ide", "version": env!("CARGO_PKG_VERSION") }
-        }))),
+        "initialize" => {
+            // 客户端要什么版本就给什么版本（它带的我们一定认识，因为都是同一份 JSON-RPC 工具面）；
+            // 硬编码新版本会让只认旧版本的客户端直接断开——这就是"连不上"的常见原因之一。
+            let requested = params.get("protocolVersion").and_then(|v| v.as_str()).unwrap_or("2025-06-18");
+            Some(Ok(json!({
+                "protocolVersion": requested,
+                "capabilities": {
+                    "tools": { "listChanged": true },
+                    "resources": { "subscribe": false, "listChanged": false }
+                },
+                "serverInfo": { "name": "float-ide", "version": env!("CARGO_PKG_VERSION") }
+            })))
+        }
         "notifications/initialized" | "notifications/cancelled" => return None,
         "ping" => Some(Ok(json!({}))),
         "tools/list" => Some(Ok(json!({ "tools": tool_specs().iter().map(|t| t.1.clone()).collect::<Vec<_>>() }))),
@@ -338,7 +343,7 @@ fn tool_specs() -> Vec<(String, Value)> {
                     "type": "object",
                     "properties": {
                         "dir": { "type": "string", "description": "相对工程根的子目录，省略表示工程根" },
-                        "ext": { "type": "string", "description": "只看某个后缀，例如 .cw" }
+                        "ext": { "type": "string", "description": "只看某个后缀，例如 .co（旧 .cw 也认）" }
                     }
                 }
             }),
@@ -404,7 +409,7 @@ fn tool_specs() -> Vec<(String, Value)> {
             "get_diagnostics".into(),
             json!({
                 "name": "get_diagnostics",
-                "description": "对一个 .cw 文件做语法与语义检查，返回诊断列表（行号、列号、消息、严重级别）",
+                "description": "对一个 Copper 源文件（.co，旧 .cw 也认）做语法与语义检查，返回诊断列表（行号、列号、消息、严重级别）",
                 "inputSchema": {
                     "type": "object",
                     "properties": { "path": { "type": "string" } },
@@ -416,7 +421,7 @@ fn tool_specs() -> Vec<(String, Value)> {
             "get_outline".into(),
             json!({
                 "name": "get_outline",
-                "description": "返回一个 .cw 文件的符号大纲（函数、类、方法、变量及其行号）",
+                "description": "返回一个 Copper 源文件（.co，旧 .cw 也认）的符号大纲（函数、类、方法、变量及其行号）",
                 "inputSchema": {
                     "type": "object",
                     "properties": { "path": { "type": "string" } },
@@ -430,6 +435,146 @@ fn tool_specs() -> Vec<(String, Value)> {
                 "name": "project_info",
                 "description": "返回当前打开的工程信息（名称、入口文件、工程根路径）",
                 "inputSchema": { "type": "object", "properties": {} }
+            }),
+        ),
+        (
+            "list_dir".into(),
+            json!({
+                "name": "list_dir",
+                "description": "列出工程内某个目录的直接子项（不递归），带类型与大小",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "dir": { "type": "string", "description": "相对工程根，省略为工程根" } }
+                }
+            }),
+        ),
+        (
+            "create_file".into(),
+            json!({
+                "name": "create_file",
+                "description": "新建文件（已存在会报错，绝不覆盖）；父目录自动创建",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" },
+                        "content": { "type": "string", "description": "省略则为空文件" }
+                    },
+                    "required": ["path"]
+                }
+            }),
+        ),
+        (
+            "delete_file".into(),
+            json!({
+                "name": "delete_file",
+                "description": "删除工程内的文件或目录（目录递归删，谨慎使用）",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "path": { "type": "string" } },
+                    "required": ["path"]
+                }
+            }),
+        ),
+        (
+            "rename_file".into(),
+            json!({
+                "name": "rename_file",
+                "description": "重命名 / 移动工程内的文件或目录",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "from": { "type": "string" },
+                        "to": { "type": "string" }
+                    },
+                    "required": ["from", "to"]
+                }
+            }),
+        ),
+        (
+            "mkdir".into(),
+            json!({
+                "name": "mkdir",
+                "description": "新建目录（父目录自动创建）",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "path": { "type": "string" } },
+                    "required": ["path"]
+                }
+            }),
+        ),
+        (
+            "open_project".into(),
+            json!({
+                "name": "open_project",
+                "description": "让 Float IDE 打开一个工程（传工程目录，或传 .co/.cw/.json/.txt 文件路径——它所在的文件夹会成为工程根并打开该文件）。传 dir 或 path 之一",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "dir": { "type": "string", "description": "工程目录（绝对路径）" },
+                        "path": { "type": "string", "description": "或：要打开的文件（绝对路径）" }
+                    }
+                }
+            }),
+        ),
+        (
+            "get_console".into(),
+            json!({
+                "name": "get_console",
+                "description": "拿到 IDE 控制台最近的输出（运行结果、错误、提示）",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "maxLines": { "type": "number", "default": 80 }
+                    }
+                }
+            }),
+        ),
+        (
+            "read_buffer".into(),
+            json!({
+                "name": "read_buffer",
+                "description": "读 IDE 当前打开的文件在编辑器里的实时内容（含未保存修改）。不传 path 拿当前活动文件",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "path": { "type": "string", "description": "省略为当前活动文件" } }
+                }
+            }),
+        ),
+        (
+            "write_buffer".into(),
+            json!({
+                "name": "write_buffer",
+                "description": "把 IDE 当前活动文件的编辑器内容整个替换（相当于替用户改了正在编辑的代码，会标脏等待保存）",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" },
+                        "content": { "type": "string" }
+                    },
+                    "required": ["content"]
+                }
+            }),
+        ),
+        (
+            "get_settings".into(),
+            json!({
+                "name": "get_settings",
+                "description": "读 Float IDE 的用户设置（字号、自动保存等），返回 JSON",
+                "inputSchema": { "type": "object", "properties": {} }
+            }),
+        ),
+        (
+            "set_settings".into(),
+            json!({
+                "name": "set_settings",
+                "description": "合并式修改 Float IDE 的用户设置：传 JSON 对象，只改你给的字段",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "settings": { "type": "object", "description": "要合并进去的设置字段" }
+                    },
+                    "required": ["settings"]
+                }
             }),
         ),
     ]
@@ -516,6 +661,109 @@ fn call_tool(
             },
             _ => err_text("缺少 path 或 content".into()),
         },
+        "list_dir" => {
+            let dir = s("dir").unwrap_or_default();
+            match safe_join(root, &dir) {
+                Err(e) => err_text(e),
+                Ok(base) => {
+                    let mut items: Vec<Value> = Vec::new();
+                    if let Ok(rd) = std::fs::read_dir(&base) {
+                        for e in rd.flatten() {
+                            let name = e.file_name().to_string_lossy().to_string();
+                            let is_dir = e.path().is_dir();
+                            let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+                            items.push(json!({ "name": name, "dir": is_dir, "size": size }));
+                        }
+                    }
+                    items.sort_by(|a, b| {
+                        let (da, db) = (a["dir"].as_bool().unwrap(), b["dir"].as_bool().unwrap());
+                        db.cmp(&da).then(a["name"].as_str().cmp(&b["name"].as_str()))
+                    });
+                    ok_text(json!(items).to_string())
+                }
+            }
+        }
+        "create_file" => match s("path") {
+            None => err_text("缺少 path".into()),
+            Some(p) => match safe_join(root, &p) {
+                Err(e) => err_text(e),
+                Ok(f) => {
+                    if f.exists() {
+                        err_text(format!("{p} 已经存在，create_file 绝不覆盖；要改内容用 write_file"))
+                    } else {
+                        if let Some(parent) = f.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        let content = s("content").unwrap_or_default();
+                        match atomic_write(&f, &content) {
+                            Ok(_) => {
+                                push(format!("create_file {p} ({} 字节)", content.len()));
+                                ok_text(format!("已创建 {p}"))
+                            }
+                            Err(e) => err_text(e),
+                        }
+                    }
+                }
+            },
+        },
+        "delete_file" => match s("path") {
+            None => err_text("缺少 path".into()),
+            Some(p) => match safe_join(root, &p) {
+                Err(e) => err_text(e),
+                Ok(f) => {
+                    if !f.exists() {
+                        err_text(format!("{p} 不存在"))
+                    } else {
+                        let r = if f.is_dir() {
+                            std::fs::remove_dir_all(&f)
+                        } else {
+                            std::fs::remove_file(&f)
+                        };
+                        match r {
+                            Ok(_) => {
+                                push(format!("delete_file {p}"));
+                                ok_text(format!("已删除 {p}"))
+                            }
+                            Err(e) => err_text(format!("删除失败 {p}: {e}")),
+                        }
+                    }
+                }
+            },
+        },
+        "rename_file" => match (s("from"), s("to")) {
+            (Some(from), Some(to)) => match (safe_join(root, &from), safe_join(root, &to)) {
+                (Err(e), _) | (_, Err(e)) => err_text(e),
+                (Ok(sf), Ok(st)) => {
+                    if !sf.exists() {
+                        err_text(format!("{from} 不存在"))
+                    } else if st.exists() {
+                        err_text(format!("{to} 已经存在，不敢盖"))
+                    } else {
+                        if let Some(parent) = st.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        match std::fs::rename(&sf, &st) {
+                            Ok(_) => {
+                                push(format!("rename_file {from} -> {to}"));
+                                ok_text(format!("已改名 {from} → {to}"))
+                            }
+                            Err(e) => err_text(format!("改名失败: {e}")),
+                        }
+                    }
+                }
+            },
+            _ => err_text("缺少 from 或 to".into()),
+        },
+        "mkdir" => match s("path") {
+            None => err_text("缺少 path".into()),
+            Some(p) => match safe_join(root, &p) {
+                Err(e) => err_text(e),
+                Ok(f) => match std::fs::create_dir_all(&f) {
+                    Ok(_) => ok_text(format!("已创建目录 {p}")),
+                    Err(e) => err_text(format!("创建失败: {e}")),
+                },
+            },
+        },
         "search" => {
             let q = s("query").unwrap_or_default();
             let use_re = args.get("regex").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -530,8 +778,11 @@ fn call_tool(
                 ok_text(json!(hits).to_string())
             }
         }
-        // 语言类：走前端桥
-        "run_script" | "get_diagnostics" | "get_outline" => {
+        // 语言 / 界面类：走前端桥（run_script、get_diagnostics、get_outline、
+        // open_project、get_settings、set_settings、get_console、read_buffer、write_buffer）
+        "run_script" | "get_diagnostics" | "get_outline"
+        | "open_project" | "get_settings" | "set_settings" | "get_console"
+        | "read_buffer" | "write_buffer" => {
             if root.is_empty() {
                 err_text("还没有打开工程".into())
             } else {
@@ -637,8 +888,9 @@ fn search_project(root: &str, query: &str, use_regex: bool, max: usize) -> Vec<H
         if out.len() >= max {
             break;
         }
-        if !rel.to_lowercase().ends_with(".cw") && !rel.to_lowercase().ends_with(".json")
-            && !rel.to_lowercase().ends_with(".md") {
+        let rl = rel.to_lowercase();
+        if !rl.ends_with(".co") && !rl.ends_with(".cw") && !rl.ends_with(".json")
+            && !rl.ends_with(".md") && !rl.ends_with(".txt") && !rl.ends_with(".in") {
             continue;
         }
         let full = Path::new(root).join(&rel);

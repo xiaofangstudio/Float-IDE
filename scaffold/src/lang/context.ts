@@ -56,7 +56,7 @@ function lastTokenAt(toks: Token[], col: number): number {
 export function contextAt(src: string, line: number, col: number, analysis?: Analysis): CursorContext {
   const lines = src.split('\n');
   const text = lines[line - 1] ?? '';
-  const a = analysis ?? analyze('main.cw', src);
+  const a = analysis ?? analyze('main.co', src);
 
   /* ── 1. 注释：光标落在 `--` 之后的注释文字里 ── */
   // codePart 返回的 head 就是 `--` 之前那段，它的长度就是注释起始下标

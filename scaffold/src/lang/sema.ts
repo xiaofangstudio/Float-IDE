@@ -39,6 +39,7 @@ function collect(body: Stmt[]): { declared: Set<string>; refs: Ref[]; hasImport:
   const targetRef = (t: Target): void => {
     if (t.k === 'var') refs.push({ name: t.name, span: t, call: false });
     else if (t.k === 'member') exprRefs(t.obj);
+    else if (t.k === 'deref') exprRefs(t.ptr);
     else { exprRefs(t.obj); exprRefs(t.index); }
   };
 
@@ -47,15 +48,11 @@ function collect(body: Stmt[]): { declared: Set<string>; refs: Ref[]; hasImport:
       switch (s.k) {
         case 'decl': declared.add(s.name); exprRefs(s.init); break;
         case 'assign':
-          if (s.target.k === 'var') declared.add(s.target.name);
-          else if (s.target.k === 'member') exprRefs(s.target.obj);
-          else { exprRefs(s.target.obj); exprRefs(s.target.index); }
+          targetRef(s.target);
           exprRefs(s.value);
           break;
         case 'incdec':
-          if (s.target.k === 'var') declared.add(s.target.name);
-          else if (s.target.k === 'member') exprRefs(s.target.obj);
-          else { exprRefs(s.target.obj); exprRefs(s.target.index); }
+          targetRef(s.target);
           break;
         case 'destructure': for (const n of s.names) declared.add(n.name); exprRefs(s.value); break;
         case 'funcDef':

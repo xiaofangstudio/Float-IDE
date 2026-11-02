@@ -1,10 +1,10 @@
 {
   "$schema": "cw-language-catalog/1",
-  "name": "CW Script",
+  "name": "Copper",
   "shortName": "Float",
   "version": "0.4.0",
-  "basedOn": "CW Script（代码世界）",
-  "status": "CW Script 核心语言 + 0.4 扩展：异常处理、方法链、多返回值；界面按 PyCharm 新 UI 重做",
+  "basedOn": "Copper（原 CW Script）",
+  "status": "Copper 核心语言 + 0.4 扩展：异常处理、方法链、多返回值；界面按 PyCharm 新 UI 重做",
   "fileExtension": ".cw",
   "encoding": "UTF-8",
   "lineEnding": "LF",

@@ -146,7 +146,13 @@ impl Expander {
         }
         cand.push(p.clone());
         if p.extension().is_none() {
-            let mut with_ext: Vec<PathBuf> = cand.iter().map(|c| c.with_extension("cw")).collect();
+            // Copper 新扩展名 .co 优先，旧 .cw 兼容
+            let mut with_ext: Vec<PathBuf> = Vec::new();
+            for ext in ["co", "cw"] {
+                for c in &cand {
+                    with_ext.push(c.with_extension(ext));
+                }
+            }
             cand.append(&mut with_ext);
         }
         // 内存里的缓冲区优先（IDE 里新建但没存盘的库文件也算"找得到"）
@@ -166,7 +172,7 @@ impl Expander {
             None => {
                 return Err(FloatError::new(
                     format!(
-                        "找不到库文件「{}」。import 的写法是 import \"工具.cw\"，\
+                        "找不到库文件「{}」。import 的写法是 import \"工具.co\"（旧 .cw 也能认），\
                          路径相对当前脚本所在目录。",
                         want
                     ),
@@ -282,5 +288,26 @@ mod tests {
     fn 找不到文件要报清楚() {
         let e = expand("main.cw", "import \"没有这个.cw\"", None).unwrap_err();
         assert!(e.message.contains("找不到库文件"), "{}", e.message);
+    }
+
+    #[test]
+    fn co_新扩展名与_cw_旧扩展名都认() {
+        let dir = std::env::temp_dir().join("cwtest_import_co");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("lib.co"), "fn 两倍(x)\n    return x * 2").unwrap();
+        std::fs::write(dir.join("util.cw"), "fn 加一(x)\n    return x + 1").unwrap();
+
+        // 新 .co 显式后缀
+        let ex = expand("main.co", "import \"lib.co\"\nprint 两倍(4)", Some(&dir)).unwrap();
+        assert_eq!(ex.files.len(), 2);
+        // 省略后缀：优先 .co
+        let ex = expand("main.co", "import \"lib\"\nprint 两倍(5)", Some(&dir)).unwrap();
+        assert_eq!(ex.files.len(), 2);
+        // 旧 .cw 工程原样能跑
+        let ex = expand("main.cw", "import \"util.cw\"\nprint 加一(9)", Some(&dir)).unwrap();
+        assert_eq!(ex.files.len(), 2);
+        // 省略后缀也能回退到 .cw
+        let ex = expand("main.cw", "import \"util\"\nprint 加一(10)", Some(&dir)).unwrap();
+        assert_eq!(ex.files.len(), 2);
     }
 }

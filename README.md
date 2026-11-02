@@ -1,14 +1,63 @@
 # Float IDE
 
-> 小方工作室出品 ｜ Windows 桌面 ｜ MIT ｜ 完全免费 ｜ 当前版本 1.5.0
+> 小方工作室出品 ｜ Windows 桌面 ｜ MIT ｜ 完全免费 ｜ 当前版本 1.6.0
 
-**代码世界脚本工作室：给 CW Script（CW Script）一个正经的 IDE。**
+**Copper 语言工作室：给 Copper（原 CW Script / 代码世界）一个正经的 IDE。**
 
-「代码世界」（CW Script）是一门行式中文脚本语言：一行一句、缩进成块、指令写结果进特殊变量。原版配套的 IDE 是一个网页沙盒，写代码、打断点都施展不开。Float IDE 把它重做成一个真正的桌面 IDE：Monaco 编辑器、文件树、断点调试、变量查看、真终端、Git，一样不少。
+**Copper**（铜，原名 CW Script / 代码世界）是一门行式中文脚本语言：一行一句、缩进成块、指令写结果进特殊变量。原版配套的 IDE 是一个网页沙盒，写代码、打断点都施展不开。Float IDE 把它重做成一个真正的桌面 IDE：Monaco 编辑器、文件树、断点调试、变量查看、真终端、Git，一样不少。
 
 0.2 把语言内核整个换掉了——不再是"一行一条正则"，而是 **词法 → AST → 解释器** 三层。所以 `for` 的次数能写变量、函数能有参数和返回值、类能继承。
 
 ---
+
+## 1.6 这次改了什么（改名 Copper + 全链路大改）
+
+这一版把语言正式改名为 **Copper**（铜，原 CW Script / 代码世界），源码扩展名从 `.cw` 换成 `.co`，旧的 `.cw` 全部照常能开、能跑、能搜。改动不止前端：Tauri 后端和 Rust 语言内核也一起动了。
+
+### 语言：真指针 + 一批语法补齐
+
+- 🧷 **`ptr` 变成真指针**：`&x` 取地址、`*p` 读、`*p = 值` 写、`**pp` 连续解引用；`p + 1` 按「格」平移，共享同一块内存（和 C 里地址加一个元素大小是同一件事，但越界会报错，不会踩内存）
+- 🧱 **手动内存 `alloc(n)` / `free`**：`alloc` 出来的块自己还；`&列表[i]`、`&变量` 拿到的地址不能 `free`（报「这不是 alloc 出来的内存…」）
+- 🕳️ **悬空指针检测**：函数返回后，指向它局部变量的指针会当场报错，而不是读到脏数据
+- ✂️ **指针可迭代**：`for x in 指针` 从当前位置走到块尾；`len(指针)` 给剩余格数
+- 🔤 **`and` / `or` / `not` 关键字**：等价 `&&` / `||` / `!`，短路语义一致；前面是 `.` 时不转换（`obj.not` 仍是成员名）
+- ➗ **中缀 `mod`**：`a mod b` 就是取余，同时保留 `mod(a, b)` 函数写法
+- 🧹 **缩进报错说人话**：直接告诉你「上一行缩进 4 个空格，这一行只有 2 个，还差 2 个」
+- 💬 **`if` / `elif` 之间可以夹注释和空行**，不再因此断链报错
+- 📦 **import 认双扩展名**：省略后缀时先找 `.co`，再回退 `.cw`
+- 🧪 **双内核同步**：Rust VM 补了 `AddrLocal / AddrGlobal / AddrIdx / Deref / StoreDeref` 一组指针指令，TS 解释器与 Rust VM 跑同一套 parity 用例（新增 cases9 / cases10，以及 pointer / escape 独立测试）
+- 🐱 **吉祥物彩蛋**：第 27 行报错变成「喵～第 27 行瘸了…」（TS 与 Rust 内核都有，Rust 侧带单元测试）
+
+### IDE（前端）
+
+- 📄 **新增文件内建**：`readfile` / `writefile` / `appendfile` / `hasfile`，走统一的 FsBridge，F5（Rust 内核）和 F6（解释器）行为一致；浏览器预览里会明确提示「文件功能要在桌面版里用」
+- 🔄 **磁盘热更新**：AI 或别的编辑器在盘上改了 `.co / .cw / .json / .txt / .md / .in`，一秒多内自动灌进打开的缓冲区——缓冲区没改过才灌，你正在写的版本绝不悄悄覆盖
+- 🖱️ **文件关联**：「关于」页可以一键把 `.co` 关联到 Float IDE，走 Win32 注册表写用户级 HKCU（不要管理员、不依赖 `reg.exe`），资源管理器里显示 Copper 猫图标；也可以查询、取消。双击 `.co`、把文件拖到 exe 上都能直接打开
+- ℹ️ **「关于」页入驻**：版本号、更新日志、Copper 介绍、文件关联开关都在这一页
+- 🧯 **工程页崩溃兜底**：以前 Workspace 一炸整页白掉，现在把错误堆栈亮出来，并给「回到欢迎页」的出口
+- 📐 **面板尺寸 clamp**：拖到窗口边缘也不会把编辑器挤成 0，更不会溢出留白；控制台可拖高（120~760）、可全屏
+- 🗂️ **打开中的文件在树里自动定位**：双击 `.co` 或 AI 打开的文件，侧边栏会逐级展开到它
+- 🧩 **Monaco 并发修复**：同一个文件连续点两次不会再报 `Cannot add model because it already exists`；打开失败也不会留一个空标签
+- ➕ **标签栏「+」新建 `.co`**，不写后缀自动补
+- ⌨️ **输入框里打字不再误触 IDE 快捷键**
+- 🧱 新建工程模板 4 个 → 5 个（新增「指针示例」）
+
+### 后端 / 内核
+
+- 🔌 **MCP 工具从 8 个扩到 19 个**：`list_files` / `list_dir` / `read_file` / `write_file` / `create_file` / `delete_file` / `rename_file` / `mkdir` / `search` / `run_script` / `get_diagnostics` / `get_outline` / `project_info` / `open_project` / `get_console` / `read_buffer` / `write_buffer` / `get_settings` / `set_settings`；外部 AI 还能直接读源码缓冲区
+- 👀 **文件监视服务**（`commands/watch.rs`）：轮询 mtime，不引第三方依赖，递归上限 10 层 / 6000 个文件
+- 🪪 **文件关联服务**（`commands/assoc.rs`）：`windows-sys` 直接调注册表 API，Copper 图标编译进程序，注册时释放到磁盘
+- 📂 **单文件打开**：以前「打开」只能选文件夹，现在能直接选 `.co` / `.cw`
+- 📦 安装包格式从 MSI 换成 **NSIS**
+- 📚 示例扩到 **16 个**：全部 `.cw` → `.co`，新增 `16_advanced_pointer.co`（手动内存进阶）
+- 🧪 测试：`test:lang` 串上新的 `test:pointer`，stress 继续扩边界；本轮共 75 个文件、+2528 / −412 行
+
+### 顺手修的
+
+- 🐞 F6 调试模式下文件读写可用，交互输入不再中断
+- 🐞 修掉「一按运行就显示程序终止」与 Monaco 模型并发冲突
+- 📚 右侧变量面板的字典 / 列表可展开收起，超长内容截断
+- 🪶 移除 FFmpeg 依赖，安装包瘦身
 
 ## 1.5 这次改了什么（语言规则定型 + 类型检查）
 
@@ -25,12 +74,12 @@
 - 🛡️ **新增语义分析器**：`float-lang/src/sema.rs`——写错在运行前就报，配 `examples/check.rs` 独立检查入口
 - 🦀 **Rust VM 内核继续深化**：bytecode / vm / parser / ast 全套迭代，正确性测试扩充
 - 🔁 **双内核对齐**：TS 解释器（ast / builtins / codegen / interp / parse / values）与 Rust VM 同步演进，跑同一套测试
-- 🎮 **示例第 13 个：指针游戏**（`13_pointer_game.cw`）——配合指针语义的完整小游戏示例
+- 🎮 **示例第 13 个：指针游戏**（`13_pointer_game.co`）——配合指针语义的完整小游戏示例
 - 🧰 **IDE 侧打磨**：模板 / 类型 / 编辑器 / 插件面板 / 工作台与样式继续过一遍，测试基建（harness / build 脚本）增强
 
 ## 0.11 这次改了什么（语言内核 Rust 化）
 
-- 🦀 **CW Script 换 Rust 原生内核**：新增 `scaffold/src-tauri/float-lang/`——词法 / 语法 / 字节码 / VM / 包系统全套 Rust 实现（`parser.rs` / `bytecode.rs` / `vm.rs` / `packages.rs`），带基准测试（`examples/bench.rs` + `tests/bench-compare.sh`）跟原解释器对标性能
+- 🦀 **Copper 换 Rust 原生内核**：新增 `scaffold/src-tauri/float-lang/`——词法 / 语法 / 字节码 / VM / 包系统全套 Rust 实现（`parser.rs` / `bytecode.rs` / `vm.rs` / `packages.rs`），带基准测试（`examples/bench.rs` + `tests/bench-compare.sh`）跟原解释器对标性能
 - 📚 **示例从 5 个扩到 12 个**：排序与搜索、猜数字、对话游戏、Eliza 聊天机器人、RPG 找包、计算器、指针演示——全部能直接在 IDE 里跑
 - 🧩 **语言目录与内置插件扩充**：`core.json` 指令目录、`spec.ts` 语言规格、`builtin.ts` 内置插件同步更新
 - 🖥️ **侧面板与样式打磨**：`SidePanels` 布局细节与主题样式继续过一遍
@@ -77,7 +126,9 @@
 
 ### 图标也分类型色
 
-文件树：`.cw` 蓝 / `.json` 琥珀 / `.md` 灰 / 文件夹青灰。
+文件树：`.co`（旧 `.cw` 同色）蓝 / `.json` 琥珀 / `.md` 灰 / 文件夹青灰。
+
+可打开并编辑：`.co` / `.cw` / `.md` / `.json` / `.txt` / `.in`（Markdown 走 markdown 高亮，`.txt`/`.in` 走纯文本）。
 大纲：类紫 `cls` / 方法蓝 `fn` / 变量灰 `var`。扫一眼就知道这行是什么。
 
 ### 分区靠明度，不靠色块
@@ -101,7 +152,7 @@
 ### 界面从"悬浮卡片"改成"一页一页开"
 
 之前的教程、插件、MCP、设置、快捷键、外观全是浮在编辑器上的弹窗——那不像 IDE，像网页应用。
-现在这些统统是**编辑器区的标签页**，和 `main.cw` 并排，**带图标**，能关能切：
+现在这些统统是**编辑器区的标签页**，和 `main.co` 并排，**带图标**，能关能切：
 
 `📖 学习中心` · `🔌 插件` · `🖥 MCP 服务器` · `⚙ 偏好设置` · `⌨ 快捷键` · `🖼 外观与背景`
 
@@ -137,7 +188,7 @@
 
 「新建文件」点了没反应、「删除」点了没反应、「新建分支」点了没反应——根因是这些地方用的 `window.prompt` / `window.confirm`。
 **Tauri v2 的 WebView2 里这两个 API 是未实现的**，调用会静默返回 `null` / `false`，所以看起来就是"什么都没发生"。
-现在全部换成自绘对话框（`askText` / `askConfirm`），并且给文件名加了合法性校验、自动补 `.cw` 后缀。
+现在全部换成自绘对话框（`askText` / `askConfirm`），并且给文件名加了合法性校验、自动补 `.co` 后缀。
 
 ### 插件生态
 
@@ -162,7 +213,7 @@
 内置 MCP（Model Context Protocol）服务，外部 AI 客户端直接操作工程：
 
 - 传输：Streamable HTTP，`POST /mcp`，只监听 `127.0.0.1`，可随时停止
-- 8 个工具：`project_info` / `list_files` / `read_file` / `write_file` / `search` / `run_script` / `get_diagnostics` / `get_outline`
+- 19 个工具：`project_info` / `list_files` / `list_dir` / `read_file` / `write_file` / `create_file` / `delete_file` / `rename_file` / `mkdir` / `search` / `run_script` / `get_diagnostics` / `get_outline` / `open_project` / `get_console` / `read_buffer` / `write_buffer` / `get_settings` / `set_settings`
 - 文件类在 Rust 里做（快），语言类转给界面执行（**和按 F5 完全同一条通道**，不是模拟）
 - 面板里一键复制客户端配置，带请求日志
 
@@ -190,8 +241,8 @@
 ### 文档
 
 - [插件开发指南](docs/plugins.md) —— 清单字段、可用 API、权限、离线生态
-- [MCP 服务器](docs/mcp.md) —— 怎么接客户端、8 个工具、协议细节与安全边界
-- [语言教程](docs/tutorial.md) —— CW Script 从入门到异常处理
+- [MCP 服务器](docs/mcp.md) —— 怎么接客户端、19 个工具、协议细节与安全边界
+- [语言教程](docs/tutorial.md) —— Copper 从入门到异常处理
 
 ---
 
@@ -318,7 +369,7 @@ int low, int high = minmax([])
 
 | 你可能想问 | 答案 |
 | --- | --- |
-| 什么是 CW Script？ | 即 CW Script（代码世界）去掉舞台相关指令后的核心语言，0.2 在原语法上补齐了函数参数、类、表达式。规范见 `language/catalog/core.json` |
+| 什么是 Copper？ | 即 Copper（代码世界）去掉舞台相关指令后的核心语言，0.2 在原语法上补齐了函数参数、类、表达式。规范见 `language/catalog/core.json` |
 | 语法难吗？ | 一行一句，回车就是新语句，缩进就是进块。指令与内建函数悬停可查中文文档 |
 | 和原版沙盒什么关系？ | 语言行为向下兼容原版（老脚本照跑），并做了向后兼容的扩展；工程形态是本地文件夹 + `project.json` |
 | 要钱吗？要登录吗？ | 不要钱，不要账号，MIT 许可，不联网 |
@@ -330,7 +381,7 @@ int low, int high = minmax([])
 
 | 文件 / 目录 | 是什么 |
 | --- | --- |
-| `Float IDE.lnk` | 快捷方式，指向源码构建产物 exe |
+| `Float IDE.lnk` | 本地快捷方式（指向构建产物 exe，不入库） |
 | `scaffold/` | 完整源码（Tauri 2 + React + Monaco） |
 | `language/` | 语言规范（catalog）与示例脚本（samples） |
 | `docs/tutorial.md` | 教程：从第一行代码写到类与继承 |
@@ -350,7 +401,7 @@ int low, int high = minmax([])
 | 跳转 | `break` / `out`、`balo` / `continue`、`if out(条件)`、`stop` |
 | 函数 | 多参数、默认值（可引用前面的参数）、`return`、递归、先用后定义；函数内局部变量不污染全局 |
 | 类 | 字段默认值、`init` 构造、方法互调、`self`、继承与 `super(…)`、对象进列表后逐项调方法 |
-| 内建函数 | 数学 / 比较 / 逻辑 / 字符串 / 集合 / 类型转换共 60 余个，可在任意表达式里调用 |
+| 内建函数 | 数学 / 比较 / 逻辑 / 字符串 / 集合 / 类型转换 / 文件共 100 余个，可在任意表达式里调用 |
 | CW 兼容 | 独立成行的 `add(a, b)` 之类仍写 `__last_calc`；`__last_*`、`ans`、`ask`、`import` 行为不变 |
 | 错误 | 语法错误带行列与中文说明；运行错误带文件行号与调用栈（`在 xxx() 中，由 yyy() 调用`） |
 
@@ -358,7 +409,7 @@ int low, int high = minmax([])
 
 | 能力 | 说明 |
 | --- | --- |
-| 语法高亮 | 为 `.cw` 定制 Monarch 词法：关键字 / 类型 / 函数名 / 类名 / 成员 / 字符串 / 注释 / 特殊变量分色 |
+| 语法高亮 | 为 `.co`（旧 `.cw` 兼容）定制 Monarch 词法：关键字 / 类型 / 函数名 / 类名 / 成员 / 字符串 / 注释 / 特殊变量分色 |
 | 智能补全 | 指令、内建函数、特殊变量、本文件函数（带参数）、类、成员：`p.` 后列出该类的字段与方法，`self.` 给当前类的成员 |
 | 签名提示 | 光标在括号里时显示参数表，并高亮当前第几个参数 |
 | 实时诊断 | 输入即解析，语法错误立刻打红波浪线，悬停看原因 |
@@ -382,7 +433,7 @@ int low, int high = minmax([])
 - 变量查看器：暂停即快照全部变量（含对象字段、局部与全局）
 - ask 提问：控制台弹出输入行，回答回车继续
 - wait：真实挂起等待，不空转
-- 防死循环：单次运行 200 万步上限，各循环 100 万次迭代守卫，冻结不了界面
+- 防死循环：F5 单次运行 2000 万步上限、F6 5000 万步上限，各循环还有迭代守卫，冻结不了界面
 
 ### 控制台与终端
 
@@ -395,9 +446,9 @@ int low, int high = minmax([])
 
 ### 工程管理
 
-- 工程就是一个普通文件夹：`project.json` + `main.cw`，别的编辑器改也认
-- 新建工程四模板：**空白工程**、**入门示例**（变量/条件/循环/列表）、**进阶示例**（函数/集合/字典/计时）、**类与对象**（字段/方法/继承）
-- 导入工程包 / 导出工程包（`.cw`，ZIP 容器），拷给别人、换机搬家一个文件
+- 工程就是一个普通文件夹：`project.json` + `main.co`，别的编辑器改也认
+- 新建工程五模板：**空白工程**、**入门示例**（变量/条件/循环/列表）、**进阶示例**（函数/集合/字典/计时）、**类与对象**（字段/方法/继承）、**指针示例**（alloc / free 手动内存）
+- 导入工程包 / 导出工程包（`.cw` 容器，ZIP 格式），拷给别人、换机搬家一个文件
 - 最近工程：一点就回，可逐条移除
 
 ---
@@ -428,10 +479,10 @@ print(h.name + " 剩余 " + h.hurt(30))
 - **函数**：`function name(a, b = 1)` 定义，`name(1)` 调用，`return` 返回值，可递归
 - **类**：`class Name` + 字段 + `init` + 方法；`new Name(…)` 创建；方法里字段可裸名读写
 - **特殊变量**：`add / lt / join / read / time read` 等指令的结果仍写进 `__last_calc / __last_cmp / __last_str / __last_read / __last_time`；`ask` 的回答存 `ans`
-- **条件运算符**：用 `> < == != && || !`，不用 and / or / not 关键字
-- **import**：`import "lib.cw"` 按文件，`import "tools"` 按文件夹（找 `tools/main.cw`）
+- **条件运算符**：用 `> < == != && || !`，也支持 `and / or / not` 关键字写法（等价）
+- **import**：`import "lib.co"` 按文件，`import "tools"` 按文件夹（找 `tools/main.co`）
 
-五份示例在 `language/samples/`，从 hello 到类与继承。
+十六份示例在 `language/samples/`，从 hello 到类与继承，再到手动内存与指针游戏。
 
 ---
 
@@ -449,7 +500,7 @@ cd scaffold
 npm install
 npm run dev          # 只跑前端，浏览器里看界面
 npm run tauri dev    # 跑完整桌面应用
-npm run tauri build  # 打包 MSI
+npm run tauri build  # 打包 NSIS 安装包
 npm run test:lang    # 语言内核测试（54 项）
 npm run bench:lang   # 性能基准（对比 CPython）
 ```
@@ -481,7 +532,7 @@ Float/
 │   └── src-tauri/             后端：Rust（文件 / 工程 / ConPTY 终端 / Git）
 └── language/
     ├── catalog/               语言规范（core.json 为权威）
-    └── samples/               五份示例脚本
+    └── samples/               十六份示例脚本
 ```
 
 ---
@@ -503,7 +554,7 @@ F5 把代码编译成 JS 跑（快），F6 用解释器逐行跑（能停、能�
 **类的方法里为什么能直接写 `hp` 而不是 `self.hp`？**
 这是有意设计：方法内先找局部变量，再找当前对象的字段。写 `self.hp` 更明确，两种都行。
 
-**和原版 CW Script 工程通用吗？**
+**和原版 Copper 工程通用吗？**
 脚本语法向下兼容；原版网页里的舞台 / 角色相关指令不在本语言范围内。原版参考材料在 `reference/`。
 
 ---
@@ -513,7 +564,7 @@ F5 把代码编译成 JS 跑（快），F6 用解释器逐行跑（能停、能�
 - **MIT 许可**，非营利，小方工作室出品。
 - **不联网**：无账号、无更新检查、无遥测。
 - **全中文界面**，Windows 优先。
-- 语言规范基于「代码世界 CW Script」，本软件为独立重制的桌面 IDE。
+- 语言规范基于「代码世界 Copper」，本软件为独立重制的桌面 IDE。
 
 ---
 

@@ -24,12 +24,34 @@ pub type ListRef = Rc<RefCell<Vec<Value>>>;
 /// 外面套 Rc 是故意的：忘了 `free` 也不会漏——没人引用时自动回收；
 /// `free` 之后再访问会得到明确的中文报错，而不是野指针。
 /// 也就是说同一份脚本里动态内存和手动内存可以混着用，不需要任何开关。
+/// 指针指向哪里：
+/// - `Cells`：alloc 自己的块，或者 &列表[i]（共享列表的 Vec）
+/// - `Local` / `Global`：&变量（直接绑到那个槽位，读写都回到变量本身）
+pub enum PtrTarget {
+    Cells(ListRef),
+    Local { frame: u64, slot: usize },
+    Global(usize),
+}
+
 pub struct MemBlock {
-    pub buf: Vec<Value>,
+    pub target: PtrTarget,
+    /// 当前指向第几格（指针运算改它，共享同一块内存）
+    pub idx: usize,
+    /// 是不是 alloc 出来的（只有自己的块才允许 free）
+    pub owned: bool,
     pub freed: bool,
 }
 
 pub type PtrRef = Rc<RefCell<MemBlock>>;
+
+/// 复制指针的目标（Cells 共享同一个 Rc，槽位是纯数据）
+pub fn clone_target(t: &PtrTarget) -> PtrTarget {
+    match t {
+        PtrTarget::Cells(c) => PtrTarget::Cells(Rc::clone(c)),
+        PtrTarget::Local { frame, slot } => PtrTarget::Local { frame: *frame, slot: *slot },
+        PtrTarget::Global(i) => PtrTarget::Global(*i),
+    }
+}
 pub type DictRef = Rc<RefCell<Dict>>;
 
 /// 用户函数（脚本里 function 定义的）
@@ -147,7 +169,35 @@ impl Value {
 
     /// 申请 n 个格子，初值都是 null
     pub fn alloc(n: usize) -> Value {
-        Value::Ptr(Rc::new(RefCell::new(MemBlock { buf: vec![Value::Null; n], freed: false })))
+        Value::Ptr(Rc::new(RefCell::new(MemBlock {
+            target: PtrTarget::Cells(Rc::new(RefCell::new(vec![Value::Null; n]))),
+            idx: 0,
+            owned: true,
+            freed: false,
+        })))
+    }
+
+    /// &列表[i]：共享列表本身，写入会改到原列表
+    pub fn alias_list(list: ListRef, idx: usize) -> Value {
+        Value::Ptr(Rc::new(RefCell::new(MemBlock {
+            target: PtrTarget::Cells(list),
+            idx,
+            owned: false,
+            freed: false,
+        })))
+    }
+
+    /// 指针平移：共享同一块内存，只挪 idx
+    pub fn shift_ptr(p: &PtrRef, n: i64) -> Value {
+        let b = p.borrow();
+        let idx = b.idx as i64 + n;
+        let idx = if idx < 0 { 0 } else { idx as usize };
+        Value::Ptr(Rc::new(RefCell::new(MemBlock {
+            target: clone_target(&b.target),
+            idx,
+            owned: b.owned,
+            freed: b.freed,
+        })))
     }
 
     pub fn type_name(&self) -> &'static str {
@@ -258,9 +308,16 @@ impl Value {
             Value::Ptr(p) => {
                 let m = p.borrow();
                 if m.freed {
-                    format!("<ptr {} 已释放>", m.buf.len())
+                    "<ptr 已释放>".to_string()
                 } else {
-                    format!("<ptr {}>", m.buf.len())
+                    match &m.target {
+                        PtrTarget::Cells(c) => {
+                            let n = c.borrow().len();
+                            if m.owned { format!("<ptr {} 格@{{{}}}>", n, m.idx) }
+                            else { format!("<ptr → 第 {} 格>", m.idx) }
+                        }
+                        _ => "<ptr → 变量>".to_string(),
+                    }
                 }
             }
             Value::Dict(d) => {

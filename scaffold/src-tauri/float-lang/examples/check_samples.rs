@@ -7,7 +7,7 @@ fn main() {
         .expect("读 samples 目录")
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| p.extension().map(|x| x == "cw").unwrap_or(false))
+        .filter(|p| p.extension().map(|x| x == "co" || x == "cw").unwrap_or(false))
         .collect();
     files.sort();
     let mut bad = 0;

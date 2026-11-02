@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../core/tauri';
 import { askConfirm, askText } from '../ui/prompt';
+import copperSrc from '../assets/copper.png';
 import { IconFile, IconFolder, IconPlus, IconTrash, IconRefresh } from '../ui/icons';
 import type { FileEntry } from '../core/types';
 
@@ -12,7 +13,7 @@ type Props = {
   projectDir: string;
   /** 当前编辑器打开的文件，用来在树里高亮 */
   activePath?: string | null;
-  bus: React.MutableRefObject<{ editor?: { openFile: (p: string) => Promise<void>; closeTab: (p: string) => void } }>;
+  bus: React.MutableRefObject<{ editor?: { openFile: (p: string) => Promise<void>; closeTab: (p: string) => void }; tree?: { refresh: () => void } }>;
   onDirtyTree?: () => void;
 };
 
@@ -21,6 +22,7 @@ type Menu = { x: number; y: number; node: TreeNode | null } | null;
 /** 文件类型 → 图标颜色（只用来快速扫视，不求花哨） */
 function fileKind(name: string): string {
   const n = name.toLowerCase();
+  if (n.endsWith('.co')) return 'co';
   if (n.endsWith('.cw')) return 'cw';
   if (n.endsWith('.json')) return 'json';
   if (n.endsWith('.md')) return 'md';
@@ -63,6 +65,45 @@ export function FileTree({ projectDir, activePath, bus, onDirtyTree }: Props) {
 
   refreshRef.current = refresh;
   useEffect(() => { refresh(); }, [refresh]);
+  // 给 Workspace 的 fs:changed 监听用：磁盘有变动时从外面刷新树
+  useEffect(() => {
+    bus.current.tree = { refresh: () => refreshRef.current() };
+    return () => { if (bus.current.tree) delete bus.current.tree; };
+  }, [bus]);
+
+  const childrenRef = useRef(children);
+  childrenRef.current = children;
+
+  /* 活动文件在树里定位：把它的每一级父目录展开（没加载的当场加载），
+   * 双击 .co / AI 打开的文件立刻能在侧边栏看到，不用手动一层层点开。 */
+  useEffect(() => {
+    if (!activePath) return;
+    const norm = activePath.replace(/\\/g, '/');
+    const root = projectDir.replace(/\\/g, '/').replace(/\/+$/, '');
+    if (!norm.startsWith(root + '/')) return;
+    const parts = norm.slice(root.length + 1).split('/');
+    void (async () => {
+      const dirs: string[] = [];
+      let prefix = root;
+      for (let i = 0; i < parts.length - 1; i++) {
+        prefix += '/' + parts[i];
+        dirs.push(prefix);
+      }
+      if (dirs.length) {
+        setExpanded((s) => {
+          const n = new Set(s);
+          for (const d of dirs) n.add(d);
+          return n;
+        });
+        for (const d of dirs) {
+          if (!childrenRef.current.has(d)) {
+            const list = await loadDir(d);
+            setChildren((m) => { const n = new Map(m); n.set(d, list); return n; });
+          }
+        }
+      }
+    })();
+  }, [activePath, projectDir, loadDir]);
 
   const toggleDir = async (node: TreeNode): Promise<void> => {
     const wasOpen = expanded.has(node.path);
@@ -83,21 +124,21 @@ export function FileTree({ projectDir, activePath, bus, onDirtyTree }: Props) {
 
   const newFileIn = async (dir: string, isDir: boolean): Promise<void> => {
     const name = await askText(isDir ? '新建文件夹' : '新建文件', {
-      placeholder: isDir ? '文件夹名称' : '文件名，如 tools.cw',
-      hint: isDir ? '' : '不写后缀会自动补 .cw',
+      placeholder: isDir ? '文件夹名称' : '文件名，如 tools.co',
+      hint: isDir ? '' : '不写后缀会自动补 .co',
       validate: (v) => (/[\\/:*?"<>|]/.test(v) ? '名称里不能有 \\ / : * ? " < > |' : null)
     });
     if (!name) return;
-    // 提示里说了「不写后缀会自动补 .cw」，就得真的补
-    const finalName = isDir || /\.[A-Za-z0-9]{1,8}$/.test(name) ? name : name + '.cw';
+    // 提示里说了「不写后缀会自动补 .co」，就得真的补
+    const finalName = isDir || /\.[A-Za-z0-9]{1,8}$/.test(name) ? name : name + '.co';
     const p = dir + '/' + finalName;
     try {
       if (isDir) await api.fsMkdir(p);
       else {
         await api.fsWrite(
           p,
-          /\.cw$/i.test(finalName)
-            ? '// 新建的 CW Script 文件\n\nprint("你好，CW Script")\n'
+          /\.(co|cw)$/i.test(finalName)
+            ? '// 新建的 Copper 文件\n\nprint("你好，Copper")\n'
             : ''
         );
       }
@@ -165,7 +206,9 @@ export function FileTree({ projectDir, activePath, bus, onDirtyTree }: Props) {
           </span>
           {node.isDir
             ? <span className={`fi dir ${isOpen ? 'open' : ''}`}><IconFolder size={13} /></span>
-            : <span className={`fi ${fileKind(node.name)}`}><IconFile size={13} /></span>}
+            : fileKind(node.name) === 'co'
+              ? <img className="fi-img" src={copperSrc} width={13} height={13} alt="" draggable={false} />
+              : <span className={`fi ${fileKind(node.name)}`}><IconFile size={13} /></span>}
           <span className="ti-name">{node.name}</span>
         </div>
         {node.isDir && isOpen && (children.get(node.path) ?? []).map((c) => renderNode(c, depth + 1))}

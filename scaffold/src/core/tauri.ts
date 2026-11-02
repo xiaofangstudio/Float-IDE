@@ -17,6 +17,9 @@ export function isTauriEnv(): boolean {
 export const api = {
   /* 文件 */
   fsList: (dir: string) => invoke<FileEntry[]>('fs_list', { dir }),
+  /** 开始监视工程目录（.cw/.json/.txt 的增删改），变更通过 fs:changed 事件推送 */
+  fsWatchStart: (project: string) =>
+    invoke<{ watching: boolean; root: string }>('fs_watch_start', { project }),
   fsRead: (path: string) => invoke<string>('fs_read', { path }),
   fsWrite: (path: string, contents: string) => invoke<void>('fs_write', { path, contents }),
   /** 文件指纹（mtime+大小），用于检测磁盘内容是否被别的进程改动 */
@@ -65,16 +68,16 @@ export const api = {
   projectImportZip: (zipPath: string, destDir: string) =>
     invoke<string>('project_import_zip', { zipPath, destDir }),
   pickFolder: (title: string) => invoke<string | null>('pick_folder', { title }),
-  /** 选单个文件（.cw 之类）。"打开"以前只能选文件夹，所以根本看不到脚本文件 */
-  pickOpenFile: (title: string, exts: string[] = ['cw']) =>
+  /** 选单个文件（.co / .cw 之类）。"打开"以前只能选文件夹，所以根本看不到脚本文件 */
+  pickOpenFile: (title: string, exts: string[] = ['co', 'cw', 'md', 'txt']) =>
     invoke<string | null>('pick_open_file', { title, exts }),
-  /** 启动参数里带进来的路径（双击 .cw 打开时） */
+  /** 启动参数里带进来的路径（双击 .co / .cw 打开时） */
   startupPath: () => invoke<string | null>('startup_path'),
   pickSaveFile: (title: string, defaultName: string, ext: string) =>
     invoke<string | null>('pick_save_file', { title, defaultName, ext }),
   openPath: (path: string) => invoke<void>('open_path', { path }),
   pickImage: (title: string) => invoke<string | null>('pick_image', { title }),
-  detectEnv: () => invoke<{ browser: string | null; ffmpeg: string | null }>('detect_env'),
+  detectEnv: () => invoke<{ edge: string | null; chrome: string | null }>('detect_env'),
 
   /* 最近工程 */
   recentGet: () => invoke<RecentItem[]>('recent_get'),
@@ -114,5 +117,10 @@ export const api = {
   /* Git */
   gitAvailable: () => invoke<boolean>('git_available'),
   gitRun: (dir: string, args: string[]) =>
-    invoke<{ code: number; stdout: string; stderr: string }>('git_run', { dir, args })
+    invoke<{ code: number; stdout: string; stderr: string }>('git_run', { dir, args }),
+
+  /* 文件关联（Windows 用户级注册表）：让资源管理器给 .co 显示图标、双击能打开 */
+  assocStatus: () => invoke<boolean>('assoc_status'),
+  assocRegister: () => invoke<void>('assoc_register'),
+  assocUnregister: () => invoke<void>('assoc_unregister')
 };

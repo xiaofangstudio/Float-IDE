@@ -603,7 +603,7 @@ print("回合：" + round)
     const { readFileSync } = await import('node:fs');
     const names = ['01_hello', '02_control', '03_collections', '04_functions', '05_class'];
     for (const n of names) {
-      const src = readFileSync(new URL(`../../language/samples/${n}.cw`, import.meta.url), 'utf8');
+      const src = readFileSync(new URL(`../../language/samples/${n}.co`, import.meta.url), 'utf8');
       const r = await run(src, { answers: ['小明'] });
       eq(`示例 ${n} 无报错`, r.err, []);
       eq(`示例 ${n} 有输出`, r.out.length > 0, true);
@@ -614,7 +614,7 @@ print("回合：" + round)
   {
     const { TEMPLATES } = await import('../src/core/templates');
     for (const tpl of TEMPLATES) {
-      const r = await run(tpl.files['main.cw'], { answers: ['小明'] });
+      const r = await run(tpl.files['main.co'], { answers: ['小明'] });
       eq(`模板「${tpl.name}」无报错`, r.err, []);
       eq(`模板「${tpl.name}」有输出`, r.out.length > 0, true);
     }
@@ -696,6 +696,60 @@ print(a.nope)
   await t('汇编式和运算符混写', 'int a = 2\nint b = 3\nprint add a b + 10', ['15']);
   await t('带括号的老写法也还在', 'print add(2, 3)', ['5']);
 
+  /* ── Copper 改名：.co 主扩展名 + .cw 旧扩展名兼容 ── */
+  {
+    const { Runner } = await import('../src/lang/interp');
+    const runFiles = (sources: Map<string, string>, entry: string): Promise<{ out: string[]; err: string | null }> =>
+      new Promise((done) => {
+        (globalThis as any).window = (globalThis as any).window ?? {};
+        const host = (globalThis as any).window;
+        host.__floatSources = sources;
+        const out: string[] = [];
+        let err: string | null = null;
+        let settled = false;
+        const finish = (): void => { if (!settled) { settled = true; done({ out, err }); } };
+        const r = new Runner(entry, {
+          output: (l) => { if (l.kind === 'out') out.push(l.text); else if (l.kind === 'err') err = l.text; },
+          onError: (e) => { err = e.message; },
+          onDone: finish,
+          onState: () => {},
+          onPaused: () => {}
+        });
+        try { r.start('run'); } catch (e) { err = String(e); finish(); }
+        setTimeout(finish, 20000);
+      });
+    // 1) 新扩展名 .co：显式带后缀
+    {
+      const sources = new Map<string, string>([
+        ['main.co', 'import "lib.co"\nprint greet("Copper")'],
+        ['lib.co', 'function greet(who)\n    return "你好，" + who']
+      ]);
+      const r = await runFiles(sources, 'main.co');
+      eq('.co 显式 import 能跑', r.out, ['你好，Copper']);
+      eq('.co 显式 import 无报错', r.err, null);
+    }
+    // 2) 省略后缀时优先 .co
+    {
+      const sources = new Map<string, string>([
+        ['main.co', 'import "lib"\nprint twice(11)'],
+        ['lib.co', 'function twice(x)\n    return x * 2'],
+        ['lib.cw', 'function twice(x)\n    return " WRONG "']
+      ]);
+      const r = await runFiles(sources, 'main.co');
+      eq('省略后缀优先认 .co', r.out, ['22']);
+    }
+    // 3) 旧 .cw 工程原样能跑（用户现存工程不搬家）
+    {
+      const sources = new Map<string, string>([
+        ['main.cw', 'import "lib.cw"\nprint greet("旧工程")'],
+        ['lib.cw', 'function greet(who)\n    return "还在跑：" + who']
+      ]);
+      const r = await runFiles(sources, 'main.cw');
+      eq('.cw 旧工程能跑', r.out, ['还在跑：旧工程']);
+      eq('.cw 旧工程无报错', r.err, null);
+    }
+  }
+
   /* ── 补全用的符号表：变量必须能被收集到（以前只有写了类型关键字的才算） ── */
   {
     const src = [
@@ -725,6 +779,27 @@ print(a.nope)
       a.vars.find((v) => v.name === 'fang')?.type
     ], ['list', 'dict', 'str', 'int']);
     eq('函数进了符号表', a.funcs.map((f) => f.name), ['打招呼']);
+  }
+
+  /* ── 彩蛋：第 27 行报错，吉祥物廿七（三脚橘猫）瘸在这行 ── */
+  {
+    const pad = (n: number): string => Array.from({ length: n }, (_, i) => `print ${i + 1}`).join('\n');
+    const at27 = await run(pad(26) + '\nprint 1 / 0');
+    eq('第 27 行报错带「喵～」彩蛋', String(at27.err[0] ?? '').startsWith('喵～第 27 行瘸了…'), true);
+    const at26 = await run(pad(25) + '\nprint 1 / 0');
+    eq('第 26 行不触发彩蛋', String(at26.err[0] ?? '').startsWith('出错'), true);
+    const at28 = await run(pad(27) + '\nprint 1 / 0');
+    eq('第 28 行不触发彩蛋', String(at28.err[0] ?? '').startsWith('出错'), true);
+    // 彩蛋里带着原因，不是只有一句喵
+    eq('彩蛋后面跟真实原因', String(at27.err[0] ?? '').includes('除数不能为 0'), true);
+  }
+
+  /* ── 运行时错误行号必须准（编译通道曾经把运算符错误一律报成第 1 行） ── */
+  {
+    const r2 = await run('print 1\nprint 2 / 0');
+    eq('编译通道：第 2 行的错报第 2 行', String(r2.err[0] ?? '').includes('第 2 行'), true);
+    const r3 = await run('print 1\nprint 2\nthrow "坏了"');
+    eq('编译通道：throw 报所在行', String(r3.err[0] ?? '').includes('第 3 行'), true);
   }
 
   /* ── 结果 ── */

@@ -143,3 +143,9 @@ export const IconKeyboard = ({ size, style }: P) => (
 export const IconLayers = ({ size, style }: P) => (
   <svg {...s(size)} style={style} viewBox="0 0 24 24"><path d="M12 3.5l8 4.5-8 4.5-8-4.5z" /><path d="M4 12l8 4.5 8-4.5" /><path d="M4 16.5L12 21l8-4.5" /></svg>
 );
+export const IconMaximize = ({ size, style }: P) => (
+  <svg {...s(size)} style={style} viewBox="0 0 24 24"><path d="M4 9V4h5" /><path d="M20 15v5h-5" /><path d="M15 4h5v5" /><path d="M9 20H4v-5" /></svg>
+);
+export const IconMinimize = ({ size, style }: P) => (
+  <svg {...s(size)} style={style} viewBox="0 0 24 24"><path d="M9 4v5H4" /><path d="M15 20v-5h5" /><path d="M20 9h-5V4" /><path d="M4 15h5v5" /></svg>
+);

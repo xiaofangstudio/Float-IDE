@@ -14,14 +14,50 @@ const isTauri = (): boolean =>
   typeof window !== 'undefined' && '__TAURI_INTERNALS__' in (window as unknown as Record<string, unknown>);
 
 /** 把一个路径拆成"工程目录 + 要打开的文件"。
- *  .cw 就当文件，其余当文件夹——双击 .cw 打开走的就是这条。 */
+ *  .co / .cw / .json / .txt / .md / .in 就当文件（.cw 是旧扩展名，保留兼容），其余当文件夹。 */
 export function resolveTarget(target: string): { dir: string; openFile?: string } {
   const norm = target.replace(/\\/g, '/').replace(/\/+$/, '');
-  if (/\.cw$/i.test(norm)) {
+  if (/\.(co|cw|json|txt|md|in)$/i.test(norm)) {
     const cut = norm.lastIndexOf('/');
     return { dir: cut > 0 ? norm.slice(0, cut) : norm, openFile: norm };
   }
   return { dir: norm };
+}
+
+
+/** 工程页崩溃兜底：以前 Workspace 一炸整个页面白掉/弹回欢迎页，谁也不知道为什么。
+ *  现在把错误亮出来，给"回到欢迎页"的出口——报错能截图，问题就能修。 */
+class WorkspaceBoundary extends React.Component<
+  { resetKey: string; onExit: () => void; children: React.ReactNode },
+  { err: Error | null }
+> {
+  state = { err: null as Error | null };
+  static getDerivedStateFromError(err: Error): { err: Error } {
+    return { err };
+  }
+  componentDidUpdate(prev: { resetKey: string }): void {
+    // 换工程 = 全新一次，旧错误清掉
+    if (prev.resetKey !== this.props.resetKey && this.state.err) this.setState({ err: null });
+  }
+  render(): React.ReactNode {
+    if (this.state.err) {
+      return (
+        <div style={{ padding: 32, maxWidth: 760, margin: '0 auto', fontFamily: 'monospace' }}>
+          <h2 style={{ marginBottom: 12 }}>工程页出错了（这不是脚本的锅，是 IDE 内部的问题）</h2>
+          <pre style={{
+            whiteSpace: 'pre-wrap', background: 'var(--bg2, #f5f5f5)', color: 'var(--fg, #222)',
+            padding: 16, borderRadius: 6, fontSize: 12, lineHeight: 1.6, userSelect: 'text'
+          }}>{String(this.state.err.stack ?? this.state.err.message ?? this.state.err)}</pre>
+          <button
+            className="btn primary"
+            style={{ marginTop: 16 }}
+            onClick={() => this.props.onExit()}
+          >回到欢迎页</button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
 }
 
 /* 应用外壳：背景图铺在最底层，面板半透明浮在上面。 */
@@ -82,12 +118,17 @@ export default function App() {
           />
         )}
         {page.kind === 'ws' && (
-          <Workspace
-            projectDir={page.dir}
-            initialFile={page.openFile}
-            onOpenTarget={openTarget}
+          <WorkspaceBoundary
+            resetKey={page.dir + '|' + (page.openFile ?? '')}
             onExit={() => setPage({ kind: 'welcome' })}
-          />
+          >
+            <Workspace
+              projectDir={page.dir}
+              initialFile={page.openFile}
+              onOpenTarget={openTarget}
+              onExit={() => setPage({ kind: 'welcome' })}
+            />
+          </WorkspaceBoundary>
         )}
       </div>
       {/* 输入/确认对话框：替代 WebView 里不可用的 prompt / confirm */}

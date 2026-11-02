@@ -1,0 +1,25 @@
+### and/or/not 关键字：短路（先判存在再取值，不会崩）
+dict d = {"a": 1}
+if d.has("a") and d["a"] > 0
+    print("有")
+if not d.has("mail")
+    print("没有 mail")
+if d.has("mail") and d["mail"] > 0
+    print("不该出现")
+print("安然无恙")
+### 三种写法混用
+print(true and false)
+print(true && false)
+print(false or true)
+print(false || true)
+print(not false)
+print(!false)
+print(not (1 > 2))
+### 优先级一致
+print(1 == 1 and 2 == 2)
+print(not 1 > 2)
+### or 短路
+fn boom()
+    throw "不该被调用"
+print(true or boom())
+print(false and boom())

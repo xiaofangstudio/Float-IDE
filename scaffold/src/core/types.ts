@@ -11,7 +11,7 @@ export type ProjectMeta = {
   kind?: string;
 };
 
-export type DetectInfo = { browser: string | null; ffmpeg: string | null };
+export type DetectInfo = { edge: string | null; chrome: string | null };
 
 /** 控制台行：out=普通输出、err=红色错误、info=蓝色信息；
  * dbg-* 是「调试 报告/警告/报错」三档（蓝/黄/红），纯给开发者看的 */

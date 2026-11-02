@@ -4,7 +4,7 @@
 //! 这一层只做纯值变换，不碰 IO / 时间 / 随机数以外的世界状态；
 //! 输出走 VM 的 Print 指令，所以这里没有 print。
 
-use crate::value::{Dict, Value};
+use crate::value::{PtrTarget, Dict, Value};
 use std::rc::Rc;
 
 type R<T> = Result<T, String>;
@@ -101,7 +101,13 @@ pub fn call_builtin(name: &str, args: &[Value]) -> R<Value> {
                 Value::Str(s) => s.chars().count() as i64,
                 Value::List(l) => l.borrow().len() as i64,
                 Value::Dict(d) => d.borrow().len() as i64,
-                Value::Ptr(p) => p.borrow().buf.len() as i64,
+                Value::Ptr(p) => {
+                    let m = p.borrow();
+                    match &m.target {
+                        PtrTarget::Cells(c) => (c.borrow().len().saturating_sub(m.idx)) as i64,
+                        _ => 1,
+                    }
+                }
                 other => return Err(format!("len 不接受 {}", other.to_display())),
             }))
         }
@@ -125,8 +131,13 @@ pub fn call_builtin(name: &str, args: &[Value]) -> R<Value> {
                     if m.freed {
                         return Err("这块内存已经 free 过了，不用再 free 一次".into());
                     }
-                    m.buf.clear();
-                    m.buf.shrink_to_fit();
+                    if !m.owned {
+                        return Err("这不是 alloc 出来的内存（多半是 &列表[i] 或 &变量 拿到的地址），不能 free".into());
+                    }
+                    if let PtrTarget::Cells(c) = &m.target {
+                        c.borrow_mut().clear();
+                        c.borrow_mut().shrink_to_fit();
+                    }
                     m.freed = true;
                     Ok(Value::Null)
                 }
@@ -813,13 +824,24 @@ pub fn call_method(recv: &Value, name: &str, args: &[Value]) -> R<Value> {
         Value::List(l) => list_method(l, name, args),
         Value::Dict(d) => dict_method(d, name, args),
         Value::Ptr(p) => match name {
-            "len" => Ok(Value::Int(p.borrow().buf.len() as i64)),
+            "len" => {
+                let m = p.borrow();
+                Ok(Value::Int(match &m.target {
+                    PtrTarget::Cells(c) => (c.borrow().len().saturating_sub(m.idx)) as i64,
+                    _ => 1,
+                }))
+            }
             "free" => {
                 let mut m = p.borrow_mut();
                 if m.freed {
                     return Err("这块内存已经 free 过了，不用再 free 一次".into());
                 }
-                m.buf.clear();
+                if !m.owned {
+                    return Err("这不是 alloc 出来的内存（多半是 &列表[i] 或 &变量 拿到的地址），不能 free".into());
+                }
+                if let PtrTarget::Cells(c) = &m.target {
+                    c.borrow_mut().clear();
+                }
                 m.freed = true;
                 Ok(Value::Null)
             }

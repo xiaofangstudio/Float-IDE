@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import type { ConsoleLine } from '../core/types';
-import { IconClose, IconPlus } from '../ui/icons';
+import { IconClose, IconPlus, IconMaximize, IconMinimize } from '../ui/icons';
 
 /* 底部 dock：控制台（print 输出 / ask 提问输入 / 运行信息） + 真终端。 */
 
@@ -28,7 +28,7 @@ function TerminalLazy({ projectDir, visible }: { projectDir: string; visible: bo
   return Comp ? <Comp projectDir={projectDir} /> : <div className="term-host" />;
 }
 
-export function ConsoleDock({ lines, askQuestion, onAnswer, running, stateText, tab, onTab, projectDir, onClear, height, searchNode }: Props) {
+export function ConsoleDock({ lines, askQuestion, onAnswer, running, stateText, tab, onTab, projectDir, onClear, height, searchNode, full, onToggleFull }: Props & { full?: boolean; onToggleFull?: () => void }) {
   const [input, setInput] = useState('');
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -59,6 +59,14 @@ export function ConsoleDock({ lines, askQuestion, onAnswer, running, stateText, 
             </button>
           </>
         )}
+        <button
+          className="icon-btn"
+          style={{ width: 22, height: 22, marginRight: 4 }}
+          title={full ? '还原面板高度' : '面板全屏'}
+          onClick={() => onToggleFull?.()}
+        >
+          {full ? <IconMinimize size={11} /> : <IconMaximize size={11} />}
+        </button>
         {tab === 'terminal' && <span style={{ marginLeft: 4, display: 'flex' }}><IconPlus size={0} /></span>}
         <span style={{ flex: 1 }} />
         <span className="muted" style={{ fontSize: 11, marginRight: 8 }}>{stateText}</span>

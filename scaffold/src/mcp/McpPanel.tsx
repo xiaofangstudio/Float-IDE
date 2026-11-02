@@ -23,7 +23,7 @@ const TOOL_DOC: { name: string; desc: string }[] = [
   { name: 'write_file', desc: '原子写入工程文件' },
   { name: 'search', desc: '全文搜索，返回文件/行号/该行内容' },
   { name: 'run_script', desc: '用 Float 内核跑一段代码，返回输出与错误' },
-  { name: 'get_diagnostics', desc: '对 .cw 做语法与语义检查' },
+  { name: 'get_diagnostics', desc: '对 Copper 源文件（.co/.cw）做语法与语义检查' },
   { name: 'get_outline', desc: '返回文件的符号大纲' }
 ];
 

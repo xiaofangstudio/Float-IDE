@@ -58,7 +58,9 @@ export type FieldDecl = {
 export type Target =
   | ({ k: 'var'; name: string } & Span)
   | ({ k: 'member'; obj: Expr; name: string } & Span)
-  | ({ k: 'idx'; obj: Expr; index: Expr } & Span);
+  | ({ k: 'idx'; obj: Expr; index: Expr } & Span)
+  /** `*p = v`：通过指针写回它指向的那一格 */
+  | ({ k: 'deref'; ptr: Expr } & Span);
 
 export type AssignOp = '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '**=';
 

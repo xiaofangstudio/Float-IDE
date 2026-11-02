@@ -75,6 +75,10 @@ export function inferType(e: Expr, env: TypeEnv): Ty {
     case 'var': return env.vars.get(e.name) ?? 'unknown';
     case 'new': return env.classes.has(e.cls) ? e.cls : 'unknown';
     case 'un': {
+      /* &x 取地址 → ptr；*p 解引用 → 指向什么由那块内存决定，检查器不猜。
+       * 以前这行按"数值运算"处理，导致 ptr p = &x 被误报成「值是 int」。 */
+      if (e.op === '&') return 'ptr';
+      if (e.op === '*') return 'unknown';
       const a = inferType(e.a, env);
       if (e.op === '!') return 'bool';
       return NUMERIC.has(a) ? a : 'unknown';

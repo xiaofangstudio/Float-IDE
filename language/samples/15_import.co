@@ -1,8 +1,8 @@
 -- 15 import：把代码拆成多个文件
--- 写法：import "文件名.cw"（后缀可以不写，路径相对当前脚本）
+-- 写法：import "文件名.co"（旧 .cw 也认；后缀可以不写，路径相对当前脚本）
 -- 效果：引进来之后，库里的函数当本文件的函数用，没有额外开销。
 
-import "15_import_geo.cw"
+import "15_import_geo.co"
 
 print "半径 2 的圆："
 print "  面积 " + 圆面积(2)

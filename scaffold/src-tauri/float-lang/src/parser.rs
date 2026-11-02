@@ -205,6 +205,8 @@ impl<'a> ExprParser<'a> {
         loop {
             let (op_text, tok) = match self.cur() {
                 Some(t) if t.kind == TokKind::Op => (t.text.clone(), t.clone()),
+                // `a mod b`：mod 只在中缀位置当取余；mod(a,b) 与汇编式 mod a b 不受影响
+                Some(t) if t.kind == TokKind::Ident && t.text == "mod" => ("%".to_string(), t.clone()),
                 _ => break,
             };
             let prec = match prec_of(&op_text) {
@@ -250,10 +252,27 @@ impl<'a> ExprParser<'a> {
             None => return Err(self.err("缺少表达式")),
         };
         if t.kind == TokKind::Op {
+            // 前缀位置的 ** 是两次解引用：幂运算不会出现在操作数位置
+            if t.text == "**" {
+                self.pos += 1;
+                let a = self.parse_unary()?;
+                let span = Span::new(self.file, t.line, t.col, a.span.end_col);
+                let inner = Expr::new(
+                    ExprKind::Un { op: Op::Deref, a: Box::new(a) },
+                    span.clone(),
+                );
+                return Ok(Expr::new(
+                    ExprKind::Un { op: Op::Deref, a: Box::new(inner) },
+                    span,
+                ));
+            }
             let op = match t.text.as_str() {
                 "-" => Some(Op::Neg),
                 "!" => Some(Op::Not),
                 "~" => Some(Op::BitNot),
+                // &取地址、*解引用：只在操作数位置出现，不影响二元 & / *
+                "&" => Some(Op::Addr),
+                "*" => Some(Op::Deref),
                 _ => None,
             };
             if let Some(op) = op {
@@ -1287,7 +1306,9 @@ impl Parser {
             ExprKind::Var(name) => Ok(Target::Var(name)),
             ExprKind::Member { obj, name } => Ok(Target::Member(*obj, name)),
             ExprKind::Idx { obj, index } => Ok(Target::Idx(*obj, *index)),
-            _ => Err(FloatError::new("这里只能给变量、成员或下标赋值", e.span)),
+            // *p = 值
+            ExprKind::Un { op: Op::Deref, a } => Ok(Target::Deref(*a)),
+            _ => Err(FloatError::new("这里只能给变量、成员、下标或 *指针 赋值", e.span)),
         }
     }
 
@@ -1878,6 +1899,14 @@ impl Parser {
         indent: usize,
     ) {
         loop {
+            /* 注释 / 空行夹在 if 和 elif 中间不能把链断掉（和 TS 侧同一规则） */
+            while let Some(l) = self.lines.get(self.pos) {
+                if l.skipped || l.is_comment || l.code.is_empty() {
+                    self.pos += 1;
+                } else {
+                    break;
+                }
+            }
             let ln = match self.lines.get(self.pos) {
                 Some(l) => l.clone(),
                 None => return,

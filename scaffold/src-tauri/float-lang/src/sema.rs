@@ -350,6 +350,7 @@ impl Checker {
                 self.expr(obj);
                 self.expr(idx);
             }
+            Target::Deref(ptr) => self.expr(ptr),
         }
     }
 
@@ -367,6 +368,7 @@ impl Checker {
                 self.expr(obj);
                 self.expr(idx);
             }
+            Target::Deref(ptr) => self.expr(ptr),
         }
     }
 

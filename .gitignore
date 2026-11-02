@@ -24,6 +24,7 @@ scaffold/.e*/
 _check-*.png
 _e*.png
 _selftest-dom.html
+scaffold/_audit.*
 
 # ===== 本地 / 工具 =====
 .workbuddy/

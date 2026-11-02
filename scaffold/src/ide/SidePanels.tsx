@@ -21,9 +21,48 @@ type Props = {
   onOpenProblem?: (p: ProblemItem) => void;
 };
 
+/** 变量一行：长值（大字典 / 列表 / 长文本）默认截断，可展开看全量。
+ *  展开区限高滚动，几千行的字典也不会把面板撑爆。 */
+const VALUE_PREVIEW = 72;
+function VarItem({ v, special }: { v: VarRow; special?: boolean }): React.ReactElement {
+  const [open, setOpen] = useState(false);
+  const long = v.value.length > VALUE_PREVIEW;
+  const shown = long && !open ? v.value.slice(0, VALUE_PREVIEW) + '…' : v.value;
+  return (
+    <div className={`kv ${special ? 'special' : ''}`}>
+      <span><code className="inline">{v.name}</code></span>
+      <span style={{ textAlign: 'right' }}>
+        <b className="mono" style={{ fontSize: 11.5 }}>{v.type}</b>
+        {long ? (
+          <>
+            <button
+              className="status-link"
+              style={{ marginLeft: 8, fontSize: 11 }}
+              onClick={() => setOpen((o) => !o)}
+            >
+              {open ? '收起' : `展开（${v.value.length} 字）`}
+            </button>
+            {open && (
+              <pre
+                className="mono"
+                style={{
+                  margin: '4px 0 0', textAlign: 'left', fontSize: 11, lineHeight: 1.5,
+                  whiteSpace: 'pre-wrap', overflowWrap: 'anywhere',
+                  maxHeight: 220, overflow: 'auto', userSelect: 'text'
+                }}
+              >{v.value}</pre>
+            )}
+          </>
+        ) : (
+          <span className="mono" style={{ marginLeft: 8, userSelect: 'text' }}>{shown}</span>
+        )}
+      </span>
+    </div>
+  );
+}
+
 /** 问题面板顶部：几错几警，一眼看到"有活要干" */
-function ProblemHeader({ items }: { items: ProblemItem[] }) {
-  const errs = items.filter((i) => i.severity === 'error').length;
+function ProblemHeader({ items }: { items: ProblemItem[] }) {  const errs = items.filter((i) => i.severity === 'error').length;
   const warns = items.filter((i) => i.severity === 'warning').length;
   const infos = items.filter((i) => i.severity === 'info').length;
   if (items.length === 0) return null;
@@ -159,29 +198,13 @@ export function SidePanels({ source, file, onReveal, vars, running, width, tabRe
                 {/* 上面：脚本自己的变量（名字 + 类型 + 当前值） */}
                 <div className="vsec-tag">变量</div>
                 {normalVars.length === 0 && <div className="muted" style={{ paddingLeft: 2 }}>还没有普通变量</div>}
-                {normalVars.map((v) => (
-                  <div className="kv" key={v.name}>
-                    <span><code className="inline">{v.name}</code></span>
-                    <span style={{ textAlign: 'right' }}>
-                      <b className="mono" style={{ fontSize: 11.5 }}>{v.type}</b>
-                      <span className="mono" style={{ marginLeft: 8, userSelect: 'text' }}>{v.value}</span>
-                    </span>
-                  </div>
-                ))}
+                {normalVars.map((v) => <VarItem key={v.name} v={v} />)}
                 {/* 分割线下面：语言自己的特殊变量（ans / __last_*） */}
                 {specialVars.length > 0 && (
                   <>
                     <div className="vsec-split" />
                     <div className="vsec-tag special">特殊变量</div>
-                    {specialVars.map((v) => (
-                      <div className="kv special" key={v.name}>
-                        <span><code className="inline">{v.name}</code></span>
-                        <span style={{ textAlign: 'right' }}>
-                          <b className="mono" style={{ fontSize: 11.5 }}>{v.type}</b>
-                          <span className="mono" style={{ marginLeft: 8, userSelect: 'text' }}>{v.value}</span>
-                        </span>
-                      </div>
-                    ))}
+                    {specialVars.map((v) => <VarItem key={v.name} v={v} special />)}
                   </>
                 )}
               </>

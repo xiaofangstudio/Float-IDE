@@ -217,7 +217,7 @@ pub struct RegistryEntry {
     pub description: String,
     #[serde(default)]
     pub tags: Vec<String>,
-    /// 本地插件包路径（.cw 包或文件夹）；空表示"未下载"
+    /// 本地插件包路径（.co 包或文件夹）；空表示"未下载"
     #[serde(default, rename = "localPath")]
     pub local_path: String,
 }

@@ -128,7 +128,7 @@ export function SearchPanel({ index, bus, focusSeq, onClose }: Props) {
         <button className={`sp-opt ${opt.matchCase ? 'on' : ''}`} title="区分大小写" onClick={() => toggle('matchCase')}>Aa</button>
         <button className={`sp-opt ${opt.wholeWord ? 'on' : ''}`} title="全词匹配" onClick={() => toggle('wholeWord')}>W</button>
         <button className={`sp-opt ${opt.useRegex ? 'on' : ''}`} title="正则表达式" onClick={() => toggle('useRegex')}>.*</button>
-        <button className={`sp-opt ${opt.sourceOnly ? 'on' : ''}`} title="只在 .cw 源码里搜" onClick={() => toggle('sourceOnly')}>.cw</button>
+        <button className={`sp-opt ${opt.sourceOnly ? 'on' : ''}`} title="只在 Copper 源码（.co，旧 .cw 也算）里搜" onClick={() => toggle('sourceOnly')}>.co</button>
         <span className="tool-sep" />
         <button className={`sp-opt wide ${showReplace ? 'on' : ''}`} title="显示替换框" onClick={() => setShowReplace((v) => !v)}>替换</button>
       </div>

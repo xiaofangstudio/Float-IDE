@@ -3,7 +3,7 @@ import { applySettings, DEFAULT_SETTINGS, loadSettings, saveSettings, type Setti
 
 /* 偏好设置（PyCharm 的 Settings 简化版）：主题、编辑器、运行。 */
 
-export function SettingsDialog({ onClose, onAppearance, embedded }: { onClose: () => void; onAppearance?: () => void; embedded?: boolean }) {
+export function SettingsDialog({ onClose, onAppearance, onAbout, embedded }: { onClose: () => void; onAppearance?: () => void; onAbout?: () => void; embedded?: boolean }) {
   const [s, setS] = useState<Settings>(() => loadSettings());
 
   useEffect(() => { applySettings(s); saveSettings(s); }, [s]);
@@ -86,6 +86,22 @@ export function SettingsDialog({ onClose, onAppearance, embedded }: { onClose: (
                 <button className={s.runMode === 'compile' ? 'on' : ''} onClick={() => set('runMode', 'compile')}>编译执行（快）</button>
                 <button className={s.runMode === 'debug' ? 'on' : ''} onClick={() => set('runMode', 'debug')}>解释执行（可断点）</button>
               </div>
+            </div>
+          </section>
+
+          <section>
+            <h4>关于</h4>
+            <div className="set-row">
+              <label>版本与日志</label>
+              <button className="btn" onClick={() => { onClose(); onAbout?.(); }}>关于 Float IDE…</button>
+            </div>
+            <div className="set-hint"><b>Float IDE</b> · 小方工作室 · 语言：<b>Copper</b>（源文件 .co）</div>
+            <div className="set-hint">
+              <b>Copper</b>，中文是「铜」——导电又导热，是流动性最好的金属之一，也是这门语言想要的样子：
+              <b>流动</b>，一次编写，处处能跑（工程、插件、发布出去的应用，同一套源码）；
+              也流动在纸面上——简单到随便给谁看，都能一眼读懂、随时上手改。
+              它的原名是 CW Script，从 1.6.0 起正式改名 Copper，旧 .cw 文件全部兼容。
+              吉祥物是廿七，一只三脚橘猫——所以第 27 行报错时会说「喵～第 27 行瘸了…」。
             </div>
           </section>
         </div>

@@ -54,11 +54,11 @@ function CodeBlock({ sample, onRun, onOpenInEditor }: {
     <div className="tut-code-wrap">
       <div className="tut-code">
         <div className="tut-code-head">
-          <span className="tut-code-lang">CW Script</span>
+          <span className="tut-code-lang">Copper</span>
           <span className="tool-grow" />
           <button className="tut-cbtn" onClick={copy}>{copied ? '已复制' : '复制'}</button>
           {onOpenInEditor && (
-            <button className="tut-cbtn" onClick={() => onOpenInEditor(sample.code, '示例.cw')}>在编辑器中打开</button>
+            <button className="tut-cbtn" onClick={() => onOpenInEditor(sample.code, '示例.co')}>在编辑器中打开</button>
           )}
           {onRun && !sample.ask && (
             <button className="tut-cbtn primary" onClick={() => void run()} disabled={busy}>
@@ -140,7 +140,7 @@ export function TutorialPage({ onOpenInEditor, onRun, onOpenPluginsDoc }: Props)
       {/* 左：目录 */}
       <aside className="tut-nav">
         <div className="tut-nav-head">
-          <div className="tut-nav-title">CW Script 教程</div>
+          <div className="tut-nav-title">Copper 教程</div>
           <div className="tut-nav-sub">{TUTORIAL_STATS.chapters} 章 · {TUTORIAL_STATS.sections} 节 · {TUTORIAL_STATS.samples} 个示例</div>
           <div className="tut-progress">
             <div className="tut-progress-bar"><span style={{ width: progress + '%' }} /></div>

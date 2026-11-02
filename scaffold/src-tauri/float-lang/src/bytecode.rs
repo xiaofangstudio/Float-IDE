@@ -99,6 +99,16 @@ pub enum Op {
     BuildList(u16),
     BuildDict(u16),
     Index,
+    /// 取局部变量的地址（&x），槽位相对当前帧
+    AddrLocal(u16),
+    /// 取全局变量的地址（&x）
+    AddrGlobal(u16),
+    /// 取元素地址（&xs[i] / &p[i]）：栈上是 [容器, 下标]
+    AddrIdx,
+    /// 解引用 *p
+    Deref,
+    /// *p = 值：栈上是 [指针, 值]
+    StoreDeref,
     IndexSet,
     Member(u32),
     MemberSet(u32),
@@ -1064,6 +1074,11 @@ impl Compiler {
                 self.expr(index);
                 self.emit(Op::Index);
             }
+            // *p = 值 读旧值：先压指针再解引用
+            Target::Deref(ptr) => {
+                self.expr(ptr);
+                self.emit(Op::Deref);
+            }
         }
     }
 
@@ -1078,6 +1093,8 @@ impl Compiler {
                 self.expr(obj);
                 self.expr(index);
             }
+            // 栈上先放指针，值在它上面
+            Target::Deref(ptr) => self.expr(ptr),
         }
     }
 
@@ -1094,6 +1111,9 @@ impl Compiler {
             }
             Target::Idx(..) => {
                 self.emit(Op::IndexSet);
+            }
+            Target::Deref(_) => {
+                self.emit(Op::StoreDeref);
             }
         }
     }
@@ -1198,13 +1218,40 @@ impl Compiler {
                 self.emit(Op::BuildDict(entries.len() as u16));
             }
             ExprKind::Un { op, a } => {
-                self.expr(a);
-                self.emit(match op {
-                    AOp::Neg => Op::Neg,
-                    AOp::Not => Op::Not,
-                    AOp::BitNot => Op::BitNot,
-                    _ => Op::Not,
-                });
+                match op {
+                    // &x：直接按槽位取地址（不先把值压栈）
+                    AOp::Addr => match &a.kind {
+                        ExprKind::Var(name) => match self.resolve(name) {
+                            Slot::Local(i) => {
+                                self.emit(Op::AddrLocal(i));
+                            }
+                            Slot::Global(i) => {
+                                self.emit(Op::AddrGlobal(i));
+                            }
+                        },
+                        ExprKind::Idx { obj, index } => {
+                            self.expr(obj);
+                            self.expr(index);
+                            self.emit(Op::AddrIdx);
+                        }
+                        _ => {
+                            self.emit(Op::Nil);
+                        }
+                    },
+                    AOp::Deref => {
+                        self.expr(a);
+                        self.emit(Op::Deref);
+                    }
+                    _ => {
+                        self.expr(a);
+                        self.emit(match op {
+                            AOp::Neg => Op::Neg,
+                            AOp::Not => Op::Not,
+                            AOp::BitNot => Op::BitNot,
+                            _ => Op::Not,
+                        });
+                    }
+                }
             }
             // 条件 ? 这个 : 那个 —— 只算被选中的那一支
             ExprKind::Ternary { cond, a, b } => {
@@ -1477,6 +1524,8 @@ fn binop_to_op(op: AOp) -> Op {
         AOp::Or => Op::BitOr,
         AOp::BitAnd => Op::BitAnd,
         AOp::BitOr => Op::BitOr,
+        // 这两个不参与二元运算，占位（上面专门处理）
+        AOp::Addr | AOp::Deref => Op::Add,
         AOp::BitXor => Op::BitXor,
         AOp::Shl => Op::Shl,
         AOp::Shr => Op::Shr,

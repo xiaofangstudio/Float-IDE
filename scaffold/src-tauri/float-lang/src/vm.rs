@@ -17,7 +17,8 @@
 use crate::builtins::{call_builtin, call_method};
 use crate::bytecode::{Chunk, Op};
 use crate::error::{FloatError, Span};
-use crate::value::{Dict, Value};
+use crate::value::{Dict, PtrTarget, Value};
+use std::cell::RefCell;
 use std::rc::Rc;
 
 /// 调用栈深度上限。超过就报「递归太深」，而不是让进程爆栈。
@@ -48,6 +49,8 @@ struct Handler {
 /// 帧多大就是成倍的差别（塞个 Rc<str> 名字进来，帧从 28 字涨到 72 字节，
 /// 每帧还要多一次引用计数）。
 struct Frame {
+    /// 帧编号：&局部变量 的指针记下它，用来判断变量是否还活着
+    id: u64,
     /// 这一帧结束后栈要截断到哪（就是 callee 那一格的地址）
     base: u32,
     /// 局部变量起点（callee 后一格）
@@ -108,7 +111,11 @@ impl IterSrc {
             }
             IterSrc::Ptr(p) => {
                 let m = p.borrow();
-                if m.freed { None } else { m.buf.get(i).cloned() }
+                if m.freed { return None; }
+                match &m.target {
+                    PtrTarget::Cells(c) => c.borrow().get(m.idx + i).cloned(),
+                    _ => None,
+                }
             }
         }
     }
@@ -208,6 +215,8 @@ pub struct Vm {
     /// 每个指令位置一格调用缓存
     call_ic: Vec<CallIc>,
     /// 手动内存对账表
+    /// 下一个调用帧的编号（&局部变量 的指针用它判断变量是否还活着）
+    next_frame_id: u64,
     allocs: Vec<AllocRec>,
     /// 报告通道：`报告 xxx` 写这里，和 print 分开走
     reports: Vec<String>,
@@ -238,6 +247,7 @@ impl Vm {
             handlers: Vec::new(),
             thrown: None,
             call_ic: vec![CallIc::default(); chunk_len],
+            next_frame_id: 2,
             allocs: Vec::new(),
             reports: Vec::new(),
             out: String::new(),
@@ -259,7 +269,10 @@ impl Vm {
     fn note_alloc(&mut self, v: &Value, ip: usize) {
         if let Value::Ptr(p) = v {
             let id = Rc::as_ptr(p) as usize;
-            let cells = p.borrow().buf.len();
+            let cells = match &p.borrow().target {
+                PtrTarget::Cells(c) => c.borrow().len(),
+                _ => 1,
+            };
             let line = self.line_of(ip);
             self.allocs.push(AllocRec { id, line, cells, freed: false });
         }
@@ -434,6 +447,7 @@ impl Vm {
         self.steps = 0;
         self.input_pos = 0;
         self.frames.push(Frame {
+            id: 1,
             base: 0,
             locals_base: 0,
             ret_ip: 0,
@@ -1042,7 +1056,9 @@ impl Vm {
                             std::ptr::write(sptr.add(sp), Value::Null);
                             sp += 1;
                         }
+                        self.next_frame_id += 1;
                         self.frames.push(Frame {
+                            id: self.next_frame_id - 1,
                             base: callee_idx as u32,
                             locals_base: newbase as u32,
                             ret_ip: ip as u32,
@@ -1109,7 +1125,9 @@ impl Vm {
                                     std::ptr::write(sptr.add(sp), Value::Null);
                                     sp += 1;
                                 }
+                                self.next_frame_id += 1;
                                 self.frames.push(Frame {
+                                    id: self.next_frame_id - 1,
                                     base: recv_idx as u32,
                                     locals_base: recv_idx as u32,
                                     ret_ip: ip as u32,
@@ -1280,7 +1298,9 @@ impl Vm {
                             std::ptr::write(sptr.add(sp), Value::Null);
                             sp += 1;
                         }
+                        self.next_frame_id += 1;
                         self.frames.push(Frame {
+                            id: self.next_frame_id - 1,
                             base: callee_idx as u32,
                             locals_base: callee_idx as u32,
                             ret_ip: ip as u32,
@@ -1339,6 +1359,142 @@ impl Vm {
                     let obj = take(sptr, sp);
                     if let Err(m) = index_set(&obj, &idx, val) {
                         return Err(self.err_at(ip, m));
+                    }
+                }
+                Op::AddrLocal(i) => {
+                    // &局部变量：记下 (帧号, 绝对槽位)，解引用时再回来找
+                    let slot = base + i as usize;
+                    let frame = self.frames.last().map(|f| f.id).unwrap_or(1);
+                    let p = Rc::new(RefCell::new(crate::value::MemBlock {
+                        target: PtrTarget::Local { frame, slot },
+                        idx: 0,
+                        owned: false,
+                        freed: false,
+                    }));
+                    std::ptr::write(sptr.add(sp), Value::Ptr(p));
+                    sp += 1;
+                }
+                Op::AddrGlobal(i) => {
+                    let p = Rc::new(RefCell::new(crate::value::MemBlock {
+                        target: PtrTarget::Global(i as usize),
+                        idx: 0,
+                        owned: false,
+                        freed: false,
+                    }));
+                    std::ptr::write(sptr.add(sp), Value::Ptr(p));
+                    sp += 1;
+                }
+                Op::AddrIdx => {
+                    sp -= 1;
+                    let idx = take(sptr, sp);
+                    sp -= 1;
+                    let obj = take(sptr, sp);
+                    let n = match idx {
+                        Value::Int(k) => k,
+                        Value::Float(f) => f as i64,
+                        ref other => return Err(self.err_at(ip, format!("& 取地址的下标必须是数字，得到 {}", other.to_display()))),
+                    };
+                    let v = match &obj {
+                        Value::List(l) => {
+                            let len = l.borrow().len() as i64;
+                            if n < 0 || n >= len {
+                                return Err(self.err_at(ip, format!("& 取地址：下标 {} 越界了（列表长度 {}）", n, len)));
+                            }
+                            Value::alias_list(Rc::clone(l), n as usize)
+                        }
+                        Value::Ptr(p) => {
+                            let b = p.borrow();
+                            if b.freed {
+                                return Err(self.err_at(ip, "这块内存已经 free 了，不能再取地址".to_string()));
+                            }
+                            match &b.target {
+                                PtrTarget::Cells(c) => {
+                                    let len = c.borrow().len() as i64;
+                                    let real = b.idx as i64 + n;
+                                    if real < 0 || real >= len {
+                                        return Err(self.err_at(ip, format!("& 取地址：第 {} 格越界了（这块一共 {} 格）", real, len)));
+                                    }
+                                    Value::shift_ptr(p, n)
+                                }
+                                _ => {
+                                    if n != 0 {
+                                        return Err(self.err_at(ip, "&变量 的指针只有一格，不能偏移".to_string()));
+                                    }
+                                    obj.clone()
+                                }
+                            }
+                        }
+                        other => return Err(self.err_at(ip, format!("& 只能对列表元素或指针格子取地址，得到 {}", other.to_display()))),
+                    };
+                    std::ptr::write(sptr.add(sp), v);
+                    sp += 1;
+                }
+                Op::Deref => {
+                    sp -= 1;
+                    let p = take(sptr, sp);
+                    let v = match &p {
+                        Value::Ptr(pr) => {
+                            let b = pr.borrow();
+                            if b.freed {
+                                return Err(self.err_at(ip, "这块内存已经 free 了，不能再读".to_string()));
+                            }
+                            match &b.target {
+                                PtrTarget::Cells(c) => {
+                                    let cells = c.borrow();
+                                    if b.idx >= cells.len() {
+                                        return Err(self.err_at(ip, format!(
+                                            "指针指到第 {} 格，越界了（这块一共 {} 格）", b.idx, cells.len())));
+                                    }
+                                    cells[b.idx].clone()
+                                }
+                                PtrTarget::Global(i) => self.globals.get(*i).cloned().unwrap_or(Value::Null),
+                                PtrTarget::Local { frame, slot } => {
+                                    if !self.frames.iter().any(|f| f.id == *frame) || *slot >= sp {
+                                        return Err(self.err_at(ip, "这个指针指向的变量已经离开作用域了（悬空指针）".to_string()));
+                                    }
+                                    (*sptr.add(*slot)).clone()
+                                }
+                            }
+                        }
+                        other => return Err(self.err_at(ip, format!("* 只能解引用指针，得到 {}（取地址用 &）", other.to_display()))),
+                    };
+                    std::ptr::write(sptr.add(sp), v);
+                    sp += 1;
+                }
+                Op::StoreDeref => {
+                    sp -= 1;
+                    let val = take(sptr, sp);
+                    sp -= 1;
+                    let p = take(sptr, sp);
+                    match &p {
+                        Value::Ptr(pr) => {
+                            let b = pr.borrow();
+                            if b.freed {
+                                return Err(self.err_at(ip, "这块内存已经 free 了，不能再写".to_string()));
+                            }
+                            match &b.target {
+                                PtrTarget::Cells(c) => {
+                                    let len = c.borrow().len();
+                                    if b.idx >= len {
+                                        return Err(self.err_at(ip, format!(
+                                            "指针指到第 {} 格，越界了（这块一共 {} 格）", b.idx, len)));
+                                    }
+                                    c.borrow_mut()[b.idx] = val.clone_deep();
+                                }
+                                PtrTarget::Global(i) => {
+                                    if *i < glen {
+                                        *gptr.add(*i) = val.clone_deep();
+                                    }
+                                }
+                                PtrTarget::Local { frame, slot } => {
+                                    if !self.frames.iter().any(|f| f.id == *frame) || *slot >= sp {
+                                        return Err(self.err_at(ip, "这个指针指向的变量已经离开作用域了（悬空指针）".to_string()));
+                                    }
+                                    std::ptr::write(sptr.add(*slot), val.clone_deep());
+                                }
+                            }
+                        }
+                        other => return Err(self.err_at(ip, format!("* 只能解引用指针，得到 {}", other.to_display()))),
                     }
                 }
                 Op::Member(name_idx) => {
@@ -1803,6 +1959,26 @@ fn bop_to_op(bop: u8) -> Option<Op> {
 }
 
 pub(crate) fn arith(op: Op, a: &Value, b: &Value) -> Result<Value, String> {
+    // 指针运算：p + n / p - n / p - q（两个指针相减 = 隔了几格）
+    if op == Op::Add || op == Op::Sub {
+        if let Value::Ptr(pa) = a {
+            if let Value::Ptr(pb) = b {
+                if op == Op::Sub {
+                    let (ia, ib) = (pa.borrow().idx as i64, pb.borrow().idx as i64);
+                    return Ok(Value::Int(ia - ib));
+                }
+                return Err("两个指针不能相加".into());
+            }
+            let n = b.as_num().ok_or_else(|| format!("指针只能加减整数格数，得到 {}", b.to_display()))?;
+            return Ok(Value::shift_ptr(pa, if op == Op::Sub { -(n as i64) } else { n as i64 }));
+        }
+        if op == Op::Add {
+            if let Value::Ptr(pb) = b {
+                let n = a.as_num().ok_or_else(|| format!("指针只能加减整数格数，得到 {}", a.to_display()))?;
+                return Ok(Value::shift_ptr(pb, n as i64));
+            }
+        }
+    }
     // 字符串：+ 就是拼接
     if op == Op::Add {
         if matches!(a, Value::Str(_)) || matches!(b, Value::Str(_)) {
@@ -1965,8 +2141,28 @@ fn index_get(obj: &Value, idx: &Value) -> Result<Value, String> {
             if m.freed {
                 return Err("这块内存已经 free 了，不能再读".into());
             }
-            let i = norm_index(idx, m.buf.len())?;
-            Ok(m.buf[i].clone())
+            match &m.target {
+                PtrTarget::Cells(c) => {
+                    let cells = c.borrow();
+                    // 和 C 一致：p[k] 是从当前位置挪 k 格，负数是往回
+                    let real = m.idx as i64 + match idx {
+                        Value::Int(n) => *n,
+                        Value::Float(f) => *f as i64,
+                        other => return Err(format!("指针下标必须是数字，得到 {}", other.to_display())),
+                    };
+                    if real < 0 || real as usize >= cells.len() {
+                        return Err(format!(
+                            "下标 {}（第 {} 格）越界了（这块一共 {} 格）", idx.to_display(), real, cells.len()));
+                    }
+                    Ok(cells[real as usize].clone())
+                }
+                _ => {
+                    if let Value::Int(0) = idx { /* &变量 只有一格 */ } else {
+                        return Err("&变量 的指针只有一格，p[0] 就是变量本身".into());
+                    }
+                    Err("&变量 的指针要在 VM 里直接读（不走这里）".into())
+                }
+            }
         }
         other => Err(format!("{} 不能用下标取值", other.to_display())),
     }
@@ -1986,14 +2182,27 @@ fn index_set(obj: &Value, idx: &Value, val: Value) -> Result<(), String> {
             Ok(())
         }
         Value::Ptr(p) => {
-            let mut m = p.borrow_mut();
+            let m = p.borrow();
             if m.freed {
                 return Err("这块内存已经 free 了，不能再写".into());
             }
-            let len = m.buf.len();
-            let i = norm_index(idx, len)?;
-            m.buf[i] = val.clone_deep();
-            Ok(())
+            match &m.target {
+                PtrTarget::Cells(c) => {
+                    let mut cells = c.borrow_mut();
+                    let real = m.idx as i64 + match idx {
+                        Value::Int(n) => *n,
+                        Value::Float(f) => *f as i64,
+                        other => return Err(format!("指针下标必须是数字，得到 {}", other.to_display())),
+                    };
+                    if real < 0 || real as usize >= cells.len() {
+                        return Err(format!(
+                            "下标 {}（第 {} 格）越界了（这块一共 {} 格）", idx.to_display(), real, cells.len()));
+                    }
+                    cells[real as usize] = val.clone_deep();
+                    Ok(())
+                }
+                _ => Err("&变量 的指针只有一格（*p 直接读写变量本身）".into()),
+            }
         }
         other => Err(format!("{} 不能用下标赋值", other.to_display())),
     }
@@ -2045,7 +2254,10 @@ fn iter_source(v: &Value) -> Result<(IterSrc, usize), String> {
             if m.freed {
                 return Err("这块内存已经 free 了，不能再遍历".into());
             }
-            let n = m.buf.len();
+            let n = match &m.target {
+                PtrTarget::Cells(c) => c.borrow().len().saturating_sub(m.idx),
+                _ => 0,
+            };
             drop(m);
             Ok((IterSrc::Ptr(Rc::clone(p)), n))
         }

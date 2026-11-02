@@ -5,8 +5,8 @@ export type Template = { id: string; name: string; desc: string; files: Record<s
 const projectJson = (entry: string, name: string): string =>
   JSON.stringify({ name, entry, version: '0.2.0', kind: 'float' }, null, 2) + '\n';
 
-const TPL_BLANK = `-- main.cw —— 从这里开始写你的 CW Script
-print("你好，CW Script！")
+const TPL_BLANK = `-- main.co —— 从这里开始写你的 Copper
+print("你好，Copper！")
 `;
 
 const TPL_STARTER = `-- ─ 入门示例：变量 / 条件 / 循环 ─
@@ -140,7 +140,7 @@ function files(entry: string, name: string, main: string): Record<string, string
 /** 指针实战：手动内存 + 小游戏。给"想看看 alloc 能干什么"的人一个入口 */
 const TPL_POINTER_GAME = `-- ─ 指针示例：翻牌消消乐（alloc / free 手动内存）──
 -- 牌桌用 alloc 申请：每张牌占两格（第 0 格是牌面，第 1 格是"翻开没有"）。
--- 手动内存是严格模式：程序结束前必须 free，忘了还就会报错。
+-- 手动内存：程序结束前自己 free。忘了还不会自动回收（Rust 内核会点名，IDE 的引擎不查）。
 
 list 图案 = ["苹果", "苹果", "星星", "星星", "月亮", "月亮", "云朵", "云朵"]
 int 张数 = len(图案)
@@ -246,9 +246,9 @@ else
 `;
 
 export const TEMPLATES: Template[] = [
-  { id: 'blank', name: '空白工程', desc: '只含 main.cw 与 project.json，一张白纸', files: files('main.cw', 'CW 工程', TPL_BLANK) },
-  { id: 'starter', name: '入门示例', desc: '变量 / 条件 / 循环 / 列表，十行看懂 CW Script', files: files('main.cw', 'CW 入门', TPL_STARTER) },
-  { id: 'advanced', name: '进阶示例', desc: '函数 / 集合 / 字典 / 计时，写法速查', files: files('main.cw', 'CW 进阶', TPL_ADVANCED) },
-  { id: 'class', name: '类与对象', desc: '字段 / 方法 / 继承 / super，面向对象起步', files: files('main.cw', 'CW 类示例', TPL_CLASS) },
-  { id: 'pointer', name: '指针示例', desc: 'alloc / free 手动内存，一格一格自己管', files: files('main.cw', '指针示例', TPL_POINTER_GAME) }
+  { id: 'blank', name: '空白工程', desc: '只含 main.co 与 project.json，一张白纸', files: files('main.co', 'Copper 工程', TPL_BLANK) },
+  { id: 'starter', name: '入门示例', desc: '变量 / 条件 / 循环 / 列表，十行看懂 Copper', files: files('main.co', 'Copper 入门', TPL_STARTER) },
+  { id: 'advanced', name: '进阶示例', desc: '函数 / 集合 / 字典 / 计时，写法速查', files: files('main.co', 'Copper 进阶', TPL_ADVANCED) },
+  { id: 'class', name: '类与对象', desc: '字段 / 方法 / 继承 / super，面向对象起步', files: files('main.co', 'Copper 类示例', TPL_CLASS) },
+  { id: 'pointer', name: '指针示例', desc: 'alloc / free 手动内存，一格一格自己管', files: files('main.co', '指针示例', TPL_POINTER_GAME) }
 ];

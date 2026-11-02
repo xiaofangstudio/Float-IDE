@@ -17,7 +17,7 @@ const starter = `{
   "name": "起步片段包",
   "version": "1.0.0",
   "publisher": "小方工作室",
-  "description": "把最常用的 CW Script 写法做成片段与命令，输入前缀就能展开。纯声明式，不需要任何脚本。",
+  "description": "把最常用的 Copper 写法做成片段与命令，输入前缀就能展开。纯声明式，不需要任何脚本。",
   "tags": ["snippet", "productivity"],
   "contributes": {
     "snippets": [
@@ -38,7 +38,7 @@ const starter = `{
       { "label": "range", "detail": "计数范围", "insert": "range(" }
     ],
     "commands": [
-      { "id": "float.starter.hello", "title": "起步包：在控制台打个招呼", "category": "插件", "run": "print(\\"你好，CW Script！\\")" },
+      { "id": "float.starter.hello", "title": "起步包：在控制台打个招呼", "category": "插件", "run": "print(\\"你好，Copper！\\")" },
       { "id": "float.starter.note", "title": "起步包：插入文件头注释", "category": "插件", "when": "editor", "insert": "// \${file}\\n// 创建于 \${date}\\n\\n" }
     ],
     "menus": {
@@ -55,7 +55,7 @@ const statsJs = `// 代码统计插件：演示 main.js 怎么用注入的 float
 
 async function countAll() {
   const files = await float.files.list('');
-  const cw = files.filter((f) => f.toLowerCase().endsWith('.cw'));
+  const cw = files.filter((f) => /\.(co|cw)$/i.test(f));
   let total = 0;
   let blank = 0;
   let comment = 0;
@@ -73,7 +73,7 @@ async function countAll() {
   }
 
   rows.sort((a, b) => b.lines - a.lines);
-  float.console.print('工程共 ' + cw.length + ' 个 .cw 文件');
+  float.console.print('工程共 ' + cw.length + ' 个 Copper 源文件');
   float.console.print('总行数 ' + total + '（空行 ' + blank + '，注释 ' + comment + '）');
   for (const r of rows.slice(0, 10)) {
     float.console.print('  ' + r.file + ' — ' + r.lines + ' 行');
@@ -100,7 +100,7 @@ const statsManifest = `{
   "name": "代码统计",
   "version": "1.0.0",
   "publisher": "小方工作室",
-  "description": "统计工程里 .cw 文件的数量、总行数、空行与注释行，并列出最大的文件。演示脚本式插件。",
+  "description": "统计工程里 Copper 源文件（.co/.cw）的数量、总行数、空行与注释行，并列出最大的文件。演示脚本式插件。",
   "main": "main.js",
   "tags": ["script", "analysis"],
   "permissions": ["files:read", "console:write", "ui:notify"],
@@ -121,7 +121,7 @@ const todoJs = `// TODO 扫描插件：找出工程里所有 TODO / FIXME / XXX�
 
 async function scanTodos() {
   const files = await float.files.list('');
-  const cw = files.filter((f) => f.toLowerCase().endsWith('.cw'));
+  const cw = files.filter((f) => /\.(co|cw)$/i.test(f));
   const marks = ['TODO', 'FIXME', 'XXX', 'HACK'];
   let found = 0;
 

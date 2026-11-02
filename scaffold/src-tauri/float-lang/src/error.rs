@@ -45,6 +45,12 @@ impl FloatError {
 
 impl fmt::Display for FloatError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // 彩蛋：第 27 行报错，吉祥物廿七（三脚橘猫，正好三条腿）就在这行瘸了。
+        // 这行不再走「第 N 行：」前缀，喵那一句本身就是行号。
+        if self.span.line == 27 {
+            let m = self.message.strip_prefix("第 27 行：").unwrap_or(&self.message);
+            return write!(f, "喵～第 27 行瘸了…：{}", m);
+        }
         // 运行时错误在 err_at 里就已经带上「第 N 行：」了，这里不能再加一遍
         let already = self.message.starts_with("第 ") && self.message.contains(" 行：");
         if self.span.line > 0 && !already {
@@ -58,3 +64,29 @@ impl fmt::Display for FloatError {
 impl std::error::Error for FloatError {}
 
 pub type FResult<T> = Result<T, FloatError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn err_at(line: u32, message: &str) -> FloatError {
+        FloatError::new(message, Span::new(&Rc::from("main.co"), line, 1, 1))
+    }
+
+    #[test]
+    fn 普通行照常报行号() {
+        assert_eq!(err_at(26, "除数不能为 0").to_string(), "第 26 行：除数不能为 0");
+    }
+
+    #[test]
+    fn 第27行报错变成喵() {
+        assert_eq!(err_at(27, "除数不能为 0").to_string(), "喵～第 27 行瘸了…：除数不能为 0");
+        // err_at 已经带了「第 27 行：」前缀时不要重复
+        assert_eq!(err_at(27, "第 27 行：数组越界").to_string(), "喵～第 27 行瘸了…：数组越界");
+    }
+
+    #[test]
+    fn 第28行不触发彩蛋() {
+        assert_eq!(err_at(28, "除数不能为 0").to_string(), "第 28 行：除数不能为 0");
+    }
+}

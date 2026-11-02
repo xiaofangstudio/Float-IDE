@@ -9,7 +9,7 @@ const GROUPS: { title: string; rows: [string, string][] }[] = [
       ['Ctrl + N', '新建工程（欢迎页）'],
       ['Ctrl + O', '打开工程'],
       ['Ctrl + S', '保存所有修改'],
-      ['Ctrl + Shift + E', '导出工程包（.cw）'],
+      ['Ctrl + Shift + E', '导出工程包'],
       ['Ctrl + W', '关闭当前文件 / 关闭工程']
     ]
   },

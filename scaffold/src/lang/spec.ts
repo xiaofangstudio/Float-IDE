@@ -66,7 +66,7 @@ export const INSTRUCTIONS: InstDoc[] = [
   /* 运行时 / 模块 */
   { name: 'time read', args: 'time read', desc: '距上次 time reset 的秒数，写入 __last_time', result: '__last_time', category: '运行时' },
   { name: 'time reset', args: 'time reset', desc: '重置计时器', category: '运行时' },
-  { name: 'import', args: 'import "库.cw" / import "文件夹"', desc: '导入同工程内的脚本；函数与类会一起带过来', category: '模块' },
+  { name: 'import', args: 'import "库.co" / import "文件夹"', desc: '导入同工程内的脚本；函数与类会一起带过来', category: '模块' },
   { name: 'alias', args: 'alias 名字 = 内容 / #define 名字 内容', insert: 'alias ${1:名字} = $2', desc: '文本替换（类似 C 的 #define，但更简单）：这一行之后所有出现「名字」的地方（整词匹配）都换成「内容」，内容可以是任意代码片段。行号不会错位，写错会明确报错', category: '模块' }
 ];
 
@@ -88,6 +88,7 @@ export const KEYWORDS: string[] = [
   'if', 'elif', 'else', 'while', 'for', 'in', 'to', 'step', 'repeat', 'forever', 'main', 'loop',
   'wait', 'until', 'out', 'break', 'balo', 'continue', 'stop', 'all', 'now', 'script', 'return',
   'function', 'fn', 'Function', 'class', 'extends', 'new', 'self', 'this', 'super',
+  'and', 'or', 'not',
   'int', 'float', 'str', 'bool', 'list', 'dict', 'var',
   'print', '报告', 'report', 'debug', '调试', 'ask', 'ans', 'import', 'alias', '#define', '换', '成', 'time', 'read', 'reset', 'key', 'del', 'insert', 'replace',
   'with', 'at', 'add', 'len', 'range', 'true', 'false', 'null', 'nil'
@@ -129,7 +130,10 @@ export const SNIPPETS: { label: string; detail: string; body: string }[] = [
   }
 ];
 
-export const LANG_ID = 'cwscript';
+export const LANG_ID = 'copper';
+
+/** Copper 源文件判断：新扩展名 .co 为主，旧 .cw 保留兼容（能打开、能跑、能搜）。 */
+export const isCopperFile = (p: string): boolean => /\.(co|cw)$/i.test(p);
 
 /** 内建方法（字符串 / 列表 / 字典），给 p. 之后的补全兜底用 */
 export const BUILTIN_METHODS: { name: string; owner: string; desc: string }[] = [

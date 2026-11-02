@@ -2,7 +2,7 @@
  *
  * 同一张表被两处使用：
  * 1. 表达式求值：`x = add(a, b)`、`print(len(nums))`、`if (contain(s, "a"))`
- * 2. 指令行：单独写一行的 `add(a, b)` 仍然把结果写进 __last_calc（CW Script 老习惯）
+ * 2. 指令行：单独写一行的 `add(a, b)` 仍然把结果写进 __last_calc（Copper 老习惯，沿自 CW Script）
  *    —— 靠 writes 字段决定写哪个特殊变量。
  */
 
@@ -17,8 +17,28 @@ export type BuiltinSpec = {
   max: number;
   /** 作为独立指令行书写时，结果写入的特殊变量 */
   writes?: '__last_calc' | '__last_cmp' | '__last_read' | '__last_str' | '__last_len';
+  /** 异步内建（文件这类要走 Tauri invoke 的）：给了 afn 解释器就 await 它 */
+  afn?: (args: Val[]) => Promise<Val>;
   fn: (args: Val[]) => Val;
 };
+
+/** 文件系统桥：桌面版由 IDE 注入（Tauri 的 fs 命令），浏览器预览里没有。
+ *  相对路径由注入方按工程目录解析好；read 读不到返回 null。
+ *  这一处抽象让 F5（Rust 内核）和 F6（解释器）的文件行为一致。 */
+export type FsBridge = {
+  read(path: string): Promise<string | null>;
+  write(path: string, content: string): Promise<boolean>;
+  append(path: string, content: string): Promise<boolean>;
+  has(path: string): Promise<boolean>;
+};
+let fsBridge: FsBridge | null = null;
+export function setFsBridge(b: FsBridge | null): void { fsBridge = b; }
+function needBridge(): FsBridge {
+  if (!fsBridge) {
+    bad('文件功能要在 Float IDE 桌面版里用（F5 运行 / F6 调试都行），浏览器预览里没有文件系统');
+  }
+  return fsBridge as FsBridge;
+}
 
 const bad = (msg: string): never => { throw new Error(msg); };
 
@@ -120,10 +140,10 @@ const REGISTRY: BuiltinSpec[] = [
     if (typeof v === 'string') return v.length;
     if (isDict(v)) return v.map.size;
     if (isInstance(v)) return v.fields.size;
-    if (isPtr(v)) return v.buf.length;
+    if (isPtr(v)) return Math.max(0, v.buf.length - v.idx);
     return toStr(v).length;
   } }),
-  spec({ name: 'alloc', sig: 'alloc(格子数)', category: '内存', doc: '手动申请一段内存，返回指针；用完必须 free（严格模式）', min: 1, max: 1, fn: (a) => {
+  spec({ name: 'alloc', sig: 'alloc(格子数)', category: '内存', doc: '手动申请一段内存，返回指针；用完自己 free（不回收也不会自动提醒）', min: 1, max: 1, fn: (a) => {
     const n = Math.trunc(num(a[0], 'alloc'));
     if (n < 0) bad(`alloc 要一个不小于 0 的格子数，实际是 ${n}`);
     if (n > 10_000_000) bad(`alloc 一次要了 ${n} 格，太多了（上限 1000 万格）`);
@@ -133,6 +153,9 @@ const REGISTRY: BuiltinSpec[] = [
     const p = a[0];
     if (!isPtr(p)) throw new Error(`free 要一个指针，实际是 ${typeName(p)}`);
     if (p.freed) throw new Error('这块内存已经 free 过了，不用再 free 一次');
+    if (!p.owner) {
+      throw new Error('这不是 alloc 出来的内存（多半是 &列表[i] 或 &变量 拿到的地址），不能 free');
+    }
     p.freed = true;
     p.buf.length = 0;
     return null;
@@ -171,10 +194,38 @@ const REGISTRY: BuiltinSpec[] = [
 
   /* 时间 / 文件 / 网络（正式写法一律英文，不用中文关键字那一套） */
   spec({ name: 'now', sig: 'now()', category: '时间', doc: '当前时间的毫秒级 Unix 时间戳（int）', min: 0, max: 0, writes: '__last_calc', fn: () => Date.now() }),
-  spec({ name: 'readfile', sig: 'readfile(路径)', category: '文件', doc: '读整个文本文件的内容（相对路径按脚本所在目录）；桌面版功能。也支持 readfile "路径"', min: 1, max: 1, writes: '__last_str', fn: (a) => desktopOnly('readfile', a) }),
-  spec({ name: 'writefile', sig: 'writefile(路径, 内容)', category: '文件', doc: '把内容写进文件（覆盖）；返回 true，桌面版功能。也支持 writefile "路径" "内容"', min: 2, max: 2, writes: '__last_str', fn: (a) => desktopOnly('writefile', a) }),
-  spec({ name: 'appendfile', sig: 'appendfile(路径, 内容)', category: '文件', doc: '把内容追加到文件末尾（没有就新建）；返回 true，桌面版功能', min: 2, max: 2, writes: '__last_str', fn: (a) => desktopOnly('appendfile', a) }),
-  spec({ name: 'hasfile', sig: 'hasfile(路径)', category: '文件', doc: '文件是否存在（true / false），桌面版功能', min: 1, max: 1, writes: '__last_cmp', fn: (a) => desktopOnly('hasfile', a) }),
+  spec({
+    name: 'readfile', sig: 'readfile(路径)', category: '文件',
+    doc: '读整个文本文件的内容（相对路径按工程目录）；桌面版功能。也支持 readfile "路径"',
+    min: 1, max: 1, writes: '__last_str',
+    afn: async (a) => {
+      const s = await needBridge().read(toStr(a[0]));
+      if (s === null) bad(`文件不存在或读不了：${fmtVal(a[0])}`);
+      return s;
+    },
+    fn: (a) => desktopOnly('readfile', a)
+  }),
+  spec({
+    name: 'writefile', sig: 'writefile(路径, 内容)', category: '文件',
+    doc: '把内容写进文件（覆盖）；返回 true，桌面版功能。也支持 writefile "路径" "内容"',
+    min: 2, max: 2, writes: '__last_str',
+    afn: async (a) => (await needBridge().write(toStr(a[0]), toStr(a[1]))) as unknown as Val,
+    fn: (a) => desktopOnly('writefile', a)
+  }),
+  spec({
+    name: 'appendfile', sig: 'appendfile(路径, 内容)', category: '文件',
+    doc: '把内容追加到文件末尾（没有就新建）；返回 true，桌面版功能',
+    min: 2, max: 2, writes: '__last_str',
+    afn: async (a) => (await needBridge().append(toStr(a[0]), toStr(a[1]))) as unknown as Val,
+    fn: (a) => desktopOnly('appendfile', a)
+  }),
+  spec({
+    name: 'hasfile', sig: 'hasfile(路径)', category: '文件',
+    doc: '文件是否存在（true / false），桌面版功能',
+    min: 1, max: 1, writes: '__last_cmp',
+    afn: async (a) => (await needBridge().has(toStr(a[0]))) as unknown as Val,
+    fn: (a) => desktopOnly('hasfile', a)
+  }),
   spec({ name: 'fetch', sig: 'fetch(网址)', category: '网络', doc: 'GET 请求，返回响应正文（桌面版，10 秒超时）', min: 1, max: 1, writes: '__last_str', fn: (a) => desktopOnly('fetch', a) }),
   spec({ name: 'post', sig: 'post(网址, 内容)', category: '网络', doc: 'POST 请求，把内容发出去并返回响应正文（桌面版）', min: 2, max: 2, writes: '__last_str', fn: (a) => desktopOnly('post', a) }),
 
@@ -290,7 +341,7 @@ const ALIASES: Record<string, string> = {
 
 /** 浏览器 demo 里给一句人话：这些功能要走桌面版（F5 走 Rust 内核才有宿主能力） */
 function desktopOnly(name: string, _args: Val[]): never {
-  throw bad(`${name} 是桌面版功能：用 Float IDE 按 F5 运行（Rust 内核提供文件/网络能力），浏览器预览里用不了`);
+  throw bad(`${name} 是桌面版功能：在 Float IDE 里按 F5 运行或 F6 调试都行（浏览器预览里没有文件/网络能力）`);
 }
 
 function typeOfVal(v: Val): string {

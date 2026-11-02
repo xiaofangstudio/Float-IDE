@@ -2,7 +2,7 @@
 name = "float-lang"
 version = "0.2.0"
 edition = "2021"
-description = "CW Script（Float Script）原生语言核心：词法 → 语法 → 字节码 → 虚拟机"
+description = "Copper（原 CW Script）原生语言核心：词法 → 语法 → 字节码 → 虚拟机"
 license = "MIT"
 
 # 独立工作区，避免 src-tauri 那个包的 workspace 探测干扰

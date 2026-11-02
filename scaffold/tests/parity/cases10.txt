@@ -1,0 +1,71 @@
+### &变量 取地址 / *p 解引用 / 写回
+int x = 10
+ptr p = &x
+print(*p)
+*p = 42
+print(x)
+print(*p)
+### 复合赋值走指针
+int n = 1
+ptr q = &n
+*q += 5
+print(n)
+### &列表元素：写入改原列表
+list xs = [1, 2, 3]
+ptr p = &xs[1]
+print(*p)
+*p = 9
+print(xs[0], xs[1], xs[2])
+### 指针运算 p+1 / p-1 / p-q
+list ys = [10, 20, 30]
+ptr a = &ys[0]
+print(*(a + 1))
+print(*(a + 2))
+ptr b = a + 2
+print(*(b - 1))
+print(b - a)
+### p[k] 相对寻址
+ptr c = &ys[0]
+print(c[1])
+ptr d = c + 2
+print(d[-1])
+### alloc 老用法
+ptr m = alloc(3)
+m[0] = 7
+m[1] = m[0] * 2
+print(m[0], m[1], len(m))
+free(m)
+### for v in 指针
+ptr e = alloc(3)
+e[0] = 1
+e[1] = 2
+e[2] = 3
+int s = 0
+for v in e
+    s += v
+print(s)
+ptr f = e + 1
+int s2 = 0
+for v in f
+    s2 += v
+print(s2)
+free(e)
+### 函数参数用指针改调用方
+fn bump(ptr p)
+    *p = *p + 1
+
+int z = 41
+bump(&z)
+print(z)
+### mod 关键字
+print(7 mod 3)
+print(10 mod 4 == 2)
+### if / elif 中间夹注释不断链
+int k = 2
+if k == 1
+    print("one")
+-- 中间插一句注释
+elif k == 2
+    print("two")
+else
+    print("other")

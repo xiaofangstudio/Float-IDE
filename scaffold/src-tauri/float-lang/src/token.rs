@@ -224,6 +224,28 @@ pub fn tokenize_line(src: &str, line: u32, start_col: u32) -> Result<Vec<Token>,
                 i += 1;
             }
             let word: String = chars[start..i].iter().collect();
+            // and / or / not 是 && / || / ! 的关键字写法（AST 层同一个节点，短路语义一致）。
+            // 前面是 '.' 时不转换：obj.not / obj.and 是普通成员名。
+            let word_op = match word.as_str() {
+                "and" => Some("&&"),
+                "or" => Some("||"),
+                "not" => Some("!"),
+
+                _ => None,
+            };
+            if let (Some(op), Some(prev)) = (word_op, out.last()) {
+                if !(prev.kind == TokKind::Op && prev.text == ".") {
+                    let len = word.chars().count();
+                    push!(
+                        TokKind::Op,
+                        op.to_string(),
+                        start_col + start as u32,
+                        start_col + (start + len) as u32,
+                        None
+                    );
+                    continue;
+                }
+            }
             let kind = if KEYWORDS.contains(&word.as_str()) {
                 TokKind::Kw
             } else {

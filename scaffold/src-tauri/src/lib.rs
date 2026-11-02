@@ -1,4 +1,4 @@
-mod commands;
+pub mod commands;
 pub mod startup;
 
 use commands::terminal::PtyState;
@@ -46,6 +46,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // 文件系统
             commands::fsx::fs_list,
+            commands::watch::fs_watch_start,
             commands::fsx::fs_read,
             commands::fsx::fs_write,
             commands::fsx::fs_write_checked,
@@ -96,10 +97,22 @@ pub fn run() {
             // Git
             commands::git::git_available,
             commands::git::git_run,
+            // 文件关联（Windows 用户级注册表，用户手动触发）
+            commands::assoc::assoc_status,
+            commands::assoc::assoc_register,
+            commands::assoc::assoc_unregister,
         ])
         .setup(|app| {
             let win = app.get_webview_window("main").expect("主窗口缺失");
             win.set_title("Float IDE").ok();
+            /* 绿色版没有安装器，正式版第一次启动时自己把 .co / .cw 关联好，
+             * 资源管理器里才有图标、双击才会进这里。只写当前用户，失败也不拦启动。
+             * debug 构建跳过——开发时 exe 在 target/debug 里，关联过去会指向临时文件。 */
+            if !cfg!(debug_assertions) {
+                if let Err(e) = commands::assoc::assoc_register() {
+                    eprintln!("[assoc] 自动关联失败（不影响使用）：{e}");
+                }
+            }
             Ok(())
         })
         .run(tauri::generate_context!())

@@ -4,12 +4,14 @@ import { api } from '../core/tauri';
 const isTauri = (): boolean =>
   typeof window !== 'undefined' && '__TAURI_INTERNALS__' in (window as unknown as Record<string, unknown>);
 import { Runner, type CtlState, type OutLine } from '../lang/interp';
+import { setFsBridge } from '../lang/builtins';
 import type { ConsoleLine, ProblemItem, ProjectMeta, VarRow, ReportRow } from '../core/types';
 import { analyze } from '../lang/analyze';
 import { setPluginContributions } from '../lang/floatlang';
 import { EditorPane, openBuffers, type EditorHandle, type DocTab } from '../ide/EditorPane';
 import { readSource } from '../core/sources';
 import { FileTree } from '../ide/FileTree';
+import { loadSettings, saveSettings, applySettings } from '../ui/settings';
 import { GitPanel } from '../ide/GitPanel';
 import { ConsoleDock } from '../ide/ConsoleDock';
 import { SidePanels } from '../ide/SidePanels';
@@ -31,6 +33,7 @@ import { TitleBar } from '../ui/TitleBar';
 import { MenuBar, type MenuGroup } from '../ui/MenuBar';
 import { ShortcutsDialog } from '../ui/ShortcutsDialog';
 import { SettingsDialog } from '../ui/SettingsDialog';
+import { AboutPage } from '../ui/AboutPage';
 import { AppearanceDialog } from '../ui/AppearanceDialog';
 
 /* Float IDE 工作区：左 IDE（文件/Git/编辑器）+ 右大纲/变量 + 底部控制台/终端。
@@ -38,7 +41,7 @@ import { AppearanceDialog } from '../ui/AppearanceDialog';
 
 type Props = {
   projectDir: string;
-  /** 进来就直接打开的文件（双击 .cw 启动时用） */
+  /** 进来就直接打开的文件（双击 .co（或旧 .cw）启动时用） */
   initialFile?: string;
   /** 打开工程外的文件时，交给上层重新挂载工作区 */
   onOpenTarget?: (path: string) => void;
@@ -52,8 +55,11 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
   const [dockOpen, setDockOpen] = useState(true);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [lines, setLines] = useState<ConsoleLine[]>([]);
+  const linesRef = useRef<ConsoleLine[]>([]);
+  linesRef.current = lines;
   const [vars, setVars] = useState<VarRow[]>([]);
   const [ctl, setCtl] = useState<CtlState>('idle');
+
   const [execPos, setExecPos] = useState<{ file: string; line: number } | null>(null);
   const [askQ, setAskQ] = useState<string | null>(null);
   const [dirtyCount, setDirtyCount] = useState(0);
@@ -66,6 +72,7 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
   const [execMode, setExecMode] = useState<'编译执行' | '解释执行'>('编译执行');
   const [activeName, setActiveName] = useState('');
   const [activePath, setActivePath] = useState<string | null>(null);
+
   const [tabRequest, setTabRequest] = useState<{ tab: 'outline' | 'vars' | 'problems' | 'report'; seq: number }>({ tab: 'outline', seq: 0 });
   const [cursor, setCursor] = useState<{ line: number; col: number }>({ line: 1, col: 1 });
   const [problems, setProblems] = useState<ProblemItem[]>([]);
@@ -83,15 +90,85 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
     } catch { /* 用默认值 */ }
     return { sideW: 240, rightW: 268, dockH: 176 };
   });
+  /* 面板尺寸永远留得下编辑器：拖到窗口边缘也不会把中间挤成 0，更不会溢出留空白。
+   * 窗口变小（拖动窗口 / 换分辨率）时同样的规则再夹一次。 */
+  const clampLayout = useCallback((l: { sideW: number; rightW: number; dockH: number }) => {
+    const w = window.innerWidth || 1280;
+    const h = window.innerHeight || 800;
+    const sideW = Math.max(140, Math.min(l.sideW, Math.min(420, Math.max(140, w - 640))));
+    const rightW = Math.max(160, Math.min(l.rightW, Math.min(520, Math.max(160, w - sideW - 360))));
+    const dockH = Math.max(110, Math.min(l.dockH, Math.max(110, Math.min(760, h - 300))));
+    return { sideW, rightW, dockH };
+  }, []);
+
   const setPanel = useCallback((k: 'sideW' | 'rightW' | 'dockH', v: number): void => {
     setLayout((prev) => {
-      const next = { ...prev, [k]: v };
+      const next = clampLayout({ ...prev, [k]: v });
       try { window.localStorage.setItem('float.layout', JSON.stringify(next)); } catch { /* 忽略 */ }
       return next;
     });
-  }, []);
+  }, [clampLayout]);
 
-  const bus = useRef<{ editor?: EditorHandle }>({});
+  useEffect(() => {
+    const onResize = (): void => setLayout((prev) => clampLayout(prev));
+    onResize();
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [clampLayout]);
+
+  /* 控制台输出 / 变量面板是"哪个文件的运行结果"就该跟着哪个文件走：
+   * 切换活动文件时，如果没在跑，就把上一份输出和调试快照清掉，
+   * 免得看着 A 文件却对着 B 文件的变量一头雾水。 */
+  const prevActiveRef = useRef<string | null>(null);
+  useEffect(() => {
+    const prev = prevActiveRef.current;
+    prevActiveRef.current = activePath;
+    if (!activePath || prev === null || prev === activePath) return;
+    if (ctl === 'running') return;   // 正在跑不动输出，跑完再算
+    setLines([]);
+    setVars([]);
+    setReports([]);
+    setRunProblems([]);
+    setExecPos(null);
+  }, [activePath, ctl]);
+
+  /* 控制台全屏：记住原高度，全屏时占大半屏 */
+  const [dockFull, setDockFull] = useState(false);
+  const preDockHRef = useRef<number | null>(null);
+  const toggleDockFull = useCallback((): void => {
+    if (!dockFull) { preDockHRef.current = layout.dockH; setDockFull(true); return; }
+    setDockFull(false);
+    const h = preDockHRef.current;
+    if (h) setPanel('dockH', h);
+  }, [dockFull, layout.dockH, setPanel]);
+  const bus = useRef<{ editor?: EditorHandle; tree?: { refresh: () => void } }>({});
+
+  /* F6 调试也能读写文件：把桌面文件系统桥接进语言内建表（readfile/writefile/…）。
+   * 相对路径按工程目录解析，和 F5 Rust 内核的行为一致；
+   * 浏览器预览里不注入，内建会提示"桌面版功能"。 */
+  useEffect(() => {
+    if (!isTauri()) return;
+    const base = projectDir.replace(/\\/g, '/').replace(/\/+$/, '');
+    const resolve = (p: string): string => {
+      const norm = p.replace(/\\/g, '/');
+      return /^[A-Za-z]:\//.test(norm) || norm.startsWith('/') ? norm : `${base}/${norm}`;
+    };
+    setFsBridge({
+      read: async (p) => { try { return await api.fsRead(resolve(p)); } catch { return null; } },
+      write: async (p, c) => { try { await api.fsWrite(resolve(p), c); return true; } catch { return false; } },
+      append: async (p, c) => {
+        try {
+          const path = resolve(p);
+          let old = '';
+          try { old = await api.fsRead(path); } catch { /* 新文件 */ }
+          await api.fsWrite(path, old + c);
+          return true;
+        } catch { return false; }
+      },
+      has: async (p) => { try { return (await api.fsStat(resolve(p))).exists; } catch { return false; } }
+    });
+    return () => setFsBridge(null);
+  }, [projectDir]);
   /* 无头测试钩子：只有 ?debug=1 才挂到 window，正常使用不暴露 */
   useEffect(() => {
     if (new URLSearchParams(location.search).get('debug') !== '1') return;
@@ -156,18 +233,18 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
       const m = JSON.parse(raw) as ProjectMeta;
       setMeta(m);
       document.title = `Float IDE — ${m.name}`;
-      const ef = projectDir + '/' + (m.entry ?? 'main.cw');
+      const ef = projectDir + '/' + (m.entry ?? 'main.co');
       setEntryFile(ef);
       try { setEntrySrc(await readSource(ef)); } catch { setEntrySrc(''); }
     } catch {
       // 没有 project.json 也照样能开（用户可能只是随手打开一个放脚本的文件夹）：
-      // 入口优先用传进来的那个文件，其次找目录里第一个 .cw
+      // 入口优先用传进来的那个文件，其次找目录里第一个 .co（旧 .cw 也认）
       const base = projectDir.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '未命名工程';
-      let entry = initialFile ? initialFile.split(/[\\/]/).pop() ?? 'main.cw' : 'main.cw';
+      let entry = initialFile ? initialFile.split(/[\\/]/).pop() ?? 'main.co' : 'main.co';
       if (!initialFile) {
         try {
           const items = await api.fsList(projectDir);
-          const cw = items.find((it) => !it.isDir && it.name.toLowerCase().endsWith('.cw'));
+          const cw = items.find((it) => !it.isDir && /\.(co|cw)$/i.test(it.name));
           if (cw) entry = cw.name;
         } catch { /* 空目录 */ }
       }
@@ -237,7 +314,7 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
   }, [projectDir, pushLine]);
 
   const openOneFile = useCallback(async (): Promise<void> => {
-    const f = await api.pickOpenFile('打开 CW Script 文件', ['cw']);
+    const f = await api.pickOpenFile('打开文件', ['co', 'cw', 'md', 'txt', 'in', 'json']);
     if (!f) return;
     const norm = f.replace(/\\/g, '/');
     const root = projectDir.replace(/\\/g, '/').replace(/\/+$/, '');
@@ -312,7 +389,7 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
     }
   }, [projectDir, meta, pushLine]);
 
-  /* 递归收集工程内全部 .cw 内容，供解释器 import */
+  /* 递归收集工程内全部 Copper 源码（.co 为主，.cw 兼容），供解释器 import */
   const collectSources = useCallback(async (): Promise<Map<string, string>> => {
     const out = new Map<string, string>();
     const walk = async (dir: string): Promise<void> => {
@@ -321,7 +398,7 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
       for (const e of entries) {
         const p = dir + '/' + e.name;
         if (e.isDir) await walk(p);
-        else if (e.name.toLowerCase().endsWith('.cw')) {
+        else if (/\.(co|cw)$/i.test(e.name)) {
           try { out.set(p.replace(/\\/g, '/'), await api.fsRead(p)); } catch { /* 跳过 */ }
         }
       }
@@ -411,10 +488,13 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
       const sources = await collectSources();
       if (!alive()) return;
       (window as any).__floatSources = sources;
-      const entry = projectDir + '/' + (meta.entry ?? 'main.cw');
+      /* 跑你正在看的那份代码：控制台、变量、断点都对着屏幕上的文件；
+       * 当前不是 Copper 源文件（比如在看 README.md）时，才回落到工程入口。 */
+      const shown = activePath && /\.(co|cw)$/i.test(activePath) ? activePath : null;
+      const entry = shown ?? (projectDir + '/' + (meta.entry ?? 'main.co'));
       const normEntry = entry.replace(/\\/g, '/');
       if (!sources.has(normEntry)) {
-        pushLine({ kind: 'err', text: `找不到入口文件：${meta.entry ?? 'main.cw'}` });
+        pushLine({ kind: 'err', text: `找不到入口文件：${meta.entry ?? 'main.co'}` });
         return;
       }
       setLines([]);
@@ -496,7 +576,7 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
     } finally {
       busyRef.current = false;
     }
-  }, [meta, projectDir, pushLine, collectSources]);
+  }, [meta, projectDir, pushLine, collectSources, activePath]);
 
   const doStop = useCallback((): void => {
     // 作废当前令牌：旧回调不再生效，避免停止后又被异步事件点亮
@@ -599,6 +679,57 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
     return () => { alive = false; window.clearInterval(t); };
   }, []);
 
+  /* 工程文件监视：AI / 别的编辑器在磁盘上改了文件 → 1 秒内推到这里，
+   * 打开的缓冲区热更新（没在编辑的才动），文件树同步刷新。 */
+  useEffect(() => {
+    if (!isTauri()) return;
+    void api.fsWatchStart(projectDir).catch(() => { /* 预览环境忽略 */ });
+  }, [projectDir]);
+
+  /* MCP 服务自动就绪：以前要手动在面板里点"启动"，忘了就是外部 AI"连不上"。
+   * 现在进工程就拉起（端口 0 = 默认 17871），面板里的启停照旧可用。 */
+  useEffect(() => {
+    if (!isTauri()) return;
+    let alive = true;
+    void (async () => {
+      try {
+        const st = await api.mcpStatus();
+        if (alive && !st.running) await api.mcpStart(0, projectDir);
+      } catch { /* 预览环境忽略 */ }
+    })();
+    return () => { alive = false; };
+  }, [projectDir]);
+
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    let alive = true;
+    void (async () => {
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+        const off = await listen<string[]>('fs:changed', (ev) => {
+          if (!alive) return;
+          bus.current.tree?.refresh();
+          void (async () => {
+            let reloaded = 0;
+            let kept = 0;
+            for (const rel of ev.payload ?? []) {
+              const abs = projectDir.replace(/\\/g, '/') + '/' + String(rel).replace(/^\/+/, '');
+              try {
+                const r = await bus.current.editor?.externalReload(abs);
+                if (r === 'reloaded') reloaded += 1;
+                else if (r === 'dirty-kept') kept += 1;
+              } catch { /* 文件可能已经没了 */ }
+            }
+            if (reloaded > 0) pushLine({ kind: 'info', text: `检测到外部修改，已更新 ${reloaded} 个打开的文件` });
+            if (kept > 0) pushLine({ kind: 'info', text: `有 ${kept} 个文件你本地改了还没存——保留了你的版本，磁盘上的新内容没盖进来` });
+          })();
+        });
+        if (alive) un = off; else off();
+      } catch { /* 预览环境没有 Tauri 事件 */ }
+    })();
+    return () => { alive = false; un?.(); };
+  }, [projectDir, pushLine]);
+
   /* MCP：外部客户端要跑脚本 / 拿诊断 / 要大纲时，转发给这里执行 */
   useEffect(() => {
     let un: (() => void) | undefined;
@@ -619,6 +750,69 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
                   const code = String(args.code ?? '');
                   const res = await runCodeQuiet(code);
                   reply({ text: res.error ? `错误：${res.error}` : res.out.join('\n') });
+                  return;
+                }
+                if (tool === 'open_project') {
+                  const target = String(args.dir ?? args.path ?? '');
+                  if (!target) { reply({ error: 'open_project 需要 dir 或 path' }); return; }
+                  reply({ text: `正在打开 ${target}` });
+                  // 交给应用外壳换页（.co/.cw/.json/.txt 会连文件一起打开）
+                  window.setTimeout(() => onOpenTarget?.(target), 50);
+                  return;
+                }
+                if (tool === 'get_console') {
+                  const max = Number(args.maxLines ?? 80);
+                  const tail = linesRef.current.slice(-max);
+                  reply({ text: tail.map((l) => l.text).join('\n') || '(控制台是空的)' });
+                  return;
+                }
+                if (tool === 'get_settings') {
+                  reply({ text: JSON.stringify(loadSettings(), null, 2) });
+                  return;
+                }
+                if (tool === 'set_settings') {
+                  try {
+                    const patch = args.settings as Record<string, unknown> | undefined;
+                    if (!patch || typeof patch !== 'object') { reply({ error: 'settings 需要是 JSON 对象' }); return; }
+                    const merged = { ...loadSettings(), ...patch } as ReturnType<typeof loadSettings>;
+                    saveSettings(merged);
+                    applySettings(merged);
+                    reply({ text: '设置已更新并生效' });
+                  } catch (e) { reply({ error: String(e) }); }
+                  return;
+                }
+                if (tool === 'read_buffer' || tool === 'write_buffer') {
+                  const ed = bus.current.editor;
+                  if (!ed) { reply({ error: '编辑器还没就绪' }); return; }
+                  if (tool === 'read_buffer') {
+                    const want = args.path ? String(args.path) : null;
+                    const text = want ? ed.getValue(want) : ed.activeText();
+                    if (text === null || text === undefined) {
+                      // 没打开的文件退回磁盘内容
+                      try {
+                        const abs = want && !/^[A-Za-z]:|^\//.test(want)
+                          ? projectDir.replace(/\\/g, '/') + '/' + want.replace(/^\/+/, '')
+                          : want;
+                        reply({ text: await (await import('../core/sources')).readSource(abs ?? '') });
+                      } catch (e) { reply({ error: `读不到：${String(e)}` }); }
+                      return;
+                    }
+                    reply({ text });
+                    return;
+                  }
+                  // write_buffer：优先活动文件，替换整个缓冲区并标脏
+                  const content = String(args.content ?? '');
+                  const target = args.path ? String(args.path) : null;
+                  if (target) {
+                    ed.setContent(target, content);
+                    reply({ text: `已替换 ${target} 的编辑器内容（未保存，等 Ctrl+S）` });
+                  } else {
+                    // 整替换要走 setContent + 当前路径
+                    const cur = ed.currentPath();
+                    if (!cur) { reply({ error: '当前没有活动文件，write_buffer 需要传 path' }); return; }
+                    ed.setContent(cur, content);
+                    reply({ text: `已替换 ${cur} 的编辑器内容（未保存，等 Ctrl+S）` });
+                  }
                   return;
                 }
                 const rel = String(args.path ?? '');
@@ -789,7 +983,16 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
       id: 'settings',
       title: '偏好设置',
       icon: <IconLayers size={12} />,
-      node: <SettingsDialog onClose={() => bus.current.editor?.closeDoc('settings')} onAppearance={() => openAppearancePage()} embedded />
+      node: <SettingsDialog onClose={() => bus.current.editor?.closeDoc('settings')} onAppearance={() => openAppearancePage()} onAbout={() => openAboutPage()} embedded />
+    });
+  }, []);
+
+  const openAboutPage = useCallback((): void => {
+    bus.current.editor?.openDoc({
+      id: 'about',
+      title: '关于 Float IDE',
+      icon: <IconLayers size={12} />,
+      node: <AboutPage onClose={() => bus.current.editor?.closeDoc('about')} />
     });
   }, []);
 
@@ -817,8 +1020,12 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
   /* F 键 */
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
-      const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      const t = e.target as HTMLElement | null;
+      const inEditor = !!t?.closest?.('.monaco-editor');
+      /* Monaco 的输入区是个 textarea。以前这里一律 return，导致焦点在编辑器中时
+       * F5/F6/F8/Ctrl+P 全被吞掉；现在只放过真正的表单输入（搜索框、对话框）。 */
+      const isForm = !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
+      if (isForm && !inEditor) return;
       const mod = e.ctrlKey || e.metaKey;
       const ed = bus.current.editor;
 
@@ -872,15 +1079,6 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
     return () => window.removeEventListener('keydown', onKey);
   }, [startRun, doResume, doStep, doStop, doExport, pushLine, gotoDefinition, startRename, openSearch, openTutorial, openShortcutsPage, openSettingsPage, quickOpen, paletteOpen]);
 
-  /* F9：提示断点用法（行级断点由编辑器 gutter 点击切换） */
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.code !== 'F9') return;
-      e.preventDefault();
-      pushLine({ kind: 'info', text: '断点：点击编辑器行号左侧空白处切换' });
-    };
-    return () => window.removeEventListener('keydown', onKey);
-  }, [pushLine]);
 
   const running = ctl === 'running' || ctl === 'paused';
   const stateText = ctl === 'idle' ? '就绪'
@@ -905,7 +1103,7 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
     { id: 'export', title: '导出工程包（.floatzip）', run: () => void doExport() },
     { id: 'clear', title: '清空控制台', run: () => setLines([]) },
     { id: 'exit', title: '关闭工程，返回欢迎页', run: () => { doStop(); onExit(); } },
-    { id: 'tutorial', title: '学习中心（CW Script 教程）', hint: 'Ctrl+Shift+H', run: () => openTutorial() },
+    { id: 'tutorial', title: '学习中心（Copper 教程）', hint: 'Ctrl+Shift+H', run: () => openTutorial() },
     { id: 'plugins', title: '插件管理', run: () => openPluginsPage() },
     { id: 'mcp', title: 'MCP 服务器（让外部 AI 用这个工程）', run: () => openMcpPage() },
     ...pluginCommands.map((c) => ({
@@ -994,11 +1192,11 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
     {
       label: '帮助',
       items: [
-        { label: '学习中心（CW Script 教程）', hint: 'Ctrl+Shift+H', run: () => openTutorial() },
+        { label: '学习中心（Copper 教程）', hint: 'Ctrl+Shift+H', run: () => openTutorial() },
         { sep: true, label: 'h1' },
         { label: '快捷键一览', hint: 'F1', run: () => openShortcutsPage() },
         { label: '偏好设置…', hint: 'Ctrl+Alt+S', run: () => openSettingsPage() },
-        { label: '关于 Float IDE', run: () => pushLine({ kind: 'info', text: 'Float IDE · 小方工作室 · CW Script' }) }
+        { label: '关于 Float IDE', run: () => openAboutPage() }
       ]
     }
   ];
@@ -1062,9 +1260,14 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
             </button>
           </div>
           <div className="side-wrap" style={{ width: layout.sideW }}>
-            {sideTab === 'files'
-              ? <FileTree projectDir={projectDir} activePath={activePath} bus={bus} onDirtyTree={() => {}} />
-              : <GitPanel projectDir={projectDir} onOpenDiff={(rel, kind) => void openGitDiff(rel, kind)} />}
+            {/* 两个面板常驻挂载、用 display 切换：切到 Git 再切回来，
+                文件树的展开状态和已加载内容原样保留，不会"啥都没了"。 */}
+            <div style={{ display: sideTab === 'files' ? 'contents' : 'none' }}>
+              <FileTree projectDir={projectDir} activePath={activePath} bus={bus} onDirtyTree={() => {}} />
+            </div>
+            <div style={{ display: sideTab === 'git' ? 'contents' : 'none' }}>
+              <GitPanel projectDir={projectDir} onOpenDiff={(rel, kind) => void openGitDiff(rel, kind)} />
+            </div>
           </div>
           <Splitter dir="x" title="拖动调整侧栏宽度" onDrag={(d) => setPanel('sideW', Math.min(420, Math.max(150, layout.sideW + d)))} />
           <div className="ws-editor-col">
@@ -1103,7 +1306,7 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
       </div>
 
       {dockOpen && (
-        <Splitter dir="y" title="拖动调整控制台高度" onDrag={(d) => setPanel('dockH', Math.min(560, Math.max(120, layout.dockH - d)))} />
+        <Splitter dir="y" title="拖动调整控制台高度" onDrag={(d) => setPanel('dockH', Math.min(760, Math.max(120, layout.dockH - d)))} />
       )}
       {dockOpen && (
         <ConsoleDock
@@ -1127,7 +1330,9 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
           onTab={setDockTab}
           projectDir={projectDir}
           onClear={() => setLines([])}
-          height={layout.dockH}
+          height={dockFull ? Math.max(360, Math.round(window.innerHeight * 0.82)) : layout.dockH}
+          full={dockFull}
+          onToggleFull={toggleDockFull}
           searchNode={indexRef.current ? (
             <SearchPanel
               index={indexRef.current}
@@ -1169,7 +1374,7 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
         <span>行 {cursor.line}，列 {cursor.col}</span>
         <span>UTF-8</span>
         <span>LF</span>
-        <span>CW Script 0.10</span>
+        <span>Copper</span>
       </div>
 
       {rename && (
@@ -1273,6 +1478,6 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
         current = idx.code === 0 ? idx.stdout : '';
       }
     } catch { /* 空基线 */ }
-    bus.current.editor?.openDiff({ title: `${rel}（${kind === 'index' ? '已暂存' : '工作区改动'}）`, base, current, lang: 'cwscript' });
+    bus.current.editor?.openDiff({ title: `${rel}（${kind === 'index' ? '已暂存' : '工作区改动'}）`, base, current, lang: 'copper' });
   }
 }

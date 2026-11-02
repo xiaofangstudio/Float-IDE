@@ -8,6 +8,7 @@
 import type { Analysis } from '../lang/analyze';
 import { analyze } from '../lang/analyze';
 import { codePart, tokenizeLine } from '../lang/token';
+import { isCopperFile } from '../lang/spec';
 
 export type Row = { path: string; text: string; lines: string[]; analysis: Analysis };
 
@@ -31,7 +32,7 @@ export type SearchOptions = {
   matchCase: boolean;
   wholeWord: boolean;
   useRegex: boolean;
-  /** 只搜 .cw 源码；false 时连 json / md 一起搜 */
+  /** 只搜 Copper 源码（.co/.cw）；false 时连 json / md 一起搜 */
   sourceOnly: boolean;
   limit: number;
 };
@@ -109,7 +110,7 @@ export class ProjectIndex {
     if (!re) return { hits, truncated: false };
 
     for (const path of this.order) {
-      if (opt.sourceOnly && !path.toLowerCase().endsWith('.cw')) continue;
+      if (opt.sourceOnly && !isCopperFile(path)) continue;
       const row = this.rows.get(path);
       if (!row) continue;
       row.lines.forEach((raw, i) => {
@@ -194,7 +195,7 @@ export class ProjectIndex {
     for (const path of this.order) {
       const row = this.rows.get(path);
       if (!row) continue;
-      if (!path.toLowerCase().endsWith('.cw')) continue;
+      if (!isCopperFile(path)) continue;
       const a = row.analysis;
       const f = a.funcs.find((x) => x.name === name);
       if (f) return { file: path, line: f.line, col: 1, name, kind: f.owner ? '方法' : '函数' };
@@ -205,7 +206,7 @@ export class ProjectIndex {
     const own = this.row(file)?.analysis.vars.find((v) => v.name === name);
     if (own) return { file: file.replace(/\\/g, '/'), line: own.line, col: 1, name, kind: '变量' };
     for (const path of this.order) {
-      if (!path.toLowerCase().endsWith('.cw')) continue;
+      if (!isCopperFile(path)) continue;
       const v = this.rows.get(path)?.analysis.vars.find((x) => x.name === name);
       if (v) return { file: path, line: v.line, col: 1, name, kind: '变量' };
     }
@@ -216,7 +217,7 @@ export class ProjectIndex {
   references(name: string, includeDecl = true): SymRef[] {
     const out: SymRef[] = [];
     for (const path of this.order) {
-      if (!path.toLowerCase().endsWith('.cw')) continue;
+      if (!isCopperFile(path)) continue;
       const row = this.rows.get(path);
       if (!row) continue;
       row.lines.forEach((raw, i) => {

@@ -185,7 +185,7 @@ export function PluginPanel({ host, onChanged, onClose, embedded }: Props) {
     "name": "SQL 助手",
     "version": "1.0.0",
     "publisher": "数据组",
-    "description": "把选中的 SQL 格式化成一段 CW Script",
+    "description": "把选中的 SQL 格式化成一段 Copper",
     "tags": ["sql", "format"],
     "localPath": "D:/team/plugins/float.sql-helper"
   }
@@ -248,7 +248,7 @@ export function PluginPanel({ host, onChanged, onClose, embedded }: Props) {
   }
 }`}</pre>
           <p className="pp-muted">
-            命令里的 <code>run</code> 直接就是一段 CW Script，会被语言内核执行，输出进控制台。
+            命令里的 <code>run</code> 直接就是一段 Copper，会被语言内核执行，输出进控制台。
             也可以用 <code>insert</code> 往编辑器里插文本，支持 <code>{'${file} ${path} ${project} ${date} ${time}'}</code> 占位符。
           </p>
 
@@ -269,7 +269,7 @@ module.exports = {
             <tbody>
               <tr><td><code>float.files.read / write / list</code></td><td>读写工程文件（需 <code>files:read/write</code> 权限）</td></tr>
               <tr><td><code>float.editor.getText / setText / insert</code></td><td>读写当前编辑器（需 <code>editor:read/write</code>）</td></tr>
-              <tr><td><code>float.language.run(code)</code></td><td>跑一段 CW Script 拿输出（需 <code>language:run</code>）</td></tr>
+              <tr><td><code>float.language.run(code)</code></td><td>跑一段 Copper 拿输出（需 <code>language:run</code>）</td></tr>
               <tr><td><code>float.console.print / error</code></td><td>写控制台（需 <code>console:write</code>）</td></tr>
               <tr><td><code>float.ui.notify</code></td><td>界面提示（需 <code>ui:notify</code>）</td></tr>
               <tr><td><code>float.plugin.storage.get / set</code></td><td>插件私有键值存储</td></tr>
@@ -280,7 +280,7 @@ module.exports = {
           <h4>还能贡献什么</h4>
           <ul className="pp-ul">
             <li><code>contributes.snippets</code> —— 代码片段，输入前缀就展开（在编辑器里直接可用）</li>
-            <li><code>contributes.keywords</code> —— 并进 .cw 的自动补全</li>
+            <li><code>contributes.keywords</code> —— 并进 Copper 的自动补全</li>
             <li><code>contributes.menus.tools</code> —— 在「工具」菜单里加一项</li>
             <li><code>contributes.statusBar</code> —— 状态栏的一行文字</li>
           </ul>

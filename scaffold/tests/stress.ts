@@ -4,6 +4,7 @@ import { parseProgram } from '../src/lang/parse';
 import { Runner } from '../src/lang/interp';
 import { analyze } from '../src/lang/analyze';
 import { fmtVal } from '../src/lang/values';
+import { setFsBridge } from '../src/lang/builtins';
 
 let pass = 0;
 let fail = 0;
@@ -201,6 +202,71 @@ for (const d of [20, 60, 150]) {
   const t0 = Date.now();
   const { out, err } = await run(src);
   log(err === null && out[0] === '30000' && out[1] === '1000', '3 万键字典', `${Date.now() - t0}ms${err ? ' ERR:' + err.slice(0, 60) : ''}`);
+}
+
+/* ── 15. F6 调试通道的文件桥（writefile/readfile/appendfile/hasfile） ── */
+{
+  const files = new Map<string, string>();
+  setFsBridge({
+    read: async (p) => (files.has(p) ? (files.get(p) as string) : null),
+    write: async (p, c) => { files.set(p, c); return true; },
+    append: async (p, c) => { files.set(p, (files.get(p) ?? '') + c); return true; },
+    has: async (p) => files.has(p)
+  });
+  const src = `writefile("存档.txt", "第一行")
+appendfile("存档.txt", "|第二行")
+print(readfile("存档.txt"))
+print(hasfile("存档.txt"))
+print(hasfile("没有.txt"))
+`;
+  (globalThis as any).__floatSources = new Map([['main.cw', src]]);
+  const out: string[] = [];
+  let err: string | null = null;
+  await new Promise<void>((done) => {
+    let settled = false;
+    const finish = (): void => { if (!settled) { settled = true; done(); } };
+    const r = new Runner('main.cw', {
+      output: (l) => { if (l.kind === 'out') out.push(l.text); else if (l.kind === 'err') err = l.text; },
+      onError: (e) => { err = e.message; },
+      onDone: finish,
+      onState: () => {},
+      onPaused: () => { setTimeout(() => r.continueRun(), 0); }
+    });
+    try { r.start('debug'); } catch (e) { err = String(e); finish(); }
+    setTimeout(finish, 10000);
+  });
+  log(out[0] === '第一行|第二行' && out[1] === 'true' && out[2] === 'false' && err === null,
+    'F6 调试通道文件读写', err ? 'ERR:' + err.slice(0, 60) : out.join(' | ').slice(0, 60));
+  setFsBridge(null);
+}
+
+/* ── 16. 调试模式（树遍历解释器）跑大文件：文字游戏这个量级必须扛得住 ── */
+{
+  let src = '';
+  for (let i = 0; i < 12000; i++) src += `int y${i} = ${i % 997}
+`;
+  src += 'int total = 0\n';
+  for (let i = 0; i < 12000; i++) src += `total = total + y${i}\n`;
+  src += 'print(total > 0)\n';
+  (globalThis as any).__floatSources = new Map([['main.cw', src]]);
+  const out: string[] = [];
+  let err: string | null = null;
+  const t0 = Date.now();
+  await new Promise<void>((done) => {
+    let settled = false;
+    const finish = (): void => { if (!settled) { settled = true; done(); } };
+    const r = new Runner('main.cw', {
+      output: (l) => { if (l.kind === 'out') out.push(l.text); else if (l.kind === 'err') err = l.text; },
+      onError: (e) => { err = e.message; },
+      onDone: finish,
+      onState: () => {},
+      onPaused: () => { setTimeout(() => r.continueRun(), 0); }
+    });
+    try { r.start('debug'); } catch (e) { err = String(e); finish(); }
+    setTimeout(finish, 30000);
+  });
+  log(err === null && out[0] === 'true', '调试模式 2.4 万行解释执行',
+    `${Date.now() - t0}ms${err ? ' ERR:' + err.slice(0, 60) : ''}`);
 }
 
 console.log(`\n压力探针：${pass} 通过 / ${fail} 失败`);

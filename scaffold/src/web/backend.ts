@@ -127,7 +127,7 @@ function listDir(dir: string): { name: string; relPath: string; isDir: boolean; 
 
 const MAIN = `// ─ 欢迎来到 Float IDE · Nexus OS 26 版 ─
 // F5 运行 · F6 调试 · Ctrl+P 快速开文件 · Ctrl+Shift+F 全局查找
-// 语言叫 CW Script，点顶栏「学习中心」有一整本教程
+// 语言叫 Copper，点顶栏「学习中心」有一整本教程
 
 class Hero
     str name = ""
@@ -174,7 +174,7 @@ int lo, int hi = minmax([5, 3, 9, 1])
 print("最小 " + lo + "，最大 " + hi)
 `;
 
-const LIB = `// 公共工具函数（被 main.cw import 到）
+const LIB = `// 公共工具函数（被 main.co import 到）
 function twice(x)
     return x * 2
 
@@ -194,11 +194,11 @@ function seedDemoProject(): void {
   dirs.add(p + '/.float');
   dirs.add(p + '/core');
   files.set(p + '/project.json', JSON.stringify(
-    { name: 'hello', entry: 'main.cw', version: '0.1.0', kind: 'float' }, null, 2));
-  files.set(p + '/main.cw', MAIN);
-  files.set(p + '/lib.cw', LIB);
-  files.set(p + '/core/engine.cw', '// 引擎\nfunction tick()\n    return 1\n');
-  files.set(p + '/README.md', '# hello\n\n在 Nexus OS 26 里用 CW Script 写的第一个工程。\n');
+    { name: 'hello', entry: 'main.co', version: '0.1.0', kind: 'float' }, null, 2));
+  files.set(p + '/main.co', MAIN);
+  files.set(p + '/lib.co', LIB);
+  files.set(p + '/core/engine.co', '// 引擎\nfunction tick()\n    return 1\n');
+  files.set(p + '/README.md', '# hello\n\n在 Nexus OS 26 里用 Copper 写的第一个工程。\n');
   for (const k of files.keys()) mtimes.set(k, Date.now() - 60_000);
 }
 
@@ -380,7 +380,7 @@ export const internals = {
         dirs.add(target + '/.float');
         const given = a.files ?? {};
         if (Object.keys(given).length === 0) {
-          files.set(target + '/main.cw', 'print("你好，Nexus OS 26")\n');
+          files.set(target + '/main.co', 'print("你好，Nexus OS 26")\n');
         } else {
           for (const [rel, text] of Object.entries(given)) {
             const fp = target + '/' + norm(rel);
@@ -390,7 +390,7 @@ export const internals = {
           }
         }
         files.set(target + '/project.json', JSON.stringify(
-          { name, entry: 'main.cw', version: '0.1.0', kind: 'float' }, null, 2));
+          { name, entry: 'main.co', version: '0.1.0', kind: 'float' }, null, 2));
         for (const k of files.keys()) if (!mtimes.has(k)) mtimes.set(k, Date.now());
         scheduleSave();
         return Promise.resolve(target);

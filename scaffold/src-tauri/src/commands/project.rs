@@ -124,8 +124,8 @@ pub fn pick_folder(title: String) -> Option<String> {
     rfd::FileDialog::new().set_title(&title).pick_folder().map(|p| p.to_string_lossy().to_string())
 }
 
-/// 打开单个文件（.cw 之类）。之前的"打开"只能选文件夹，
-/// 所以用户在对话框里根本看不到 .cw 文件——这个命令专门补这个洞。
+/// 打开单个文件（.co / .cw 之类）。之前的"打开"只能选文件夹，
+/// 所以用户在对话框里根本看不到 Copper 源文件——这个命令专门补这个洞。
 #[tauri::command]
 pub fn pick_open_file(title: String, exts: Vec<String>) -> Option<String> {
     let mut dlg = rfd::FileDialog::new().set_title(&title);
@@ -141,7 +141,7 @@ pub fn pick_open_file(title: String, exts: Vec<String>) -> Option<String> {
     dlg.pick_file().map(|p| p.to_string_lossy().to_string())
 }
 
-/// 启动时带进来的路径（双击 .cw / 把文件拖到 exe 上）。
+/// 启动时带进来的路径（双击 .co / .cw / 把文件拖到 exe 上）。
 /// 只认第一个参数，且必须真实存在。
 #[tauri::command]
 pub fn startup_path() -> Option<String> {
@@ -261,7 +261,6 @@ pub fn open_path(path: String) -> Result<(), String> {
 pub struct EnvInfo {
     pub edge: Option<String>,
     pub chrome: Option<String>,
-    pub ffmpeg: Option<String>,
 }
 
 pub fn find_browser() -> Option<(String, &'static str)> {
@@ -283,27 +282,6 @@ pub fn find_browser() -> Option<(String, &'static str)> {
     None
 }
 
-pub fn find_ffmpeg() -> Option<String> {
-    let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
-    let candidates = [
-        exe_dir.join("ffmpeg").join("ffmpeg.exe"),
-        exe_dir.join("src-tauri").join("ffmpeg").join("ffmpeg.exe"),
-        PathBuf::from(r"D:\20533\deskbox\fangwork\Tempus\scaffold\src-tauri\ffmpeg\ffmpeg.exe"),
-    ];
-    for p in candidates {
-        if p.is_file() {
-            return Some(p.to_string_lossy().to_string());
-        }
-    }
-    // PATH 里找
-    if which_ok("ffmpeg") { return Some("ffmpeg".into()); }
-    None
-}
-
-fn which_ok(name: &str) -> bool {
-    Command::new(name).arg("-version").output().map(|o| o.status.success()).unwrap_or(false)
-}
-
 #[tauri::command]
 pub fn detect_env() -> EnvInfo {
     let browser = find_browser();
@@ -312,5 +290,5 @@ pub fn detect_env() -> EnvInfo {
         Some((p, _)) => (None, Some(p)),
         None => (None, None),
     };
-    EnvInfo { edge, chrome, ffmpeg: find_ffmpeg() }
+    EnvInfo { edge, chrome }
 }

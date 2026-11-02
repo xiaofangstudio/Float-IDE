@@ -21,8 +21,26 @@ export type ClassDef = {
 
 export type DictVal = { kind: 'dict'; map: Map<string, Val> };
 
-/** 手动分配的指针：buf 是格子，freed 之后任何访问都报错 */
-export type PtrVal = { kind: 'ptr'; buf: Val[]; freed: boolean };
+/** 指针：指向一段可以按格子寻址的内存。
+ *
+ *  - `alloc(n)`：buf 是自己的一块（owner=true），要手动 free
+ *  - `&xs[i]`：buf 就是那个列表本身（owner=false），改 *p 等于改 xs[i]
+ *  - `&x`（变量）：走 cell 闭包，读 *p / 写 *p 都回到变量本身
+ *
+ *  idx 是"当前指到第几格"，指针运算（p+1）只改 idx，共享同一块 buf——
+ *  和 C 里地址加一个元素大小是同一件事，只是把裸地址藏了起来，越界会报错而不是踩内存。
+ */
+export type PtrCell = { get: () => Val; set: (v: Val) => void; alive: () => boolean };
+export type PtrVal = {
+  kind: 'ptr';
+  buf: Val[];
+  idx: number;
+  /** 是不是 alloc 出来的（只有自己的块才允许 free） */
+  owner: boolean;
+  freed: boolean;
+  /** &变量：直接绑在变量上 */
+  cell?: PtrCell;
+};
 
 export type Instance = {
   kind: 'instance';
@@ -52,7 +70,20 @@ export const instance = (cls: ClassDef): Instance => ({ kind: 'instance', cls, f
 export const isPtr = (v: Val): v is PtrVal => typeof v === 'object' && v !== null && (v as PtrVal).kind === 'ptr';
 
 /** 申请 n 个格子（初值 null） */
-export const allocPtr = (n: number): PtrVal => ({ kind: 'ptr', buf: new Array(n).fill(null), freed: false });
+export const allocPtr = (n: number): PtrVal =>
+  ({ kind: 'ptr', buf: new Array(n).fill(null), idx: 0, owner: true, freed: false });
+
+/** 取地址：列表的元素（buf 共享，写入会改到原列表） */
+export const aliasPtr = (arr: Val[], idx: number): PtrVal =>
+  ({ kind: 'ptr', buf: arr, idx, owner: false, freed: false });
+
+/** 取地址：变量（读写都回到变量本身） */
+export const cellPtr = (cell: PtrCell): PtrVal =>
+  ({ kind: 'ptr', buf: [null], idx: 0, owner: false, freed: false, cell });
+
+/** 指针平移：共享同一块内存，只挪 idx */
+export const shiftPtr = (p: PtrVal, n: number): PtrVal =>
+  ({ ...p, idx: p.idx + n });
 
 export const isDict = (v: Val): v is DictVal => typeof v === 'object' && v !== null && (v as DictVal).kind === 'dict';
 export const isInstance = (v: Val): v is Instance => typeof v === 'object' && v !== null && (v as Instance).kind === 'instance';
@@ -90,7 +121,10 @@ export function fmtVal(v: Val, seen: Set<object> = new Set(), depth = 0): string
     return Number.isInteger(v) ? String(v) : String(Number(v.toFixed(10)));
   }
   if (isPtr(v)) {
-    return v.freed ? `<ptr ${v.buf.length} 已释放>` : `<ptr ${v.buf.length}>`;
+    if (v.freed) return '<ptr 已释放>';
+    if (v.cell) return '<ptr → 变量>';
+    if (!v.owner) return `<ptr → 第 ${v.idx} 格>`;
+    return `<ptr ${v.buf.length} 格@{${v.idx}}>`;
   }
   const isBox = Array.isArray(v) || isDict(v) || isInstance(v) || isCInstLike(v);
   if (isBox) {

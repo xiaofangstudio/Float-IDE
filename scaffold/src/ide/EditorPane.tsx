@@ -6,11 +6,12 @@ import { api, isTauriEnv } from '../core/tauri';
 import { normPath, setSourceProvider } from '../core/sources';
 import type { ProblemItem } from '../core/types';
 import { registerFloatLanguage, LANG_ID, validateModel } from '../lang/floatlang';
+import { isCopperFile } from '../lang/spec';
 import { loadSettings, SETTINGS_EVENT, type Settings } from '../ui/settings';
 import { askText } from '../ui/prompt';
 import { IconClose, IconPlus } from '../ui/icons';
 
-/* Float 编辑器：多标签 + Monaco（.cw 高亮/补全/悬停）+ 断点 + 当前执行行 + Ctrl+S。 */
+/* Float 编辑器：多标签 + Monaco（Copper .co 高亮/补全/悬停）+ 断点 + 当前执行行 + Ctrl+S。 */
 
 (self as any).MonacoEnvironment = {
   getWorker(_mid: string, label: string): Worker {
@@ -166,6 +167,9 @@ export type EditorHandle = {
   saveFile: (path: string) => Promise<boolean>;
   /** 直接用新内容覆盖某个已打开文件的缓冲区 */
   setContent: (path: string, text: string) => void;
+  /** 磁盘上被外部（AI / 别的编辑器）改了：缓冲区没改过就热灌新内容，改过则保留用户版本。
+   *  返回 'reloaded' | 'dirty-kept' | 'not-open' | 'same' */
+  externalReload: (path: string) => Promise<string>;
   revealLine: (path: string, line: number, col?: number) => void;
   dirtyCount: () => number;
   getValue: (path: string) => string | null;
@@ -231,6 +235,9 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
   const edRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
   const diffEdRef = useRef<monaco.editor.IDiffEditor | null>(null);
   const modelsRef = useRef<Map<string, monaco.editor.ITextModel>>(new Map());
+  // 正在打开中的文件：路径 → Promise。防止并发 openFile 给同一个 uri 建 model 两次
+  //（那正是「ModelService: Cannot add model because it already exists!」的来源）。
+  const pendingOpens = useRef(new Map<string, Promise<void>>());
   // 登记到模块作用域，让"运行"能拿到屏幕上的内容（而不是磁盘上的旧内容）
   liveModels = modelsRef.current;
   const bpDecorRef = useRef<Set<string>>(new Set());
@@ -662,11 +669,26 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
   const openFile = useCallback(async (path: string): Promise<void> => {
     if (diffSpec) closeDiff();
     let model = modelsRef.current.get(path);
+    // 同一个文件被连续点两次 / 树和标签同时触发：等第一个读完即可，
+    // 不然两边都 createModel 同一个 uri，Monaco 直接炸「Cannot add model」。
     if (!model) {
+      const inflight = pendingOpens.current.get(path);
+      if (inflight) { await inflight; model = modelsRef.current.get(path); }
+    }
+    if (!model) {
+      const open = (async (): Promise<void> => {
       try {
         const text = await api.fsRead(path);
-        const lang = path.toLowerCase().endsWith('.json') ? 'json' : LANG_ID;
-        model = monaco.editor.createModel(text, lang, uriOf(path));
+        const ext = (path.toLowerCase().split('.').pop() ?? '');
+        const lang =
+          ext === 'json' ? 'json'
+          : ext === 'md' ? 'markdown'
+          : (ext === 'txt' || ext === 'in') ? 'plaintext'
+          : LANG_ID;
+        // 兜底：Monaco 里已经有同 uri 的 model（比如 diff 视图建的）就复用
+        const uri = uriOf(path);
+        const existed = monaco.editor.getModel(uri);
+        model = existed ?? monaco.editor.createModel(text, lang, uri);
         const m = model;
         let timer = 0;
         let saveTimer = 0;
@@ -681,7 +703,7 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
             buffersChangeRef.current?.();
           }, 280);
           // 自动保存（设置里可关）——走和手动保存同一条串行通道，避免互相踩
-          if (loadSettings().autoSave && path.toLowerCase().endsWith('.cw')) {
+          if (loadSettings().autoSave && /\.(co|cw|md|txt|in)$/i.test(path)) {
             if (saveTimer) window.clearTimeout(saveTimer);
             saveTimer = window.setTimeout(() => {
               void saveOneRef.current(path).then((done) => {
@@ -692,7 +714,12 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
         });
         modelsRef.current.set(path, model);
         if (lang === LANG_ID) { validateModel(model); reportProblems(model, path); }
-      } catch (e) { setStatus('打开失败：' + String(e)); return; }
+      } catch (e) { setStatus('打开失败：' + String(e)); }
+      })();
+      pendingOpens.current.set(path, open);
+      try { await open; } finally { pendingOpens.current.delete(path); }
+      model = modelsRef.current.get(path);
+      if (!model) return;   // 打开失败：不建标签
     }
     setTabs((t) => (t.includes(path) ? t : [...t, path]));
     setActiveTab(path);
@@ -743,20 +770,20 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
     });
   }, [activeTab, diffSpec]);
 
-  /** 标签栏「+」：在工程根新建一个 .cw 文件并打开 */
+  /** 标签栏「+」：在工程根新建一个 .co 文件并打开 */
   const newFile = useCallback(async (): Promise<void> => {
     const name = await askText('新建文件', {
-      placeholder: '文件名，如 tools.cw',
-      hint: '不写后缀会自动补 .cw',
+      placeholder: '文件名，如 tools.co',
+      hint: '不写后缀会自动补 .co',
       validate: (v) => (/[\\/:*?"<>|]/.test(v) ? '名称里不能有 \\ / : * ? " < > |' : null)
     });
     if (!name) return;
-    const finalName = /\.[A-Za-z0-9]{1,8}$/.test(name) ? name : name + '.cw';
+    const finalName = /\.[A-Za-z0-9]{1,8}$/.test(name) ? name : name + '.co';
     const root = projectDir.replace(/\\/g, '/').replace(/\/+$/, '');
     const path = `${root}/${finalName}`;
     try {
-      await api.fsWrite(path, /\.cw$/i.test(finalName)
-        ? '// 新建的 CW Script 文件\n\nprint("你好，CW Script")\n'
+      await api.fsWrite(path, /\.(co|cw)$/i.test(finalName)
+        ? '// 新建的 Copper 文件\n\nprint("你好，Copper")\n'
         : '');
       await openFile(path);
     } catch (e) {
@@ -772,6 +799,24 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
     // setValue 会触发脏标记，这里紧接着刷新版本，保存时不会被当成"被外部改动"
     setDirty((s) => new Set(s).add(path));
     void api.fsStat(path).then((st) => { if (st.exists) versionRef.current.set(path, st.mtimeMs); }).catch(() => {});
+  }, []);
+
+  /** 磁盘上的文件被外部改了（AI 写完代码 / 另一个编辑器保存）：
+   *  缓冲区是干净的 → 直接热灌新内容，编辑器立刻显示，不用刷新不用重开；
+   *  缓冲区有未保存修改 → 保留用户版本，只在状态栏提一句（绝不悄悄覆盖人正在写的东西）。 */
+  const externalReload = useCallback(async (path: string): Promise<string> => {
+    const model = modelsRef.current.get(path);
+    if (!model) return 'not-open';
+    if (dirtyRef.current.has(path)) return 'dirty-kept';
+    try {
+      const text = await api.fsRead(path);
+      if (text === model.getValue()) { return 'same'; }
+      model.setValue(text);
+      void api.fsStat(path).then((st) => { if (st.exists) versionRef.current.set(path, st.mtimeMs); }).catch(() => {});
+      return 'reloaded';
+    } catch {
+      return 'not-open';
+    }
   }, []);
 
   const revealLine = useCallback((path: string, line: number, col?: number): void => {
@@ -801,7 +846,7 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
 
   useEffect(() => {
     bus.current.editor = {
-      openFile, closeTab, saveAll, saveFile: saveOne, setContent, revealLine,
+      openFile, closeTab, saveAll, saveFile: saveOne, setContent, revealLine, externalReload,
       dirtyCount: () => dirtyRef.current.size,
       getValue: (p) => modelsRef.current.get(p)?.getValue() ?? null,
       refreshBpDecor,

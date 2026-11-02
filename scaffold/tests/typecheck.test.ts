@@ -68,6 +68,19 @@ for (const t of ['int', 'float', 'str', 'bool', 'list', 'dict', 'var']) {
   ok(`类型 ${t} 能声明`, !diags(`${t} x`).some((d) => d.severity === 'error'), t);
 }
 
+/* ── 指针：& 取地址的类型是 ptr，* 解引用不瞎猜（以前会把 ptr p = &x 误报成 int） ── */
+{
+  ok('ptr p = &x 不误报', !hasError('int x = 1\nptr p = &x'), msgOf('int x = 1\nptr p = &x'));
+  ok('ptr pp = &p 不误报', !hasError('int x = 1\nptr p = &x\nptr pp = &p'), msgOf('int x = 1\nptr p = &x\nptr pp = &p'));
+  ok('**pp 读写不误报',
+    !hasError('int x = 7\nptr p = &x\nptr pp = &p\nprint(**pp)\n**pp = 9'),
+    msgOf('int x = 7\nptr p = &x\nptr pp = &p\nprint(**pp)\n**pp = 9'));
+  ok('*p = 值 不误报', !hasError('int x = 1\nptr p = &x\n*p = 2'), msgOf('int x = 1\nptr p = &x\n*p = 2'));
+  // 真正的类型不符还是要报
+  ok('ptr p = 1 仍然报错', hasError('ptr p = 1'), msgOf('ptr p = 1'));
+  ok('int n = &x 仍然报错', hasError('int x = 1\nint n = &x'), msgOf('int x = 1\nint n = &x'));
+}
+
 console.log(`\n通过 ${pass} 项，失败 ${fail} 项`);
 if (fail) process.exit(1);
 console.log('全部通过');

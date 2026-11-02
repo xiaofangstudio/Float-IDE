@@ -22,7 +22,7 @@ import {
   type Analysis, type OutlineItem
 } from './analyze';
 
-/* CW Script 编辑器支持：Monarch 高亮、AST 驱动的补全 / 悬停 / 签名提示 / 实时诊断 / 大纲。
+/* Copper（原 CW Script）编辑器支持：Monarch 高亮、AST 驱动的补全 / 悬停 / 签名提示 / 实时诊断 / 大纲。
  *
  * 0.1.0 的补全靠正则扫源码；这里全部换成 analyze() 产出的符号表，
  * 因此类、方法、字段、参数都能真正参与提示。
@@ -41,7 +41,7 @@ export function analysisOf(model: monaco.editor.ITextModel): Analysis {
   const hit = cache.get(model);
   const version = model.getVersionId();
   if (hit && hit.version === version) return hit.analysis;
-  const analysis = analyze(model.uri.path.split('/').pop() || 'main.cw', model.getValue());
+  const analysis = analyze(model.uri.path.split('/').pop() || 'main.co', model.getValue());
   cache.set(model, { version, analysis });
   return analysis;
 }
@@ -66,7 +66,7 @@ function findImported(model: monaco.editor.ITextModel, want: string): string | n
   for (const m of monaco.editor.getModels()) {
     const p = decodeURIComponent(m.uri.path).replace(/\\/g, '/').toLowerCase();
     const name = p.split('/').pop() || '';
-    if (name === base || name === `${base}.cw` || p.endsWith(`/${wantPath}`)) return m.getValue();
+    if (name === base || name === `${base}.co` || name === `${base}.cw` || p.endsWith(`/${wantPath}`)) return m.getValue();
   }
   const dir = modelDir(model);
   const key = `${dir}/${want}`.replace(/\\/g, '/');
@@ -134,7 +134,7 @@ export function registerFloatLanguage(): void {
   if (registered) return;
   registered = true;
 
-  monaco.languages.register({ id: LANG_ID, extensions: ['.cw'], aliases: ['CW Script', 'cwscript'] });
+  monaco.languages.register({ id: LANG_ID, extensions: ['.co', '.cw'], aliases: ['Copper', 'CW Script', 'cwscript'] });
 
   monaco.languages.setMonarchTokensProvider(LANG_ID, {
     ignoreCase: false,
@@ -211,7 +211,7 @@ function registerCompletion(): void {
         const files: string[] = [];
         for (const m of monaco.editor.getModels()) {
           const name = decodeURIComponent(m.uri.path).split('/').pop() ?? '';
-          if (!name.endsWith('.cw') || seenName.has(name)) continue;
+          if (!/\.(co|cw)$/i.test(name) || seenName.has(name)) continue;
           seenName.add(name);
           files.push(name);
         }
@@ -467,7 +467,7 @@ export function validateModel(model: monaco.editor.ITextModel): void {
       : monaco.MarkerSeverity.Info,
     message: d.message,
     code: d.code,
-    source: 'CW Script',
+    source: 'Copper',
     startLineNumber: d.span.line,
     startColumn: Math.max(1, d.span.col),
     endLineNumber: d.span.endLine,
@@ -480,12 +480,12 @@ export function validateModel(model: monaco.editor.ITextModel): void {
 
 /** 供右侧大纲面板使用：AST 驱动，包含类 / 方法 / 字段的层级 */
 export function extractOutline(src: string): OutlineItem[] {
-  return analyze('main.cw', src).outline;
+  return analyze('main.co', src).outline;
 }
 
 /** 文件统计，状态栏用 */
 export function fileStats(src: string): { lines: number; classes: number; funcs: number; errors: number } {
-  const a = analyze('main.cw', src);
+  const a = analyze('main.co', src);
   return {
     lines: src.split('\n').length,
     classes: a.classes.length,

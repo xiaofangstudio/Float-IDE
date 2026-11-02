@@ -2,7 +2,7 @@
  * ---------------------------------------------------------------------------
  * 与 demo.tsx（无头回归床）不同，这里是给真实用户用的：
  *   · 文件系统持久化到 IndexedDB，关掉窗口工程还在
- *   · F5 用浏览器版 CW Script 内核真跑
+ *   · F5 用浏览器版 Copper 内核真跑
  *   · 「发布到 Nexus 应用商店」把工程打包提交，过审后直接出现在商店里
  * 布局全部走 flex/百分比，宿主窗口多大它就多大，缩放不崩。
  * --------------------------------------------------------------------------- */
@@ -28,41 +28,68 @@ function toast(text: string): void {
   console.log('[Float IDE]', text);
 }
 
-/* ── 发布到应用商店 ─────────────────────────────────────────────────────
- * 打包规则：工程里所有 .cw / .json / .md 进 sources；
- * 商店侧（Nexus OS 26）审核通过后，这个包就是一个受限应用：
- * 运行在一块固定框架里，绝不可能超出框架边界。 */
+/* ── 发布到应用/插件市场 ─────────────────────────────────────────────────
+ * 打包规则：工程里所有 .co / .cw / .json / .md 进 sources。
+ *  · 工程根有 plugin.json → 按「插件」投递（进插件市场）
+ *  · 否则按「应用」投递（过审后跑在 Nexus 受限应用框架里）
+ * v2.9.52：先 POST 到云端市场（跨设备可见），失败再退回本地待审队列 —— 两条路都通。 */
+const N26_STORE_BASE = 'https://ai.fanggame.company';
+
 function publishToStore(projectDir: string): void {
   const sources = exportProject(projectDir);
   const meta = (() => {
     try { return JSON.parse(sources['project.json'] ?? '{}'); } catch (e) { void e; return {}; }
   })() as { name?: string; entry?: string; version?: string };
   const name = meta.name ?? projectDir.split('/').pop() ?? '未命名工程';
-  const entry = meta.entry ?? 'main.cw';
+  const isPlugin = !!sources['plugin.json'];
+  const entry = isPlugin ? 'plugin.json' : (meta.entry ?? 'main.co');
   if (!sources[entry]) { toast(`发布失败：工程里没有入口文件 ${entry}`); return; }
 
   const pkg = {
     id: 'float_' + name.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase() + '_' + Date.now().toString(36),
-    kind: 'float-app',
+    kind: isPlugin ? 'plugin' : 'app',
     name,
     version: meta.version ?? '0.1.0',
     entry,
-    icon: 'fa-code',
-    color: '#0e7490',
+    icon: isPlugin ? 'fa-plug' : 'fa-code',
+    color: isPlugin ? '#0d9488' : '#0e7490',
     publisher: 'Float IDE 用户',
     submittedAt: new Date().toISOString(),
-    desc: `${name} —— 用 CW Script 写的 Nexus 应用（Float IDE 发布）`,
+    desc: isPlugin
+      ? `${name} —— Float IDE 插件（命令/片段/关键词扩展）`
+      : `${name} —— 用 Copper 写的 Nexus 应用（Float IDE 发布）`,
     files: Object.keys(sources).length,
     bytes: Object.values(sources).reduce((s, t) => s + t.length, 0),
     sources
   };
+  // ① 云端（跨设备；部署了市场后端才有）
+  void (async (): Promise<void> => {
+    try {
+      const r = await fetch(N26_STORE_BASE + '/api/store/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          kind: pkg.kind, name: pkg.name, desc: pkg.desc, version: pkg.version,
+          publisher: pkg.publisher, icon: pkg.icon, color: pkg.color, entry: pkg.entry,
+          files: sources
+        })
+      });
+      const j = await r.json().catch(() => null) as { ok?: boolean; error?: string } | null;
+      if (j && j.ok) toast(`「${name}」已提交到云端市场${isPlugin ? '（插件）' : ''}，等待审核`);
+      else toast(`云端投递未受理${j && j.error ? '：' + j.error : ''}，已转本地审核队列`);
+    } catch { toast('云端市场暂不可达，已转本地审核队列'); }
+  })();
+  // ② 本地待审队列（云端不在时审核照走）
   try {
     const ls = (window as unknown as { localStorage: Storage }).localStorage;
     const key = 'n26_store_pending';
     const list = JSON.parse(ls.getItem(key) ?? '[]') as unknown[];
     list.push(pkg);
     ls.setItem(key, JSON.stringify(list));
-    toast(`「${name}」已提交审核，过审后会直接出现在应用商店`);
+    if (!isPlugin) {
+      // 云端提示是异步的；本地这条立刻给个确定反馈
+      if (!navigator.onLine) toast(`「${name}」已提交审核（离线，存本地队列）`);
+    }
   } catch (e) {
     void e;
     toast('发布失败：存储空间不足或被禁用');
@@ -122,12 +149,13 @@ function App(): React.ReactElement {
           onClick={(e) => { if (e.target === e.currentTarget) setPubOpen(false); }}
         >
           <div className="floatweb-dialog">
-            <div className="floatweb-dialog-title">发布到 Nexus 应用商店</div>
+            <div className="floatweb-dialog-title">发布到 Nexus 市场</div>
             <div className="floatweb-dialog-body">
-              把工程打包成一个<strong>受限应用</strong>提交审核：
+              把工程打包提交审核（云端 + 本地双路）：
               <ul>
-                <li>运行在一块固定框架里，下载后<strong>绝不会超出框架边界</strong></li>
-                <li>过审后直接出现在 Nexus OS 26 的应用商店里</li>
+                <li>工程根有 <strong>plugin.json</strong> → 按<strong>插件</strong>投递（进插件市场）</li>
+                <li>没有 → 按<strong>受限应用</strong>投递：运行在固定框架里，<strong>绝不会超出框架边界</strong></li>
+                <li>过审后直接出现在 Nexus OS 26 的应用商店 / 插件市场里</li>
               </ul>
               <label className="floatweb-field">
                 选择工程

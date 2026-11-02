@@ -1,6 +1,6 @@
-/* CW Script · 商店应用运行时（浏览器 IIFE 包）
+/* Copper · 商店应用运行时（浏览器 IIFE 包）
  * ---------------------------------------------------------------------------
- * Float IDE「发布到应用商店」的应用是 CW Script 源码包。这个入口把语言内核
+ * Float IDE「发布到应用商店」的应用是 Copper 源码包。这个入口把语言内核
  * （src/lang，跟 IDE 同一份解释器）打成无依赖 IIFE，挂在 window.__cwRun 上，
  * 供 Nexus 应用框架的受限壳（apps/floatapp/index.html）在 sandbox iframe 里调用。
  * 解释器是异步生成器驱动的，所以 run 返回 Promise；ask() 会让结果带 needInput。

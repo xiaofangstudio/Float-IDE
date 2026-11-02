@@ -92,12 +92,16 @@ class ExprParser {
     let left = this.parseUnary();
     for (;;) {
       const t = this.cur;
-      if (t.k !== 'op' || !(t.v in PREC)) break;
-      const prec = PREC[t.v];
+      /* `a mod b`：mod 只在中缀位置当取余用。
+       * 这样 `mod(a, b)` 函数和汇编式 `mod a b` 都还是原来的意思，不会被抢。 */
+      const isModWord = t.k === 'ident' && t.v === 'mod';
+      if (!isModWord && (t.k !== 'op' || !(t.v in PREC))) break;
+      const opText = isModWord ? '%' : t.v;
+      const prec = PREC[opText];
       if (prec < minPrec) break;
       this.eat();
-      const right = t.v === '**' ? this.parseExpr(prec) : this.parseExpr(prec + 1);
-      left = { k: 'bin', op: t.v, a: left, b: right, ...this.span(startOf(left), endOf(right)) };
+      const right = opText === '**' ? this.parseExpr(prec) : this.parseExpr(prec + 1);
+      left = { k: 'bin', op: opText, a: left, b: right, ...this.span(startOf(left), endOf(right)) };
     }
     // 三元：条件 ? 这个 : 那个（优先级最低、右结合；只在最外层认，
     // 免得把字典里的冒号吃掉）
@@ -113,9 +117,18 @@ class ExprParser {
 
   parseUnary(): Expr {
     const t = this.cur;
-    if (t.k === 'op' && (t.v === '-' || t.v === '+' || t.v === '!' || t.v === '~')) {
+    /* `**pp`：词法上 ** 是幂运算符，但幂运算不可能出现在操作数位置，
+     * 所以前缀位上的 ** 就是"解两次引用"。这样 `**pp` 和 `*(*pp)` 是同一个 AST。 */
+    if (t.k === 'op' && t.v === '**') {
       this.eat();
       const a = this.parseUnary();
+      const inner: Expr = { k: 'un', op: '*', a, ...this.span(t, endOf(a)) };
+      return { k: 'un', op: '*', a: inner, ...this.span(t, endOf(a)) };
+    }
+    if (t.k === 'op' && (t.v === '-' || t.v === '+' || t.v === '!' || t.v === '~' || t.v === '&' || t.v === '*')) {
+      this.eat();
+      const a = this.parseUnary();
+      // &x 取地址、*p 解引用：复用 un 节点，不新增语法形状，AST 消费方全都不用改
       return { k: 'un', op: t.v, a, ...this.span(t, endOf(a)) };
     }
     return this.parsePostfix(this.parsePrimary());
@@ -538,6 +551,10 @@ export function parseProgram(file: string, src: string): Program {
   };
 
   const toTarget = (e: Expr): Target => {
+    // *p = 值：写到指针指向的那一格
+    if (e.k === 'un' && e.op === '*') {
+      return { k: 'deref', ptr: e.a, file, line: e.line, col: e.col, endLine: e.endLine, endCol: e.endCol };
+    }
     if (e.k === 'var') return { k: 'var', name: e.name, file, line: e.line, col: e.col, endLine: e.endLine, endCol: e.endCol };
     if (e.k === 'member') return { k: 'member', obj: e.obj, name: e.name, file, line: e.line, col: e.col, endLine: e.endLine, endCol: e.endCol };
     if (e.k === 'idx') return { k: 'idx', obj: e.obj, index: e.index, file, line: e.line, col: e.col, endLine: e.endLine, endCol: e.endCol };
@@ -559,7 +576,23 @@ export function parseProgram(file: string, src: string): Program {
     return body;
   };
 
-  const parseBodyOf = (indent: number): Stmt[] => parseBlock(indent + 1);
+  const parseBodyOf = (indent: number): Stmt[] => {
+    const body = parseBlock(indent + 1);
+    if (body.length === 0) {
+      /* 块是空的：最可能是缩进没跟上。这里直接指出"哪一行少缩进了、差几个空格"，
+       * 而不是让它掉到外层、过几行再冒出个"这条语句看不懂"。 */
+      const nxt = lines[i];
+      if (nxt && nxt.indent <= indent && nxt.code) {
+        diag(
+          'error',
+          `第 ${nxt.no} 行缩进不够：上一行缩进 ${indent} 个空格，这一行只有 ${nxt.indent} 个；` +
+          `属于上一行块里的代码要再多缩进至少 ${indent + 1 - nxt.indent} 个空格`,
+          { file, line: nxt.no, col: 1, endLine: nxt.no, endCol: nxt.indent + 1 }
+        );
+      }
+    }
+    return body;
+  };
 
   const unknown = (ln: Line, hint: string | null): Stmt => ({ k: 'unknown', raw: ln.code || ln.raw, hint, ...stmtSpan(ln) });
 
@@ -613,9 +646,14 @@ export function parseProgram(file: string, src: string): Program {
   /* ── 分支合并：} else { / } elif (…) { 与独立行 else / elif ── */
   const mergeBranches = (branches: IfBranch[], indent: number, elseBox: { body: Stmt[] | null }): void => {
     for (;;) {
+      /* 注释行 / 空行不是代码，夹在 if 和 elif 中间时不能把链断掉。
+       * 以前这里遇到 code 为空就直接 return，于是 `if` … `-- 注释` … `elif` 变成
+       * "elif 前面没有对应的 if"——插一句注释就报错，纯属自找麻烦。 */
+      while (lines[i] && (lines[i].skipped || lines[i].isComment || !lines[i].code)) i++;
       const ln = lines[i];
       if (!ln || ln.skipped) return;
       let code = ln.code;
+      if (!code) return;
       let braceClose = false;
       if (code.startsWith('}')) {
         braceClose = true;
@@ -1100,7 +1138,7 @@ export function parseProgram(file: string, src: string): Program {
   const parseImport = (ln: Line, toks: Token[]): Stmt => {
     i++;
     const t = toks[1];
-    if (!t || t.k !== 'str') throw new ParseError('import 后面要跟字符串路径，例如 import "lib.cw"', toks[0], 'import');
+    if (!t || t.k !== 'str') throw new ParseError('import 后面要跟字符串路径，例如 import "lib.co"', toks[0], 'import');
     return { k: 'import', target: t.v, argCol: t.col, argEndCol: t.endCol, ...stmtSpan(ln) };
   };
 
