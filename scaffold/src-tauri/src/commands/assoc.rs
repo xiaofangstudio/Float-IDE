@@ -104,8 +104,9 @@ mod imp {
         read_sz(&format!(r"Software\Classes\{PROGID}\DefaultIcon"))
     }
 
-    /// 把内嵌的 .ico 释放到 %LOCALAPPDATA%\FloatIDE\copper.ico，返回路径。
-    /// 内容没变就不重写，避免每次启动都碰磁盘。
+    /// 把内嵌的 .ico 释放到 %LOCALAPPDATA%\FloatIDE\，文件名带内容哈希（copper-xxxxxxxx.ico）。
+    /// 不用固定名的原因：Windows 的图标缓存对「同一路径换了内容」经常不刷新，
+    /// 资源管理器会一直显示旧图；文件名随内容变，缓存必然失效重取。
     fn install_icon() -> Result<std::path::PathBuf, String> {
         use super::COPPER_ICO;
         let base = std::env::var_os("LOCALAPPDATA")
@@ -113,10 +114,31 @@ mod imp {
             .unwrap_or_else(std::env::temp_dir);
         let dir = base.join("FloatIDE");
         std::fs::create_dir_all(&dir).map_err(|e| format!("建不了图标目录：{e}"))?;
-        let path = dir.join("copper.ico");
-        let same = std::fs::read(&path).map(|b| b == COPPER_ICO).unwrap_or(false);
-        if !same {
+        // DJB2：够用、稳定、不引第三方
+        let hash: u32 = {
+            let mut h: u32 = 5381;
+            for &b in COPPER_ICO {
+                h = h.wrapping_mul(33).wrapping_add(b as u32);
+            }
+            h
+        };
+        let name = format!("copper-{hash:08x}.ico");
+        let path = dir.join(&name);
+        if !path.exists() {
             std::fs::write(&path, COPPER_ICO).map_err(|e| format!("写不了图标文件：{e}"))?;
+        }
+        // 清掉旧版本的图标文件（含改名前的固定名 copper.ico），不留垃圾
+        let mut stale = vec!["copper.ico".to_string()];
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for e in entries.flatten() {
+                let n = e.file_name().to_string_lossy().to_string();
+                if n.starts_with("copper-") && n.ends_with(".ico") && n != name {
+                    stale.push(n);
+                }
+            }
+        }
+        for n in stale {
+            let _ = std::fs::remove_file(dir.join(n));
         }
         Ok(path)
     }

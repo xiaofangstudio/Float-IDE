@@ -202,6 +202,7 @@ Copper 保留了一批旧写法做兼容（老 .cw 文件不用改也能跑）�
 - 🧹 **删掉 4184 行的旧 TS 基准脚本**（`tests/.bench.mjs`），性能基准改走 Rust 侧：`bigbench.rs` / `lexbench.rs` / `bigfile.rs`（含两万行大文件解析用例）
 - 🧪 **测试**：`stdlib.test.ts` + Rust `stdlib.rs` 对拍 8 库函数；`pointer-words.test.ts`（指针与分词边界）；`tutorial.test.ts`（教程示例逐段可运行）；parity 用例扩到 cases11 / cases12
 - 📖 文档：《标准库规划》兼设计稿与函数表，《语言支持矩阵》同步更新
+- 🐱 **两个图标分清绑定**：程序本身永远是蓝色方块小方（`icon.ico`），`.co` / `.cw` 文件永远是猫（`copper.ico`）。图标文件改为按内容哈希命名（`copper-xxxxxxxx.ico`）——内容一变路径就变，治好 Windows 图标缓存「同路径换内容不刷新」的僵病，换猫立刻显示新猫
 
 ## 补丁（1.6.0 之后）：变量作用域大修
 
