@@ -44,6 +44,8 @@ pub fn run() {
         .manage(AppState { ptys: PtyState::new() })
         .manage(commands::mcp::McpState::new())
         .invoke_handler(tauri::generate_handler![
+            // 进程自身内存（状态栏右下角那个 MB）
+            commands::sysinfo::sysinfo_mem,
             // 文件系统
             commands::fsx::fs_list,
             commands::watch::fs_watch_start,
@@ -57,6 +59,11 @@ pub fn run() {
             commands::fsx::fs_mkdir,
             commands::fsx::fs_rename,
             commands::fsx::fs_delete,
+            // 宿主信息（给 F6 解释通道补 os.* 那一套）
+            commands::host::host_info,
+            commands::host::host_setenv,
+            commands::host::host_run_cmd,
+            commands::host::host_fetch,
             // 工程
             commands::project::project_new,
             commands::project::recent_get,

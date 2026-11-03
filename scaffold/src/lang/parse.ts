@@ -14,10 +14,12 @@ import {
   type Stmt, type Target, type TypeName, type AssignOp, type FieldDecl
 } from './ast';
 import { codePart, describeTok, LexError, tokenizeLine, type Token } from './token';
+import { LIMITS } from './limits';
+import { isNamespace, isStdlibFn } from './stdlib';
 
-const TYPE_WORDS = new Set<string>(['int', 'float', 'str', 'bool', 'list', 'dict', 'ptr', 'var']);
+const TYPE_WORDS = new Set<string>(['int', 'float', 'str', 'bool', 'list', 'dict', 'ptr', 'addr', 'var']);
 const FUNC_WORDS = new Set(['function', 'Function', 'fn', 'func', 'f']);
-const FUNC_MODIFIERS = new Set(['bool', 'repo', 'int', 'float', 'str', 'void', 'list', 'dict', 'ptr']);
+const FUNC_MODIFIERS = new Set(['bool', 'repo', 'int', 'float', 'str', 'void', 'list', 'dict', 'ptr', 'addr']);
 const ASSIGN_OPS = new Set(['=', '+=', '-=', '*=', '/=', '%=', '**=']);
 /** 汇编式算术命令词：`c = add a b` 和 `c = a + b` 完全等价 */
 const MATH_CMD: Record<string, string> = { add: '+', sub: '-', mul: '*', div: '/', mod: '%' };
@@ -198,7 +200,10 @@ class ExprParser {
     if (t.k === 'ident') {
       this.eat();
       if (t.v === 'true' || t.v === 'false') return { k: 'bool', v: t.v === 'true', ...this.span(t) };
-      if (t.v === 'null' || t.v === 'nil' || t.v === 'none') return { k: 'null', ...this.span(t) };
+      if (t.v === 'null') return { k: 'null', ...this.span(t) };
+      if (t.v === 'nil' || t.v === 'none') {
+        throw new ParseError(`Copper 只有 null，没有 ${t.v}（旧写法已取消）。把 ${t.v} 换成 null`, t, 'value');
+      }
       if (t.v === 'self' || t.v === 'this') return { k: 'self', ...this.span(t) };
       // 汇编式算术：`c = add a b`、`sub a b c`（空格分隔，任意多个数）；
       // 带括号的 add(a, b) 仍然走普通函数调用
@@ -324,6 +329,15 @@ class ExprParser {
         const nameTok = this.cur;
         if (nameTok.k !== 'ident') throw new ParseError('「.」后面要跟成员名', nameTok, 'member');
         this.eat();
+        // 标准库命名空间：`os.readfile(x)` 收敛成内建名 "os.readfile"（与 Rust 内核同一规则）
+        if (e.k === 'var' && isNamespace(e.name)) {
+          const full = `${e.name}.${nameTok.v}`;
+          if (!isStdlibFn(full)) {
+            throw new ParseError(`${e.name} 里没有 ${nameTok.v} 这个函数`, nameTok, 'stdlib');
+          }
+          e = { k: 'var', name: full, ...this.span(startOf(e), nameTok) };
+          continue;
+        }
         e = { k: 'member', obj: e, name: nameTok.v, ...this.span(startOf(e), nameTok) };
         continue;
       }
@@ -337,7 +351,25 @@ class ExprParser {
       if (this.at('(')) {
         const args = this.parseArgs();
         const last = args.length ? endOf(args[args.length - 1]) : this.toks[this.pos - 1];
-        e = { k: 'call', callee: e, args, ...this.span(startOf(e), last) };
+        const span = this.span(startOf(e), last);
+        /* 指针新写法：全是词，没有 & * 那些符号。
+         *   addr(x)      取变量地址
+         *   addr(xs, i)  取列表第 i 格的地址
+         *   read(p)      读地址里的值
+         * 解析期就改写成原有的取地址/解引用节点，三个引擎不用各写一份。 */
+        if (e.k === 'var' && args.length === 1 && e.name === 'addr') {
+          e = { k: 'un', op: '&', a: args[0], ...span };
+          continue;
+        }
+        if (e.k === 'var' && args.length === 2 && e.name === 'addr') {
+          e = { k: 'un', op: '&', a: { k: 'idx', obj: args[0], index: args[1], ...span }, ...span };
+          continue;
+        }
+        if (e.k === 'var' && args.length === 1 && e.name === 'read') {
+          e = { k: 'un', op: '*', a: args[0], ...span };
+          continue;
+        }
+        e = { k: 'call', callee: e, args, ...span };
         continue;
       }
       return e;
@@ -437,7 +469,7 @@ function expandAliasLine(
   table: { name: string; value: string }[],
   stack: number[]
 ): { text: string; error?: string } {
-  if (stack.length > 16) return { text: line, error: '别名套得太深（16 层），多半是互相指了' };
+  if (stack.length > LIMITS.aliasDepth) return { text: line, error: `别名套得太深（当前 ${stack.length} 层，上限 ${LIMITS.aliasDepth} 层），多半是互相指了` };
   let out = '';
   let i = 0;
   while (i < line.length) {
@@ -615,7 +647,8 @@ export function parseProgram(file: string, src: string): Program {
 
     // int x = （右边写了一半）→ 变量声明，值是 null
     if (head.k === 'ident' && (TYPE_WORDS.has(head.v) || head.v === 'list' || head.v === 'dict')) {
-      const ty = head.v === 'list' ? 'list' : head.v === 'dict' ? 'dict' : (head.v as TypeName);
+      // addr 是 ptr 的新名字（写起来更贴切），内部还是同一个类型
+      const ty: TypeName = head.v === 'addr' ? 'ptr' : (head.v as TypeName);
       return { k: 'decl', type: ty, name: nameTok.v, nameCol: nameTok.col, init: null, ...span };
     }
     // fn 名字( → 空函数（fn / class 在词法里是关键字，不是 ident）
@@ -732,9 +765,13 @@ export function parseProgram(file: string, src: string): Program {
           break;
         case 'wait': return parseWait(ln, toks);
         case 'break':
-        case 'out':
-          // 只有单独成句才是跳转；out += 1 这类要按变量处理
+          // 只有单独成句才是跳转；break += 1 这类要按变量处理
           if (toks.length === 1) { i++; return { k: 'break', ...stmtSpan(ln) }; }
+          break;
+        case 'out':
+          if (toks.length === 1) {
+            throw new ParseError('out 已经取消，改成 break（两个名字做同一件事，留一个就够了）', toks[0], 'stmt');
+          }
           break;
         case 'balo':
         case 'continue':
@@ -855,7 +892,7 @@ export function parseProgram(file: string, src: string): Program {
       if (p.at('=')) { p.eat(); init = p.parseExpr(0); }
       else if (!p.atEnd()) throw new ParseError(`变量声明「${word} ${toks[1].v}」后面多出了内容`, p.cur, 'decl');
       i++;
-      return { k: 'decl', type: word as TypeName, name: toks[1].v, nameCol: toks[1].col, init, ...stmtSpan(ln) };
+      return { k: 'decl', type: (word === 'addr' ? 'ptr' : word) as TypeName, name: toks[1].v, nameCol: toks[1].col, init, ...stmtSpan(ln) };
     }
 
     /* 类类型声明：Person p = new Person(…) —— 类型名只作标注，按 var 处理 */
@@ -886,6 +923,22 @@ export function parseProgram(file: string, src: string): Program {
       return { k: 'incdec', target: toTarget(firstExpr), delta, prefix: false, ...stmtSpan(ln) };
     }
     if (!p.atEnd()) throw new ParseError(`这条语句看不懂：${describeTok(p.cur)}`, p.cur, 'trailing');
+
+    /* 指针新写法：write(地址, 值) 单独成句 → 等价的 *地址 = 值。
+     * 它没有返回值，所以只能当语句用（写成表达式会明确报错）。 */
+    if (firstExpr.k === 'call' && firstExpr.callee.k === 'var' && firstExpr.callee.name === 'write') {
+      if (firstExpr.args.length !== 2) {
+        throw new ParseError('write 要写成 write(地址, 值)，两个参数', toks[0], 'write');
+      }
+      i++;
+      return {
+        k: 'assign',
+        target: { k: 'deref', ptr: firstExpr.args[0], file: firstExpr.file, line: firstExpr.line, col: firstExpr.col, endLine: firstExpr.endLine, endCol: firstExpr.endCol },
+        op: '=',
+        value: firstExpr.args[1],
+        ...stmtSpan(ln)
+      };
+    }
 
     i++;
     return { k: 'expr', expr: firstExpr, ...stmtSpan(ln) };
@@ -1138,7 +1191,11 @@ export function parseProgram(file: string, src: string): Program {
   const parseImport = (ln: Line, toks: Token[]): Stmt => {
     i++;
     const t = toks[1];
-    if (!t || t.k !== 'str') throw new ParseError('import 后面要跟字符串路径，例如 import "lib.co"', toks[0], 'import');
+    // `import os` 这种裸名字 = 标准库，不读文件（函数在解析阶段就收敛成内建名）
+  if (t && t.k === 'ident' && isNamespace(t.v)) {
+    return { k: 'nop', ...stmtSpan(ln) } as Stmt;
+  }
+  if (!t || t.k !== 'str') throw new ParseError('import 后面要跟字符串路径，例如 import "lib.co"', toks[0], 'import');
     return { k: 'import', target: t.v, argCol: t.col, argEndCol: t.endCol, ...stmtSpan(ln) };
   };
 
@@ -1239,7 +1296,7 @@ export function parseProgram(file: string, src: string): Program {
     while (idx < toks.length) {
       let type: TypeName | null = null;
       if (toks[idx]?.k === 'ident' && TYPE_WORDS.has(toks[idx].v) && toks[idx + 1]?.k === 'ident') {
-        type = toks[idx].v as TypeName;
+        type = (toks[idx].v === 'addr' ? 'ptr' : toks[idx].v) as TypeName;
         idx++;
       }
       const nameTok = toks[idx];
@@ -1301,7 +1358,7 @@ export function parseProgram(file: string, src: string): Program {
         let cursor = 0;
         let type: TypeName | null = null;
         if (TYPE_WORDS.has(lt[0].v) && lt[1]?.k === 'ident') {
-          type = lt[0].v as TypeName;
+          type = (lt[0].v === 'addr' ? 'ptr' : lt[0].v) as TypeName;
           cursor = 1;
         }
         const fname = lt[cursor];

@@ -94,3 +94,11 @@ fn f()
     int local = 1
 f()
 print(local)
+
+### sorted 返回新列表
+list xs = [3, 1, 2]
+list ys = sorted(xs)
+print(xs)
+print(ys)
+### 中英混排排序一致
+print(sorted(["梨", "苹果", "ban"]))

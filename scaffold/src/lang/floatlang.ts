@@ -314,7 +314,12 @@ function registerHover(): void {
         return { contents: [{ value: `**特殊变量** \`${sv.name}\`` }, { value: sv.desc }] };
       }
 
-      const b = BUILTINS.find((x) => x.name === name);
+      /* `os.readfile` 这种带点名字：Monaco 的 word 只圈到 `readfile`，
+       * 所以往前看一眼有没有 `库名.` 前缀，有就按完整名查。 */
+      const prefixText = lineText.slice(0, word.startColumn - 1);
+      const nsPrefix = /([A-Za-z_]\w*)\.\s*$/.exec(prefixText);
+      const qualified = nsPrefix ? `${nsPrefix[1]}.${name}` : null;
+      const b = BUILTINS.find((x) => x.name === (qualified ?? name));
       if (b) {
         return {
           contents: [
@@ -407,7 +412,7 @@ function registerSignatureHelp(): void {
       let params: string[] = [];
       let doc = '';
 
-      const b = BUILTINS.find((x) => x.name === simple);
+      const b = BUILTINS.find((x) => x.name === full) ?? BUILTINS.find((x) => x.name === simple);
       if (b) {
         label = b.sig;
         params = paramNamesFromSig(b.sig);

@@ -22,7 +22,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 /// 调用栈深度上限。超过就报「递归太深」，而不是让进程爆栈。
-const MAX_DEPTH: usize = 400;
+use crate::limits::{CALL_DEPTH as MAX_DEPTH, MAX_OUTPUT};
 /// 单次运行最多执行多少条指令，防死循环
 const DEFAULT_MAX_STEPS: u64 = 200_000_000;
 /// 每执行这么多条指令才查一次步数上限（每条都查太浪费）
@@ -1379,6 +1379,7 @@ impl Vm {
                         idx: 0,
                         owned: false,
                         freed: false,
+                        base: crate::value::fresh_base(1),
                     }));
                     std::ptr::write(sptr.add(sp), Value::Ptr(p));
                     sp += 1;
@@ -1389,6 +1390,7 @@ impl Vm {
                         idx: 0,
                         owned: false,
                         freed: false,
+                        base: crate::value::fresh_base(1),
                     }));
                     std::ptr::write(sptr.add(sp), Value::Ptr(p));
                     sp += 1;
@@ -1591,6 +1593,13 @@ impl Vm {
                     }
                     self.out.push_str(&line);
                     self.out.push('\n');
+                    // 输出上限：死循环里不停 print 会先把内存吃光，再谈步数限制就晚了
+                    if self.out.len() > MAX_OUTPUT {
+                        return Err(self.err_at(
+                            ip,
+                            format!("输出超过 {} MB，停下来了（多半是循环里一直在 print）", MAX_OUTPUT / 1048576),
+                        ));
+                    }
                 }
                 Op::Debug { n, level } => {
                     let n = n as usize;
@@ -1615,6 +1624,9 @@ impl Vm {
                     self.out.push(' ');
                     self.out.push_str(&line);
                     self.out.push('\n');
+                    if self.out.len() > MAX_OUTPUT {
+                        return Err(self.err_at(ip, "输出太多（超过 32 MB），停下来了"));
+                    }
                 }
                 Op::TimeRead => {
                     // 距上次 time reset 过了多少秒（毫秒精度，按 float 给）
@@ -1907,7 +1919,7 @@ fn inc_value(v: &mut Value, delta: i8) -> bool {
 /* ───────────────────────── 运算语义 ───────────────────────── */
 
 /// 复合赋值（`x += y`）的统一实现：先试就地字符串追加，再走通用算术。
-fn compound_value(bop: u8, mut a: Value, b: &Value) -> Result<Value, String> {
+pub fn compound_value(bop: u8, mut a: Value, b: &Value) -> Result<Value, String> {
     // 0 = 加法，唯一可能走"就地追加"的分支
     if bop == 0 {
         let appendable = match (&a, b) {
@@ -1968,7 +1980,7 @@ fn bop_to_op(bop: u8) -> Option<Op> {
     })
 }
 
-pub(crate) fn arith(op: Op, a: &Value, b: &Value) -> Result<Value, String> {
+pub fn arith(op: Op, a: &Value, b: &Value) -> Result<Value, String> {
     // 指针运算：p + n / p - n / p - q（两个指针相减 = 隔了几格）
     if op == Op::Add || op == Op::Sub {
         if let Value::Ptr(pa) = a {
@@ -2090,7 +2102,7 @@ pub(crate) fn arith(op: Op, a: &Value, b: &Value) -> Result<Value, String> {
     })
 }
 
-fn compare(op: Op, a: &Value, b: &Value) -> Result<bool, String> {
+pub fn compare(op: Op, a: &Value, b: &Value) -> Result<bool, String> {
     if op == Op::Eq {
         return Ok(a.deep_eq(b));
     }
@@ -2130,7 +2142,7 @@ fn norm_index(i: &Value, len: usize) -> Result<usize, String> {
     Ok(idx as usize)
 }
 
-fn index_get(obj: &Value, idx: &Value) -> Result<Value, String> {
+pub fn index_get(obj: &Value, idx: &Value) -> Result<Value, String> {
     match obj {
         Value::List(l) => {
             let items = l.borrow();
@@ -2178,7 +2190,7 @@ fn index_get(obj: &Value, idx: &Value) -> Result<Value, String> {
     }
 }
 
-fn index_set(obj: &Value, idx: &Value, val: Value) -> Result<(), String> {
+pub fn index_set(obj: &Value, idx: &Value, val: Value) -> Result<(), String> {
     match obj {
         Value::List(l) => {
             let len = l.borrow().len();
@@ -2218,7 +2230,7 @@ fn index_set(obj: &Value, idx: &Value, val: Value) -> Result<(), String> {
     }
 }
 
-fn member_get(obj: &Value, name: &str) -> Result<Value, String> {
+pub fn member_get(obj: &Value, name: &str) -> Result<Value, String> {
     match obj {
         Value::Dict(d) => d.borrow().get(name).ok_or_else(|| format!("字典里没有键「{}」", name)),
         other => Err(format!(
@@ -2229,7 +2241,7 @@ fn member_get(obj: &Value, name: &str) -> Result<Value, String> {
     }
 }
 
-fn member_set(obj: &Value, name: &str, val: Value) -> Result<(), String> {
+pub fn member_set(obj: &Value, name: &str, val: Value) -> Result<(), String> {
     match obj {
         Value::Dict(d) => {
             d.borrow_mut().set(Rc::from(name), val.clone_deep());

@@ -16,6 +16,7 @@
 //!   vm      虚拟机
 //!   builtins 内建函数
 
+pub mod aot;
 pub mod api;
 pub mod ast;
 pub mod builtins;
@@ -23,10 +24,12 @@ pub mod bytecode;
 pub mod error;
 pub mod host;
 pub mod import;
+pub mod limits;
 pub mod macros;
 pub mod packages;
 pub mod parser;
 pub mod sema;
+pub mod stdlib;
 pub mod token;
 pub mod value;
 pub mod vm;
@@ -63,7 +66,7 @@ impl TypeName {
             "bool" => TypeName::Bool,
             "list" => TypeName::List,
             "dict" => TypeName::Dict,
-            "ptr" => TypeName::Ptr,
+            "ptr" | "addr" => TypeName::Ptr,
             "var" => TypeName::Var,
             _ => return None,
         })

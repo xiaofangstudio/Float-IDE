@@ -1,14 +1,18 @@
 import React, { useEffect, useState } from 'react';
 import { applySettings, DEFAULT_SETTINGS, loadSettings, saveSettings, type Settings, type ThemeMode } from './settings';
+import { applyAppearance, loadAppearance, saveAppearance, type Appearance } from './appearance';
 
 /* 偏好设置（PyCharm 的 Settings 简化版）：主题、编辑器、运行。 */
 
 export function SettingsDialog({ onClose, onAppearance, onAbout, embedded }: { onClose: () => void; onAppearance?: () => void; onAbout?: () => void; embedded?: boolean }) {
   const [s, setS] = useState<Settings>(() => loadSettings());
+  const [bg, setBg] = useState<Appearance>(() => loadAppearance());
 
   useEffect(() => { applySettings(s); saveSettings(s); }, [s]);
+  useEffect(() => { applyAppearance(bg); saveAppearance(bg); }, [bg]);
 
   const set = <K extends keyof Settings>(k: K, v: Settings[K]): void => setS((prev) => ({ ...prev, [k]: v }));
+  const setA = (patch: Partial<Appearance>): void => setBg((prev) => ({ ...prev, ...patch }));
 
   return (
     <div className={embedded ? 'doc-embed' : 'mask'} onMouseDown={embedded ? undefined : onClose}>
@@ -30,7 +34,31 @@ export function SettingsDialog({ onClose, onAppearance, onAbout, embedded }: { o
               <div className="set-row">
                 <label>背景图</label>
                 <button className="btn" onClick={() => { onClose(); onAppearance(); }}>自定义背景…</button>
+                {bg.bg && <span className="set-hint" style={{ margin: 0 }}>已设置 · 面板已换磨砂</span>}
               </div>
+            )}
+            {bg.bg && (
+              <>
+                <div className="set-row">
+                  <label>磨砂程度</label>
+                  <input type="range" min={0} max={24} value={bg.blur}
+                    onChange={(e) => setA({ blur: Number(e.target.value) })} />
+                  <b>{bg.blur}px</b>
+                </div>
+                <div className="set-hint">磨砂越大背景越柔、面板越透。0 就是高清原图贴在后面。</div>
+                <div className="set-row">
+                  <label>透明度</label>
+                  <input type="range" min={10} max={100} value={Math.round(bg.opacity * 100)}
+                    onChange={(e) => setA({ opacity: Number(e.target.value) / 100 })} />
+                  <b>{Math.round(bg.opacity * 100)}%</b>
+                </div>
+                <div className="set-row">
+                  <label>压暗</label>
+                  <input type="range" min={0} max={90} value={Math.round(bg.dim * 100)}
+                    onChange={(e) => setA({ dim: Number(e.target.value) / 100 })} />
+                  <b>{Math.round(bg.dim * 100)}%</b>
+                </div>
+              </>
             )}
           </section>
 
@@ -86,6 +114,10 @@ export function SettingsDialog({ onClose, onAppearance, onAbout, embedded }: { o
                 <button className={s.runMode === 'compile' ? 'on' : ''} onClick={() => set('runMode', 'compile')}>编译执行（快）</button>
                 <button className={s.runMode === 'debug' ? 'on' : ''} onClick={() => set('runMode', 'debug')}>解释执行（可断点）</button>
               </div>
+            </div>
+            <div className="set-hint">
+              两个按钮是两套引擎：<b>F5 走 Rust 内核</b>（快；ask 是“重放”，rand / time 会重新执行）；
+              <b>F6 走内置解释器</b>（支持断点，ask 真暂停）。纯计算两边结果一致；交互式小游戏请用 F6。
             </div>
           </section>
 

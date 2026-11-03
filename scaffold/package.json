@@ -12,14 +12,17 @@
     "typecheck": "tsc --noEmit",
     "tauri": "tauri",
     "test:all": "npm run test:lang && npm run test:index && npm run test:stress",
-    "test:lang": "esbuild tests/lang.test.ts --bundle --platform=node --format=esm --external:@tauri-apps/* --outfile=tests/.build.mjs --log-level=warning && node tests/.build.mjs && npm run test:context && npm run test:completion && npm run test:types && npm run test:pointer",
+    "test:lang": "esbuild tests/lang.test.ts --bundle --platform=node --format=esm --external:@tauri-apps/* --outfile=tests/.build.mjs --log-level=warning && node tests/.build.mjs && npm run test:context && npm run test:completion && npm run test:types && npm run test:pointer && npm run test:ptrwords && npm run test:stdlib && npm run test:tutorial",
     "test:index": "esbuild tests/index.test.ts --bundle --platform=node --format=esm --external:@tauri-apps/* --outfile=tests/.idx.mjs --log-level=warning && node tests/.idx.mjs",
     "test:stress": "esbuild tests/stress.ts --bundle --platform=node --format=esm --external:@tauri-apps/* --outfile=tests/.stress.mjs --log-level=warning && node tests/.stress.mjs",
     "bench:lang": "esbuild tests/bench.ts --bundle --platform=node --format=esm --external:@tauri-apps/* --outfile=tests/.bench.mjs --log-level=warning && node tests/.bench.mjs",
     "test:completion": "esbuild tests/completion.test.ts --bundle --platform=node --format=esm --external:@tauri-apps/* --outfile=tests/.compl.mjs --log-level=warning && node tests/.compl.mjs",
     "test:context": "esbuild tests/context.test.ts --bundle --platform=node --format=esm --external:@tauri-apps/* --outfile=tests/.ctx.mjs --log-level=warning && node tests/.ctx.mjs",
     "test:types": "esbuild tests/typecheck.test.ts --bundle --platform=node --format=esm --external:@tauri-apps/* --outfile=tests/.tc.mjs --log-level=warning && node tests/.tc.mjs",
-    "test:pointer": "esbuild tests/pointer.test.ts --bundle --platform=node --format=esm --external:@tauri-apps/* --outfile=tests/.ptr.mjs --log-level=warning && node tests/.ptr.mjs"
+    "test:pointer": "esbuild tests/pointer.test.ts --bundle --platform=node --format=esm --external:@tauri-apps/* --outfile=tests/.ptr.mjs --log-level=warning && node tests/.ptr.mjs",
+    "test:ptrwords": "esbuild tests/pointer-words.test.ts --bundle --platform=node --format=esm --external:@tauri-apps/* --outfile=tests/.pw.mjs --log-level=warning && node tests/.pw.mjs",
+    "test:stdlib": "esbuild tests/stdlib.test.ts --bundle --platform=node --format=esm --external:@tauri-apps/* --outfile=tests/.stdlib.mjs --log-level=warning && node tests/.stdlib.mjs",
+    "test:tutorial": "esbuild tests/tutorial.test.ts --bundle --platform=node --format=esm --external:@tauri-apps/* --outfile=tests/.tut.mjs --log-level=warning && node tests/.tut.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

@@ -86,15 +86,17 @@ export const SPECIAL_VARS: { name: string; desc: string }[] = [
 
 export const KEYWORDS: string[] = [
   'if', 'elif', 'else', 'while', 'for', 'in', 'to', 'step', 'repeat', 'forever', 'main', 'loop',
-  'wait', 'until', 'out', 'break', 'balo', 'continue', 'stop', 'all', 'now', 'script', 'return',
+  'wait', 'until', 'break', 'balo', 'continue', 'stop', 'all', 'now', 'script', 'return',
   'function', 'fn', 'Function', 'class', 'extends', 'new', 'self', 'this', 'super',
   'and', 'or', 'not',
   'int', 'float', 'str', 'bool', 'list', 'dict', 'var',
   'print', '报告', 'report', 'debug', '调试', 'ask', 'ans', 'import', 'alias', '#define', '换', '成', 'time', 'read', 'reset', 'key', 'del', 'insert', 'replace',
-  'with', 'at', 'add', 'len', 'range', 'true', 'false', 'null', 'nil'
+  'with', 'at', 'add', 'len', 'range', 'true', 'false', 'null',
+  /* 指针三个词：解析阶段就被认掉（不是普通内建），补全里也要能看到 */
+  'addr', 'read', 'write'
 ];
 
-export const TYPE_WORDS: string[] = ['int', 'float', 'str', 'bool', 'list', 'dict', 'ptr', 'var'];
+export const TYPE_WORDS: string[] = ['int', 'float', 'str', 'bool', 'list', 'dict', 'ptr', 'addr', 'var'];
 
 /** 新建文件 / 补全用的代码骨架 */
 export const SNIPPETS: { label: string; detail: string; body: string }[] = [
@@ -157,7 +159,7 @@ export const BUILTIN_METHODS: { name: string; owner: string; desc: string }[] = 
   { name: 'remove', owner: 'list / dict', desc: '按下标（键）删除' },
   { name: 'index_of', owner: 'list', desc: '元素下标' },
   { name: 'join', owner: 'list', desc: '用分隔符拼成字符串' },
-  { name: 'sort', owner: 'list', desc: '排序' },
+  { name: 'sort', owner: 'list', desc: '就地排序（数字比数字，其余按字典序）' },
   { name: 'reverse', owner: 'list', desc: '反转' },
   { name: 'slice', owner: 'list', desc: '截取一段' },
   { name: 'sum', owner: 'list', desc: '求和' },

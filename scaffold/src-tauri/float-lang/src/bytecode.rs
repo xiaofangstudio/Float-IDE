@@ -1161,6 +1161,7 @@ impl Compiler {
     /* ───────────────────────── 表达式 ───────────────────────── */
 
     fn expr(&mut self, e: &Expr) {
+
         match &e.kind {
             ExprKind::Num(n) => {
                 let v = if n.fract() == 0.0 && n.abs() < 9.007_199_254_740_992e15 {
@@ -1282,6 +1283,26 @@ impl Compiler {
                         self.patch(j);
                     }
                     _ => {
+                        /* 长链（a + b + c + …）不能靠递归：几千项就会把栈打穿。
+                         * 编译大文件时这是真实场景（地图表、拼接），所以这里把左脊摊平，
+                         * 按原顺序逐段发射——左结合语义完全不变。 */
+                        let mut spine: Vec<(crate::ast::Op, &Expr)> = Vec::new();
+                        let mut cur: &Expr = e;
+                        while let ExprKind::Bin { op: o, a, b } = &cur.kind {
+                            if matches!(o, AOp::And | AOp::Or) {
+                                break;
+                            }
+                            spine.push((*o, b.as_ref()));
+                            cur = a.as_ref();
+                        }
+                        if spine.len() > 16 {
+                            self.expr(cur);
+                            for (o, rhs) in spine {
+                                self.expr(rhs);
+                                self.emit(binop_to_op(o));
+                            }
+                            return;
+                        }
                         // ① 编译期能算的直接算出来（常量折叠）
                         if let (Some(x), Some(y)) = (literal_of(a), literal_of(b)) {
                             if let Some(v) = fold_const(*op, &x, &y) {

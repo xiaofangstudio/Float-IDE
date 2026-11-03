@@ -12,6 +12,7 @@
  */
 
 import type { Expr, Param, Program, Stmt, Target, TypeName } from './ast';
+import { LIMITS } from './limits';
 import { builtinList, getBuiltin } from './builtins';
 import {
   cloneVal, deepEq, dict, fmtVal, isDict, isInstance, isList, toNum, toStr, truthy, typeName, ThrownValue,
@@ -36,7 +37,7 @@ export type CInst = {
 export type CompiledFn = (rt: CompiledRuntime, self: CInst | null, ...args: Val[]) => Val;
 
 /** 与解释通道一致的递归上限（见 interp.ts MAX_CALL_DEPTH） */
-export const MAX_CALL_DEPTH = 400;
+export const MAX_CALL_DEPTH = LIMITS.callDepth;
 
 export const isCInst = (v: unknown): v is CInst =>
   typeof v === 'object' && v !== null && (v as CInst).__cinst === 1;
@@ -785,6 +786,7 @@ ${body}
     const ln = `$.ln = ${s.line};\n`;
     switch (s.k) {
       case 'comment':
+      case 'nop':
         return '';
       case 'unknown':
         throw new CompileError('无法识别的语句');
@@ -809,7 +811,7 @@ ${body}
         if (e.k === 'call' && e.callee.k === 'var') {
           const b = getBuiltin(e.callee.name);
           if (b) {
-            const call = `B.${e.callee.name}(${e.args.map((a) => genExpr(a, ctx)).join(', ')})`;
+            const call = `B[${JSON.stringify(e.callee.name)}](${e.args.map((a) => genExpr(a, ctx)).join(', ')})`;
             return b.writes ? `${ln}$.v[${JSON.stringify(b.writes)}] = ${call};\n` : `${ln}${call};\n`;
           }
         }
@@ -1090,7 +1092,7 @@ ${genBlock(s.body, c2)}  }
         if (!ctx.className) throw new CompileError('super 只能在类里用');
         return `$.callSuper(${JSON.stringify(ctx.className)}, [${args}])`;
       }
-      if (getBuiltin(name)) return `B.${name}(${args})`;
+      if (getBuiltin(name)) return `B[${JSON.stringify(name)}](${args})`;
       if (fnNames.has(name)) return `$.f[${JSON.stringify(name)}]($, ${args})`;
       if (classInfo.has(name)) return `$.newInst(${JSON.stringify(name)}, [${args}])`;
       if (ctx.className && methodsOf(ctx.className).has(name) && !ctx.locals.has(name)) {

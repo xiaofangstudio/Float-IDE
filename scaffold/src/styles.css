@@ -2154,3 +2154,45 @@ html, body, #root {
   border-radius: 3.5px; object-fit: cover;
   display: block;
 }
+
+/* ═══════════════════════════════════════════════════════════════
+   自定义背景开启后（has-user-bg）：外框面板换半透明磨砂，背景图才真的透出来。
+   只有选了背景图才生效；磨砂强度 = 偏好设置里的「磨砂」滑杆（--frost），
+   面板浓淡跟随「压暗」（--panel-op，压得越暗面板越实，字越清楚）。
+   编辑器代码区（Monaco 自带不透明底）不受影响，保证可读性。
+   ═══════════════════════════════════════════════════════════════ */
+.has-user-bg .ws-left { background: transparent; }
+.has-user-bg .titlebar,
+.has-user-bg .ws-tools,
+.has-user-bg .rail,
+.has-user-bg .side-wrap,
+.has-user-bg .ws-status,
+.has-user-bg .term-dock,
+.has-user-bg .side-panels,
+.has-user-bg .welcome {
+  background: color-mix(in srgb, var(--s1) calc(var(--panel-op, 72) * 1%), transparent) !important;
+  backdrop-filter: blur(var(--frost, 8px)) saturate(1.08);
+}
+.has-user-bg .ws-editor-col {
+  background: color-mix(in srgb, var(--s2) calc((var(--panel-op, 72) + 16) * 1%), transparent);
+  backdrop-filter: blur(var(--frost, 8px)) saturate(1.05);
+}
+
+/* 偏好设置行布局加固：无论嵌在对话框还是文档页，label 都固定宽不竖排 */
+.doc-embed-inner .set-row,
+.set-row { flex-wrap: wrap; }
+.doc-embed-inner .set-row > label,
+.set-row > label { width: 96px; flex: none; white-space: nowrap; }
+.doc-embed-inner .set-body h4,
+.set-body h4 { display: block; width: 100%; margin: 0 0 10px; font-size: 12.5px; color: var(--accent); letter-spacing: .5px; }
+.set-row .seg { max-width: 100%; }
+
+/* 状态栏右下角的内存占用：只有数字，不抢眼，等宽数字避免跳动 */
+.ws-status .sb-mem {
+  margin-left: 4px;
+  padding-left: 8px;
+  border-left: 1px solid var(--line);
+  color: var(--txt3);
+  font-variant-numeric: tabular-nums;
+  cursor: default;
+}

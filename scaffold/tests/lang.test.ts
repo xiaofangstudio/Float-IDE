@@ -189,7 +189,7 @@ while (i < 6)
         balo
     print(i)
     if (i == 4)
-        out
+        break
 `, ['1', '3', '4']);
 
   await t('repeat 与 if out', `

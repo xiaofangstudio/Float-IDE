@@ -293,6 +293,72 @@ function checkStmts(env: TypeEnv, body: Stmt[], retType: Ty | null): void {
 }
 
 /** 对一个程序做类型检查 */
+/* ───────────────────────── 兼容写法提示 ─────────────────────────
+ *
+ * 语言里留了一批"怎么写都对"的老写法（add … to … / replace … with … / &x / *p）。
+ * 能跑是好事，但一个项目里两种风格混着写，读别人的代码就费劲了。
+ * 这里统一给黄色提示：**不拦你，只告诉你更推荐哪个**，让风格自然收拢。
+ */
+
+const LEGACY_STMT: Partial<Record<Stmt['k'], string>> = {
+  listAdd: '「add 值 to 列表」是兼容写法，新代码写 列表.push(值)',
+  listInsert: '「insert 值 to 列表 at 下标」是兼容写法，新代码写 列表.insert(下标, 值)',
+  listReplace: '「replace 列表 下标 with 值」是兼容写法，新代码写 列表[下标] = 值',
+  listDelete: '「del 列表 下标」是兼容写法，新代码写 列表.remove(下标)',
+  listRead: '「read 列表 下标」是兼容写法，新代码写 列表[下标]',
+  lenOf: '「len 值」单独成行是兼容写法，新代码写 len(值)',
+  dictSet: '「dict d key 键 = 值」是兼容写法，新代码写 d[键] = 值',
+  dictRead: '「dict d read 键」是兼容写法，新代码写 d[键]',
+  dictDelete: '「dict d del 键」是兼容写法，新代码写 d.remove(键)'
+};
+
+function walkExprLegacy(e: Expr | null | undefined, onLegacy: (m: string, line: number) => void): void {
+  if (!e) return;
+  if (e.k === 'un') {
+    if (e.op === '&') onLegacy('「&x」是兼容写法，新代码写 addr(x)', e.line);
+    else if (e.op === '*') onLegacy('「*p」是兼容写法，新代码写 read(p)', e.line);
+    walkExprLegacy(e.a, onLegacy);
+    return;
+  }
+  switch (e.k) {
+    case 'bin': walkExprLegacy(e.a, onLegacy); walkExprLegacy(e.b, onLegacy); break;
+    case 'ternary': walkExprLegacy(e.cond, onLegacy); walkExprLegacy(e.a, onLegacy); walkExprLegacy(e.b, onLegacy); break;
+    case 'idx': walkExprLegacy(e.obj, onLegacy); walkExprLegacy(e.index, onLegacy); break;
+    case 'member': walkExprLegacy(e.obj, onLegacy); break;
+    case 'call': walkExprLegacy(e.callee, onLegacy); for (const a of e.args) walkExprLegacy(a, onLegacy); break;
+    case 'new': for (const a of e.args) walkExprLegacy(a, onLegacy); break;
+    case 'list': for (const a of e.items) walkExprLegacy(a, onLegacy); break;
+    case 'dict': for (const kv of e.entries) { walkExprLegacy(kv.key, onLegacy); walkExprLegacy(kv.val, onLegacy); } break;
+    default: break;
+  }
+}
+
+function walkStmtLegacy(s: Stmt, onLegacy: (m: string, line: number) => void): void {
+  const hint = LEGACY_STMT[s.k];
+  if (hint) onLegacy(hint, s.line);
+
+  switch (s.k) {
+    case 'decl': walkExprLegacy(s.init, onLegacy); break;
+    case 'assign': walkExprLegacy(s.target.k === 'var' ? null : s.target.k === 'member' ? s.target.obj : s.target.k === 'idx' ? s.target.obj : s.target.ptr, onLegacy); walkExprLegacy(s.value, onLegacy); break;
+    case 'expr': walkExprLegacy(s.expr, onLegacy); break;
+    case 'print': case 'report': case 'debug': for (const a of s.args) walkExprLegacy(a, onLegacy); break;
+    case 'ask': walkExprLegacy(s.question, onLegacy); break;
+    case 'while': walkExprLegacy(s.cond, onLegacy); break;
+    default: break;
+  }
+  for (const b of childBodiesOf(s)) for (const k of b) walkStmtLegacy(k, onLegacy);
+}
+
+function checkLegacySyntax(env: TypeEnv, body: Stmt[]): void {
+  const seen = new Set<number>();
+  const onLegacy = (m: string, line: number): void => {
+    if (seen.has(line)) return; // 一行只提示一次，别刷屏
+    seen.add(line);
+    diag(env, 'warning', 'legacy', m, { line, col: 1, endLine: line, endCol: 1 });
+  };
+  for (const s of body) walkStmtLegacy(s, onLegacy);
+}
+
 export function checkTypes(file: string, body: Stmt[]): Diagnostic[] {
   const env: TypeEnv = {
     vars: new Map(),
@@ -303,6 +369,7 @@ export function checkTypes(file: string, body: Stmt[]): Diagnostic[] {
   };
   collectEnv(env, body);
   checkStmts(env, body, null);
+  checkLegacySyntax(env, body);
   // 同一条只报一次（语法残缺时会重复走到）
   const seen = new Set<string>();
   return env.out.filter((d) => {

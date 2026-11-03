@@ -109,6 +109,9 @@ export type Stmt =
   | ({ k: 'timeRead' } & Span)
   | ({ k: 'timeReset' } & Span)
   | ({ k: 'comment'; text: string; group: boolean } & Span)
+  /** 空语句：`import os` 这类"只声明用哪个库"的行，解析期换成它。
+   *  行号保留（报错定位/断点仍然对得上），执行时什么都不做。 */
+  | ({ k: 'nop' } & Span)
   | ({ k: 'unknown'; raw: string; hint: string | null } & Span);
 
 export type Severity = 'error' | 'warning' | 'info';
@@ -138,7 +141,7 @@ export function isBlock(s: Stmt): boolean {
 
 /** 语句是否会产生一个可停靠的"执行步"（调试单步、变量快照） */
 export function isExecutable(s: Stmt): boolean {
-  return s.k !== 'comment' && s.k !== 'funcDef' && s.k !== 'classDef' && s.k !== 'import' && s.k !== 'unknown';
+  return s.k !== 'comment' && s.k !== 'nop' && s.k !== 'funcDef' && s.k !== 'classDef' && s.k !== 'import' && s.k !== 'unknown';
 }
 
 /** 一条语句直接包含的子语句块（空数组 = 叶子语句）。

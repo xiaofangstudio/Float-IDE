@@ -40,6 +40,20 @@ pub struct MemBlock {
     /// 是不是 alloc 出来的（只有自己的块才允许 free）
     pub owned: bool,
     pub freed: bool,
+    /// 这块内存第 0 格的"地址"（打印 address 和地址运算用）。
+    /// 不是真操作系统的地址——是这样一串稳定的编号，装着"哪块内存 + 第几格"，
+    /// 所以能打印、能加减、越界仍然会报错，不会真的踩到别人的内存。
+    pub base: u64,
+}
+
+/// 地址号从这开始，每次分配往后挪一段（够大、够像地址，又不会撞上真实内存）
+static NEXT_ADDR: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0x7F00_0000_0000);
+
+/// 一个新块的起始地址：一格 8 字节，按 16 字节对齐
+pub fn fresh_base(slots: usize) -> u64 {
+    let bytes = slots.max(1) as u64 * 8;
+    NEXT_ADDR.fetch_add((bytes + 15) & !15, std::sync::atomic::Ordering::Relaxed)
 }
 
 pub type PtrRef = Rc<RefCell<MemBlock>>;
@@ -174,16 +188,19 @@ impl Value {
             idx: 0,
             owned: true,
             freed: false,
+            base: fresh_base(n),
         })))
     }
 
     /// &列表[i]：共享列表本身，写入会改到原列表
     pub fn alias_list(list: ListRef, idx: usize) -> Value {
+        let slots = list.borrow().len();
         Value::Ptr(Rc::new(RefCell::new(MemBlock {
             target: PtrTarget::Cells(list),
             idx,
             owned: false,
             freed: false,
+            base: fresh_base(slots),
         })))
     }
 
@@ -197,6 +214,7 @@ impl Value {
             idx,
             owned: b.owned,
             freed: b.freed,
+            base: b.base,
         })))
     }
 
@@ -307,17 +325,12 @@ impl Value {
             }
             Value::Ptr(p) => {
                 let m = p.borrow();
+                // 打印成地址：一个格子 8 字节，所以第 idx 格就是 base + idx*8
+                let addr = m.base + (m.idx as u64) * 8;
                 if m.freed {
-                    "<ptr 已释放>".to_string()
+                    format!("0x{:012X}（已释放）", addr)
                 } else {
-                    match &m.target {
-                        PtrTarget::Cells(c) => {
-                            let n = c.borrow().len();
-                            if m.owned { format!("<ptr {} 格@{{{}}}>", n, m.idx) }
-                            else { format!("<ptr → 第 {} 格>", m.idx) }
-                        }
-                        _ => "<ptr → 变量>".to_string(),
-                    }
+                    format!("0x{:012X}", addr)
                 }
             }
             Value::Dict(d) => {
@@ -372,7 +385,11 @@ impl Value {
             (Value::Func(a), Value::Func(b)) => Rc::ptr_eq(a, b),
             (Value::Native(a), Value::Native(b)) => a == b,
             // 指针按"是不是同一块"比，不看内容
-            (Value::Ptr(a), Value::Ptr(b)) => Rc::ptr_eq(a, b),
+            (Value::Ptr(a), Value::Ptr(b)) => {
+                // 地址按"指向哪里"比较：同一块内存的同一格就算相等（跟 C 里比指针一个意思）
+                let (x, y) = (a.borrow(), b.borrow());
+                x.base == y.base && x.idx == y.idx
+            }
             // 数值跨类型比较：1 == 1.0 成立
             (a, b) => {
                 let an = matches!(a, Value::Int(_) | Value::Float(_));

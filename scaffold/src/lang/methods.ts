@@ -89,8 +89,14 @@ function listMethod(xs: Val[], name: string, a: Val[]): MethodResult {
     case 'join': return { handled: true, value: xs.map((x) => str(x)).join(a.length ? str(a[0]) : '') };
     case 'reverse': xs.reverse(); return { handled: true, value: xs };
     case 'sort': {
-      const nums = xs.every((x) => typeof x === 'number');
-      xs.sort((p, q) => (nums ? (p as number) - (q as number) : str(p).localeCompare(str(q), 'zh-Hans-CN')));
+      /* 与 Rust 内核对齐：数字比数字，其余一律按字符串字典序（不用 locale，
+       * zh collation 会让中文/英文混排和 Rust 跑出两种结果）。 */
+      const isNum = (x: unknown): x is number => typeof x === 'number';
+      xs.sort((p, q) => {
+        if (isNum(p) && isNum(q)) return (p as number) - (q as number);
+        const sp = str(p), sq = str(q);
+        return sp < sq ? -1 : sp > sq ? 1 : 0;
+      });
       return { handled: true, value: xs };
     }
     case 'slice': {

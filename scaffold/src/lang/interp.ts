@@ -9,13 +9,14 @@
  */
 
 import type { Expr, Program, Span, Stmt, Target, TypeName } from './ast';
+import { LIMITS } from './limits';
 import { parseProgram } from './parse';
 import { getBuiltin, emptyDict } from './builtins';
 import { compileProgram, CompiledRuntime, RuntimeError as CodeRuntimeError, StopSignal as CodeStopSignal, isCInst } from './codegen';
 import { callBuiltinMethod, MethodError } from './methods';
 
 /** import 最大嵌套层数（和 Rust 内核一致：超过就报错，不让递归吃栈） */
-const MAX_IMPORT_DEPTH = 100;
+const MAX_IMPORT_DEPTH = LIMITS.importDepth;
 import {
   cloneVal, collectFields, deepEq, dict, findMethod, fmtVal, instance, isDict, isInstance,
   isList, toNum, toStr, truthy, typeName, ThrownValue,
@@ -34,7 +35,7 @@ function hostSetTimeout(fn: () => void, ms: number): void {
 }
 
 /** 函数调用最深允许叠多少层。超了就报「递归太深」，而不是让 JS 爆栈。 */
-const MAX_CALL_DEPTH = 400;
+const MAX_CALL_DEPTH = LIMITS.callDepth;
 
 /** 控制台输出行：out=普通、err=红色错误、info=蓝色提示；
  * dbg-* 是调试输出的三档：报告(蓝)/警告(黄)/报错(红)，纯给开发者看。 */
@@ -436,8 +437,9 @@ export class Runner {
       this.steps++;
       /* 5000 万步 ≈ 普通笔记本上十几秒的计算量：真死循环照样抓得住，
        * 但"大数反复减取模""几百万次迭代"这类正经计算不会再被误杀。 */
-      if (this.steps > 50_000_000) {
-        this.fail(new FloatError('执行步数超过 5000 万，脚本可能陷入死循环（用 out / break / stop 结束）'));
+      if (this.steps > LIMITS.stepBudget) {
+        this.fail(new FloatError(
+          `执行步数超过上限（${LIMITS.stepBudget} 步），脚本可能陷入死循环（用 out / break / stop 结束）`));
         return;
       }
       this.lastNode = y.node;
@@ -582,6 +584,7 @@ export class Runner {
 
     switch (s.k) {
       case 'comment':
+      case 'nop':
         return 'normal';
 
       case 'unknown': {
@@ -602,8 +605,8 @@ export class Runner {
         // 到 100 层明确报错（和 Rust 内核同一个上限），别让用户看到 Maximum call stack。
         if (this.importDepth >= MAX_IMPORT_DEPTH) {
           throw new FloatError(
-            `import 嵌套超过 ${MAX_IMPORT_DEPTH} 层了，停下来。多半是库文件一层层互相 import；` +
-            '把公共部分抽成一个单独的库，别让引用链这么长。', s);
+            `import 嵌套到 ${this.importDepth} 层（上限 ${LIMITS.importDepth} 层），停下来。` +
+            '多半是库文件一层层互相 import；把公共部分抽成一个单独的库，别让引用链这么长。', s);
         }
         const program = await this.loadImport(s.target, s.file, s);
         yield { kind: 'stmt', node: s, depth };
@@ -1567,7 +1570,7 @@ export class Runner {
      * 「Maximum call stack size exceeded」，那是引擎的锅不是他的锅。 */
     if (this.callDepth >= MAX_CALL_DEPTH) {
       throw new FloatError(
-        `递归太深了（超过 ${MAX_CALL_DEPTH} 层）停了下来。多半是 ${fn.name} 的结束条件没写对，检查一下它是不是会不断调用自己。`,
+        `递归太深了（当前 ${this.callDepth} 层，上限 ${LIMITS.callDepth} 层）停了下来。多半是 ${fn.name} 的结束条件没写对，检查一下它是不是会不断调用自己。`,
         spanOf(e));
     }
     const env = new Env(this.globals, fn.name);

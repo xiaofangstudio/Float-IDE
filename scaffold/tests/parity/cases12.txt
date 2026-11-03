@@ -1,0 +1,52 @@
+### 指针新写法 addr / read / write
+ptr a = alloc(4)
+write(a, 42)
+print(str(read(a)))
+ptr b = a + 1
+write(b, 7)
+print(str(read(b)))
+print(str(read(a)))
+print(str(b - a))
+free(a)
+
+### 指针：取变量地址并写回
+int n = 5
+addr p = addr(n)
+write(p, 9)
+print(str(n))
+print(str(type(p)))
+
+### 指针：列表元素地址
+list xs = [1, 2, 3]
+addr q = addr(xs, 1)
+write(q, 99)
+print(str(xs))
+write(q + 1, 100)
+print(str(xs))
+
+### 指针：地址可以打印、可以比
+ptr a = alloc(2)
+print(str(a == a))
+print(str(a == a + 1))
+print(str(len(str(a)) > 0))
+free(a)
+
+### 指针：越界照样报错（新写法也一样）
+ptr a = alloc(2)
+write(a + 5, 1)
+free(a)
+
+### 指针：free 之后再读要报错
+ptr a = alloc(2)
+free(a)
+print(str(read(a)))
+
+### 已经取消的 nil / none
+print(str(nil))
+
+### 已经取消的 out
+int i = 0
+while (true)
+    i++
+    if (i == 2)
+        out

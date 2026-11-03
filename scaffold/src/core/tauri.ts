@@ -30,6 +30,26 @@ export const api = {
       'fs_write_checked', { path, contents, expectMtimeMs }),
   fsMkdir: (path: string) => invoke<void>('fs_mkdir', { path }),
 
+  /* 宿主信息：os.getenv / os.args / os.pid / os.runcmd 在 F6 里靠这一组拿数据。
+   * 一次性打包返回，前端缓存，不必每次调用都问一遍。 */
+  hostInfo: () =>
+    invoke<{
+      pid: number;
+      platform: string;
+      cwd: string;
+      temp: string;
+      home: string;
+      ip: string;
+      args: string[];
+      env: Record<string, string>;
+    }>('host_info'),
+  hostSetenv: (key: string, value: string) => invoke<boolean>('host_setenv', { key, value }),
+  hostRunCmd: (cmd: string, dir?: string) =>
+    invoke<{ code: number; out: string }>('host_run_cmd', { cmd, dir: dir ?? null }),
+  /** HTTP 走宿主：WebView 里的 fetch 会被 CORS 拦，宿主这条和 Rust 内核完全同一条路 */
+  hostFetch: (method: string, url: string, body?: string) =>
+    invoke<string>('host_fetch', { method, url, body: body ?? null }),
+
   /* 工程占用锁：防止两个 Float IDE 同时改同一个工程 */
   lockAcquire: (dir: string, id: string) =>
     invoke<{ id: string; ts: number; pid: number }>('project_lock_acquire', { dir, id }),
@@ -55,6 +75,8 @@ export const api = {
       /** 有值 = 脚本停在某个 ask 上等人回答 */
       needInput: string | null;
     }>('lang_run', { file, source, inputs, extra }),
+  /** 当前进程占用内存（字节）：状态栏右下角那个"多少 MB" */
+  sysinfoMem: () => invoke<number>('sysinfo_mem'),
   langCheck: (file: string, source: string) =>
     invoke<{ severity: 'error' | 'warning' | 'info'; message: string; line: number; col: number }[]>(
       'lang_check', { file, source }

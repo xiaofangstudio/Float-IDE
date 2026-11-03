@@ -310,7 +310,7 @@ export const CHAPTERS: Chapter[] = [
         id: 'repeat',
         title: 'repeat 与 forever',
         codes: [{
-          code: 'repeat(3)\n    print("滴答")\n\n-- forever 是无限循环，靠 out 跳出\nint n = 0\nforever\n    n++\n    if (n >= 3)\n        out\nprint(n)',
+          code: 'repeat(3)\n    print("滴答")\n\n-- forever 是无限循环，靠 break 跳出\nint n = 0\nforever\n    n++\n    if (n >= 3)\n        break\nprint(n)',
           out: '滴答\n滴答\n滴答\n3'
         }]
       },
@@ -653,6 +653,123 @@ export const CHAPTERS: Chapter[] = [
     ]
   },
 
+  /* ───────────────────────── 12.5 标准库 ───────────────────────── */
+  {
+    id: 'stdlib',
+    title: '标准库',
+    icon: '▤',
+    summary: 'import 库名就能用：data 统计、json、time、random、re、ui',
+    sections: [
+      {
+        id: 'std-import',
+        title: '写法：先 import，再写库名.函数',
+        paras: [
+          '标准库不用下载、不用装包。写一行 import data，就表示"这个文件要用 data 这个库"，然后所有函数都带库名前缀：data.sum(xs)、json.parse(文本)。',
+          'import 只是"声明用哪个库"，不会去读文件，也不会多占一行输出。旧的内建名（readfile、now、fetch）全部还在，和库里的名字是同一份实现——但新代码请用带库名的写法，一眼就知道是哪个库。',
+          '补全里输入 data. 就会把这个库的函数全列出来；写错库名里的函数（os.nothing）在运行前就会被拦住，不会跑到一半才炸。'
+        ],
+        codes: [{
+          code: `import data
+import json
+
+list xs = [3, 1, 2]
+print(str(data.sort(xs)))
+print(str(data.sum(xs)))
+print(str(data.unique([1, 2, 2, 3])))`,
+          out: '[1, 2, 3]\n6\n[1, 2, 3]'
+        }],
+        tips: [
+          { kind: 'tip', text: '目前有 8 个库：os 文件与路径、data 数据加工、json、time、random、ui 控制台排版、re 正则、net 网络。完整函数表在「帮助 → 标准库」。' }
+        ]
+      },
+      {
+        id: 'std-data',
+        title: '成绩统计：不用再手撸冒泡',
+        paras: [
+          '排序、平均、中位、标准差、去重、频次、切片、拍平、zip 全在 data 里。带字段的列表直接用 data.sort_by(列表, "字段")，第三个参数写 "desc" 就是倒序。',
+          'data.sort 不改编传进来的列表（返回排好序的新列表）；random.shuffle 才是就地打乱。这一条和 Python 的 sorted / shuffle 分工一样。'
+        ],
+        codes: [{
+          code: `import data
+
+list 学生 = [{"name": "老陈", "score": 88}, {"name": "阿方", "score": 93}, {"name": "小北", "score": 78}]
+for s in data.sort_by(学生, "score", "desc")
+    print(s["name"] + " " + str(s["score"]))
+
+print("平均 " + str(data.avg(学生, "score")))
+print("中位 " + str(data.median([88, 93, 78])))`,
+          out: '阿方 93\n老陈 88\n小北 78\n平均 86.333333333333\n中位 88'
+        }],
+        tips: [
+          { kind: 'note', text: 'data.avg(学生, "score") 的第二参是字段名；不给就按列表元素本身的数字算（data.avg([1, 2, 3]) == 2）。' }
+        ]
+      },
+      {
+        id: 'std-json',
+        title: 'JSON：读配置、存数据',
+        paras: [
+          'json.parse 把文本变成字典/列表（对象→字典，数组→列表，有小数点的是小数，没有的是整数）。json.stringify 反过来，给第二个参数就带缩进。',
+          '解析失败默认会报错并指出第几个字符不对；不想让一行坏数据把程序炸掉，就用 json.try_parse：它返回 {ok, value} 或 {ok, error}，自己判断。'
+        ],
+        codes: [{
+          code: `import json
+
+str 文本 = "{\"name\": \"阿方\", \"scores\": [88, 93], \"ok\": true}"
+var d = json.parse(文本)
+print(d["name"])
+print(str(d["scores"]))
+print(json.stringify(d))`,
+          out: '阿方\n[88, 93]\n{"name":"阿方","scores":[88,93],"ok":true}'
+        }],
+        tips: [
+          { kind: 'warn', text: '字符串里的 {名字} 是插值！所以要写真正的 JSON 时，键必须带引号（{"a": 1} 没问题）；像 "{bad}" 这种会被当成"插入变量 bad"。' }
+        ]
+      },
+      {
+        id: 'std-time-random',
+        title: '时间和随机数',
+        paras: [
+          'time.format(时间戳, "YYYY-MM-DD HH:mm:ss") 想怎么排就怎么排（Y/M/D/H/m/s 都认，写两个就是补零）。time.mark() 打点，time.since(打点) 拿到"过了几秒"，比自己减时间戳省事。',
+          'random.seed(n) 之后整串随机数就固定了——做游戏地图、写测试、复现 bug 都靠它。不 seed 就用时间做种，每次都不一样。'
+        ],
+        codes: [{
+          code: `import time
+import random
+
+print(time.format(0, "YYYY-MM-DD"))
+print(str(time.diff(100, 160)))
+
+random.seed(42)
+print(str(random.rand(1, 6)))`,
+          out: '1970-01-01\n60\n4'
+        }],
+        tips: [
+          { kind: 'note', text: 'F5 和 F6 用的是同一套随机算法，同一个 seed 在两个引擎里跑出来的序列完全一样。' }
+        ]
+      },
+      {
+        id: 'std-re-ui',
+        title: '正则与终端排版',
+        paras: [
+          're.findall 找全部匹配；模式里有一对括号就只返回括号里的内容——抓网页里的链接 href="([^"]+)" 一行就够。re.replace / split / test / escape 都在。',
+          'ui 负责让控制台好看：ui.bar 画进度条、ui.progress 在同一行刷新百分比、ui.table 按显示宽度对齐（中文算两格）、ui.color 上色。'
+        ],
+        codes: [{
+          code: `import re
+import ui
+
+print(str(re.findall("[0-9]+", "a1b22")))
+print(re.replace("[0-9]+", "N", "a1b22"))
+print(ui.bar(1, 4, 8))`,
+          out: '["1", "22"]\naNbN\n[██░░░░░░]'
+        }],
+        tips: [
+          { kind: 'tip', text: '正则只需要常用那一小撮（. * + ? [] ^ $ \\d \\w \\s 和分组），够爬数据、清洗文本；不追求兼容 PCRE 全部语法。' }
+        ]
+      }
+    ]
+  },
+
   /* ───────────────────────── 13 ───────────────────────── */
   {
     id: 'pitfall',
@@ -733,12 +850,12 @@ export const CHAPTERS: Chapter[] = [
       },
       {
         id: 'ptr-addr',
-        title: '& 取地址，* 解引用',
+        title: 'addr 取地址，read 读回来',
         paras: [
-          '&x 拿到变量 x 的地址，*p 读出它指向的那一格；*p = 值 写回去——改的就是变量本身。'
+          'addr(x) 拿到变量 x 的地址，read(p) 读出它指向的那一格；write(p, 值) 写回去——改的就是变量本身。'
         ],
         codes: [{
-          code: 'int x = 10\nptr p = &x\nprint(*p)      -- 10\n*p = 42\nprint(x)       -- 42\nprint(*p)      -- 42',
+          code: 'int x = 10\naddr p = addr(x)\nprint(read(p))      -- 10\nwrite(p, 42)\nprint(x)       -- 42\nprint(read(p))      -- 42',
           out: '10\n42\n42'
         }],
         tips: [{ kind: 'tip', text: '*p += 1、*p *= 2 这些复合赋值也走指针，写回的还是变量本身。' }]
@@ -747,10 +864,10 @@ export const CHAPTERS: Chapter[] = [
         id: 'ptr-list',
         title: '取列表元素的地址',
         paras: [
-          '&xs[i] 指向列表里的那一格（共享同一块内存，不是拷贝）。改 *p 就等于改 xs[i]，写"交换两个元素"这类代码特别顺手。'
+          'addr(xs, i) 指向列表里的那一格（共享同一块内存，不是拷贝）。改 read(p) 就等于改 xs[i]，写"交换两个元素"这类代码特别顺手。'
         ],
         codes: [{
-          code: 'list xs = [1, 2, 3]\nptr p = &xs[1]\nprint(*p)      -- 2\n*p = 9\nprint(xs[1])   -- 9',
+          code: 'list xs = [1, 2, 3]\naddr p = addr(xs, 1)\nprint(read(p))      -- 2\nwrite(p, 9)\nprint(xs[1])   -- 9',
           out: '2\n9'
         }]
       },
@@ -762,7 +879,7 @@ export const CHAPTERS: Chapter[] = [
           'p[k] 等价于 *(p + k)——相对当前位置的偏移，负数就是往回。'
         ],
         codes: [{
-          code: 'list ys = [10, 20, 30]\nptr a = &ys[0]\nprint(*(a + 1))   -- 20\nprint(a[2])       -- 30\nptr b = a + 2\nprint(*(b - 1))   -- 20\nprint(b - a)      -- 2',
+          code: 'list ys = [10, 20, 30]\naddr a = addr(ys, 0)\nprint(read(a + 1))   -- 20\nprint(a[2])       -- 30\nptr b = a + 2\nprint(read(b - 1))   -- 20\nprint(b - a)      -- 2',
           out: '20\n30\n20\n2'
         }],
         tips: [{ kind: 'warn', text: '指针越界不会踩内存，而是当场报错——这是它比 C 安全的地方。' }]
@@ -774,7 +891,7 @@ export const CHAPTERS: Chapter[] = [
           'Copper 的参数默认按值传。想让函数改外面的变量，传它的地址进去——这就是最朴素的"输出参数"。'
         ],
         codes: [{
-          code: 'fn bump(ptr p)\n    *p = *p + 1\n\nint x = 41\nbump(&x)\nprint(x)   -- 42',
+          code: 'fn bump(ptr p)\n    write(p, read(p) + 1)\n\nint x = 41\nbump(addr(x))\nprint(x)   -- 42',
           out: '42'
         }]
       },
@@ -786,11 +903,11 @@ export const CHAPTERS: Chapter[] = [
           '同一个 box 里，动态内存和手动内存可以混着用——这是这门语言设计上最特别的一点，不需要任何开关。'
         ],
         codes: [{
-          code: 'ptr p = alloc(3)\np[0] = 7\np[1] = p[0] * 2\nprint(p[0], p[1], len(p))\nfree(p)',
+          code: 'addr p = alloc(3)\np[0] = 7\np[1] = p[0] * 2\nprint(p[0], p[1], len(p))\nfree(p)',
           out: '7 14 3'
         }],
         tips: [
-          { kind: 'warn', text: 'free 之后再访问、重复 free 都会明确报错；&xs[0] 这种"别人的地址"不允许 free。' },
+          { kind: 'warn', text: 'free 之后再访问、重复 free 都会明确报错；addr(xs, 0) 这种"别人的地址"不允许 free。' },
           { kind: 'note', text: '指向已返回函数的局部变量的指针叫悬空指针，解引用时会报"已经离开作用域"。' }
         ]
       }
@@ -810,18 +927,18 @@ export const CHAPTERS: Chapter[] = [
         lead: '这三个问题一定会被问到，答案都是实测出来的。',
         paras: [
           '**悬空是"用到才查"**：函数里 return &局部变量，拿在手里不报错；第一次 *p 才报「这个指针指向的变量已经离开作用域了」。不是不查，是查到用的时候。',
-          '**&xs[i] 绑的是"那个列表对象"**，不是物理地址：push 扩容不会让指针失效；pop 掉被指的那一格后再读会越界报错；如果把 xs 整个换成新列表，指针仍指着旧列表。',
-          '**free 只认 alloc 出来的块**：free(&x)、free(&xs[0]) 一律报「这不是 alloc 出来的内存…不能 free」，不会把栈或列表搞坏。'
+          '**addr(xs, i) 绑的是"那个列表对象"**，不是物理地址：push 扩容不会让指针失效；pop 掉被指的那一格后再读会越界报错；如果把 xs 整个换成新列表，指针仍指着旧列表。',
+          '**free 只认 alloc 出来的块**：free(addr(x))、free(addr(xs, 0)) 一律报「这不是 alloc 出来的内存…不能 free」，不会把栈或列表搞坏。'
         ],
         codes: [{
-          code: 'list xs = [1, 2]\nptr p = &xs[0]\nxs.push(3)\nprint(*p)        -- 1：扩容不影响\nprint(xs)\n\nxs = [7, 8]      -- 换了一个列表\nprint(*p)        -- 1：指针还指旧的\nprint(xs)', 
+          code: 'list xs = [1, 2]\naddr p = addr(xs, 0)\nxs.push(3)\nprint(read(p))        -- 1：扩容不影响\nprint(xs)\n\nxs = [7, 8]      -- 换了一个列表\nprint(read(p))        -- 1：指针还指旧的\nprint(xs)', 
           out: '1\n[1, 2, 3]\n1\n[7, 8]'
         }, {
-          code: 'list xs = [1, 2]\nptr p = &xs[1]\nxs.pop()\nprint(*p)   -- 被指的这格没了',
+          code: 'list xs = [1, 2]\naddr p = addr(xs, 1)\nxs.pop()\nprint(read(p))   -- 被指的这格没了',
           out: '(报错) 指针指到第 1 格，越界了'
         }],
         tips: [
-          { kind: 'warn', text: '所以别把 &xs[i] 长期存着：列表一变短就可能越界。要长期保存，存下标（int），用的时候再 xs[i]。' }
+          { kind: 'warn', text: '所以别把 addr(xs, i) 长期存着：列表一变短就可能越界。要长期保存，存下标（int），用的时候再 xs[i]。' }
         ]
       },
       {
@@ -833,7 +950,7 @@ export const CHAPTERS: Chapter[] = [
           '注意每个块都要自己 free。谁 alloc、谁 free，这条规矩在能看见指针的地方永远成立。'
         ],
         codes: [{
-          code: 'ptr a = alloc(2)\nptr b = alloc(2)\nlist ps = [a, b]\nps[0][0] = 1\nps[1][0] = 2\nprint(ps[0][0], ps[1][0])\nfree(a)\nfree(b)',
+          code: 'addr a = alloc(2)\nptr b = alloc(2)\nlist ps = [a, b]\nps[0][0] = 1\nps[1][0] = 2\nprint(ps[0][0], ps[1][0])\nfree(a)\nfree(b)',
           out: '1 2'
         }],
         tips: [{ kind: 'warn', text: '列表里存的是指针本身，不是它指向的内容；free 之后列表里那个指针就作废了。' }]
@@ -846,7 +963,7 @@ export const CHAPTERS: Chapter[] = [
           '这跟返回局部变量的地址是两回事：那种情况引擎会当场拦下来（见第 16 章）。'
         ],
         codes: [{
-          code: 'fn make(n)\n    ptr q = alloc(n)\n    q[0] = n\n    return q\n\nptr r = make(3)\nprint(r[0], len(r))\nfree(r)',
+          code: 'fn make(n)\n    addr q = alloc(n)\n    q[0] = n\n    return q\n\nptr r = make(3)\nprint(r[0], len(r))\nfree(r)',
           out: '3 3'
         }]
       },
@@ -860,7 +977,7 @@ export const CHAPTERS: Chapter[] = [
           '换来的是：分配只是"游标加几格"，没有每次 alloc 的开销；释放只有一次，不会漏掉某一块。代价是不能单独释放中间某一块——arena 要的就是这个取舍。'
         ],
         codes: [{
-          code: 'ptr pool = alloc(32)\nint off = 0\n\n-- 切 n 格：cursor 里存"下一个空位"，返回这块的起点偏移\nfn carve(ptr cursor, int n)\n    int at = *cursor\n    if at + n > len(pool)\n        return -1\n    *cursor = at + n\n    return at\n\nint a = carve(&off, 3)\npool[a] = 100\npool[a + 1] = 200\npool[a + 2] = 300\n\nint b = carve(&off, 2)\npool[b] = 7\npool[b + 1] = 8\n\nint big = carve(&off, 99)\nif big == -1\n    print("池子不够了，这块没给")\n\nprint("a 在", a, "b 在", b, "光标", off)\nprint(pool[a], pool[a + 1], pool[a + 2])\nprint(pool[b], pool[b + 1])\nfree(pool)',
+          code: 'addr pool = alloc(32)\nint off = 0\n\n-- 切 n 格：cursor 里存"下一个空位"，返回这块的起点偏移\nfn carve(ptr cursor, int n)\n    int at = read(cursor)\n    if at + n > len(pool)\n        return -1\n    write(cursor, at + n)\n    return at\n\nint a = carve(addr(off), 3)\npool[a] = 100\npool[a + 1] = 200\npool[a + 2] = 300\n\nint b = carve(addr(off), 2)\npool[b] = 7\npool[b + 1] = 8\n\nint big = carve(addr(off), 99)\nif big == -1\n    print("池子不够了，这块没给")\n\nprint("a 在", a, "b 在", b, "光标", off)\nprint(pool[a], pool[a + 1], pool[a + 2])\nprint(pool[b], pool[b + 1])\nfree(pool)',
           out: '池子不够了，这块没给\na 在 0 b 在 3 光标 5\n100 200 300\n7 8'
         }],
         tips: [
@@ -876,7 +993,7 @@ export const CHAPTERS: Chapter[] = [
           '这是一条真正靠地址串起来的链子——换语言也还是这套东西，只是这里每一步都看得见。'
         ],
         codes: [{
-          code: 'ptr m = alloc(6)\nm[0] = 10\nm[1] = 2\nm[2] = 20\nm[3] = 4\nm[4] = 30\nm[5] = -1\nint cur = 0\nwhile cur != -1\n    print(m[cur])\n    cur = m[cur + 1]\nfree(m)',
+          code: 'addr m = alloc(6)\nm[0] = 10\nm[1] = 2\nm[2] = 20\nm[3] = 4\nm[4] = 30\nm[5] = -1\nint cur = 0\nwhile cur != -1\n    print(m[cur])\n    cur = m[cur + 1]\nfree(m)',
           out: '10\n20\n30'
         }]
       }
@@ -892,14 +1009,14 @@ export const CHAPTERS: Chapter[] = [
     sections: [
       {
         id: 'p-multi',
-        title: '多级指针：**pp',
-        lead: '指针本身也有地址。&p 拿到"指针变量的地址"，**pp 一路解到最里面那格。',
+        title: '多级指针：read(read(pp))',
+        lead: '指针本身也有地址。&p 拿到"指针变量的地址"，read(read(pp)) 一路解到最里面那格。',
         paras: [
           '词法上 ** 是幂运算符，但幂运算不可能出现在操作数位置——所以前缀位置的 ** 就是"解引用两次"，和 *(\*pp) 完全等价。',
           '想要三层也行：***p 依次解开三层。'
         ],
         codes: [{
-          code: 'int x = 7\nptr p = &x\nptr pp = &p\nprint(**pp)      -- 7\n**pp = 9\nprint(x)         -- 9',
+          code: 'int x = 7\naddr p = addr(x)\naddr pp = addr(p)\nprint(read(read(pp)))      -- 7\nwrite(read(pp), 9)\nprint(x)         -- 9',
           out: '7\n9'
         }],
         tips: [{ kind: 'note', text: '写成 *(\*pp) 结果一样。前缀 ** 只是为了少写一层括号，AST 上是同一个东西。' }]
@@ -912,7 +1029,7 @@ export const CHAPTERS: Chapter[] = [
           '这是二级指针最常见的用途：函数里想让你手里的指针改指向，就传它的地址。'
         ],
         codes: [{
-          code: 'int x = 1\nint y = 2\nptr p = &x\nptr pp = &p\n**pp = 5         -- 改的是 x\n*pp = &y         -- 让 p 改指 y\nprint(x, y, *p)  -- 5 2 2',
+          code: 'int x = 1\nint y = 2\naddr p = addr(x)\naddr pp = addr(p)\nwrite(read(pp), 5)  -- 改的是 x\nwrite(pp, addr(y))  -- 让 p 改指 y\nprint(x, y, read(p))  -- 5 2 2',
           out: '5 2 2'
         }]
       },
@@ -924,7 +1041,7 @@ export const CHAPTERS: Chapter[] = [
           '这里的 p 和 p + k 是同一个内存块的两个位置，谁改都是改那块内存——没有拷贝，也没有副本。'
         ],
         codes: [{
-          code: 'ptr buf = alloc(5)\nint i = 0\nwhile i < 5\n    buf[i] = i + 1\n    i += 1\nptr p = buf\nint sum = 0\nint k = 0\nwhile k < 5\n    sum += *(p + k)\n    k += 1\nprint(sum)\nfree(buf)',
+          code: 'addr buf = alloc(5)\nint i = 0\nwhile i < 5\n    buf[i] = i + 1\n    i += 1\nptr p = buf\nint sum = 0\nint k = 0\nwhile k < 5\n    sum += read(p + k)\n    k += 1\nprint(sum)\nfree(buf)',
           out: '15'
         }],
         tips: [{ kind: 'tip', text: '想真的"挪"指针就写 p = p + 1，之后 p[0] 跟着变；想保留起点就用 p + k，起点不动。' }]
@@ -934,10 +1051,10 @@ export const CHAPTERS: Chapter[] = [
         title: '双指针：原地反转',
         paras: [
           '最经典的高级用法：一个指针从左、一个从右，交换到中间相遇。不新建列表，直接在原内存上改。',
-          '注意这里交换的是列表元素本身（&xs[i] 拿到的是列表那一格），所以改完 xs 就变了。'
+          '注意这里交换的是列表元素本身（addr(xs, i) 拿到的是列表那一格），所以改完 xs 就变了。'
         ],
         codes: [{
-          code: 'list xs = [1, 2, 3, 4, 5]\nint i = 0\nint j = len(xs) - 1\nwhile i < j\n    ptr a = &xs[i]\n    ptr b = &xs[j]\n    int t = *a\n    *a = *b\n    *b = t\n    i += 1\n    j -= 1\nprint(xs)',
+          code: 'list xs = [1, 2, 3, 4, 5]\nint i = 0\nint j = len(xs) - 1\nwhile i < j\n    addr a = addr(xs, i)\n    addr b = addr(xs, j)\n    int t = read(a)\n    write(a, read(b))\n    write(b, t)\n    i += 1\n    j -= 1\nprint(xs)',
           out: '[5, 4, 3, 2, 1]'
         }],
         tips: [{ kind: 'note', text: '同样的写法能改一整块 alloc 出来的内存：把 ptr 参数传进函数，函数里 p[i] = p[i] * 2，出来整块都变了。' }]
@@ -962,7 +1079,7 @@ export const CHAPTERS: Chapter[] = [
           'alloc 出来的内存不受作用域限制，所以第 15 章那种"函数里申请、外面 free"才是对的用法。'
         ],
         codes: [{
-          code: 'fn bad()\n    int local = 42\n    return &local\n\nptr p = bad()\nprint(*p)   -- 这里会报错，不是打印 42',
+          code: 'fn bad()\n    int local = 42\n    return addr(local)\n\naddr p = bad()\nprint(read(p))   -- 这里会报错，不是打印 42',
           out: '(报错) 这个指针指向的变量已经离开作用域了（悬空指针）'
         }],
         tips: [{ kind: 'warn', text: 'free 之后再解引用、重复 free、free 一个来自列表的地址，同样都会当场报错。' }]

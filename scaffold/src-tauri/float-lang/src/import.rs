@@ -29,7 +29,7 @@ pub struct Expanded {
 }
 
 /// import 展开的最大嵌套层数（超过就报错，别让递归吃栈）
-const MAX_IMPORT_DEPTH: usize = 100;
+use crate::limits::IMPORT_DEPTH as MAX_IMPORT_DEPTH;
 
 struct Expander {
     out: Vec<String>,
@@ -59,6 +59,29 @@ pub fn expand_with(
     base: Option<&Path>,
     overlay: HashMap<String, String>,
 ) -> Result<Expanded, FloatError> {
+    /* `import os` 这种裸名字是**标准库**，不读文件：
+     * 直接把这一行变成空行（行数不变，报错行号照样对得上）。
+     * 标准库函数在解析阶段就收敛成内建名，不需要任何运行时状态。 */
+    let owned;
+    let src = if src.lines().any(|l| {
+        import_path_of(l).map(|t| crate::stdlib::is_namespace(&t)).unwrap_or(false)
+    }) {
+        owned = src
+            .lines()
+            .map(|l| {
+                if import_path_of(l).map(|t| crate::stdlib::is_namespace(&t)).unwrap_or(false) {
+                    ""
+                } else {
+                    l
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        owned.as_str()
+    } else {
+        src
+    };
+
     let mut ex = Expander {
         out: Vec::new(),
         files: Vec::new(),
@@ -186,9 +209,9 @@ impl Expander {
         if self.stack.len() >= MAX_IMPORT_DEPTH {
             return Err(FloatError::new(
                 format!(
-                    "import 嵌套超过 {} 层了，停下来。多半是库文件一层层互相 import；\
+                    "import 嵌套到当前 {} 层（上限 {} 层），停下来。多半是库文件一层层互相 import；\
                      把公共部分抽成一个单独的库，别让引用链这么长。",
-                    MAX_IMPORT_DEPTH
+                    self.stack.len(), MAX_IMPORT_DEPTH
                 ),
                 Span::new(&Rc::from(from), line, 1, 1),
             ));

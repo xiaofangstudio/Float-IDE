@@ -99,3 +99,84 @@ fn 多级指针_前缀两个星号就是解引用两次() {
     // 幂运算不能被这层改动带坏：右结合、指数对
     assert_eq!(out("print(2 ** 10)\nprint(2 ** 3 ** 2)\n"), "1024\n512");
 }
+
+/* ═════════ 新写法：addr / read / write（全是词，没有 & * 符号） ═════════ */
+
+fn out2(src: &str) -> String {
+    float_lang::api::run_text(src).expect("应该能跑").trim_end().to_string()
+}
+
+fn err(src: &str) -> String {
+    match float_lang::api::run_text(src) {
+        Ok(o) => panic!("本该报错却跑成功：\n{}", o),
+        Err(e) => e.message,
+    }
+}
+
+#[test]
+fn 新写法_读写与地址运算() {
+    let got = out2(
+        "ptr a = alloc(4)\n\
+         write(a, 42)\n\
+         ptr b = a + 1\n\
+         write(b, 7)\n\
+         print(str(read(a)))\n\
+         print(str(read(b)))\n\
+         print(str(b - a))\n\
+         free(a)\n",
+    );
+    assert_eq!(got, "42\n7\n1", "实际：{}", got);
+}
+
+#[test]
+fn 新写法_取变量地址能写回() {
+    assert_eq!(out2("int n = 5\naddr p = addr(n)\nwrite(p, 9)\nprint(str(n))\n"), "9");
+}
+
+#[test]
+fn 新写法_取列表元素地址() {
+    assert_eq!(
+        out2("list xs = [1, 2, 3]\naddr q = addr(xs, 1)\nwrite(q, 99)\nprint(str(xs))\n"),
+        "[1, 99, 3]"
+    );
+}
+
+#[test]
+fn 新写法_地址能打印成地址() {
+    let got = out2("ptr a = alloc(2)\nprint(str(a))\nfree(a)\n");
+    assert!(got.starts_with("0x"), "指针应该打印成地址，实际：{}", got);
+    assert_eq!(got.len(), 14, "应该是 0x + 12 位十六进制：{}", got);
+}
+
+#[test]
+fn 新写法_同一格地址相等不同格不等() {
+    assert_eq!(
+        out2("ptr a = alloc(2)\nprint(str(a == a))\nprint(str(a == a + 1))\nfree(a)\n"),
+        "true\nfalse"
+    );
+}
+
+#[test]
+fn 新写法_越界和释放后访问照样报错() {
+    assert!(err("ptr a = alloc(2)\nwrite(a + 5, 1)\nfree(a)\n").contains("越界"));
+    assert!(err("ptr a = alloc(2)\nfree(a)\nprint(str(read(a)))\n").contains("free"));
+}
+
+#[test]
+fn nil_和_none_已经取消() {
+    let m = err("print(str(nil))\n");
+    assert!(m.contains("null") && m.contains("nil"), "报错没提 null：{}", m);
+    let m2 = err("print(str(none))\n");
+    assert!(m2.contains("null"), "报错没提 null：{}", m2);
+}
+
+#[test]
+fn out_已经取消要提示改_break() {
+    let m = err("while (true)\n    out\n");
+    assert!(m.contains("break"), "报错没提 break：{}", m);
+}
+
+#[test]
+fn 老写法取地址仍然能用() {
+    assert_eq!(out2("int n = 5\nptr p = &n\nprint(str(*p))\n"), "5");
+}

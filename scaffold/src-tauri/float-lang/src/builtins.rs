@@ -34,19 +34,23 @@ fn s_of(v: &Value) -> String {
 /// 名字是不是内建函数（给 IDE 补全和运行时校验共用）
 #[allow(dead_code)]
 pub fn is_builtin(name: &str) -> bool {
-    canonical(name).is_some()
+    canonical(name).is_some() || crate::stdlib::is_fn(name)
 }
 
 /// 拿到内建名字的 'static 版本，供字节码里直接引用（不复制字符串）。
 /// 兼容别名会被归一成正式名字。
 pub fn builtin_static(name: &str) -> Option<&'static str> {
+    // 标准库的 `库.函数`：直接给它一个 'static 字符串（首次用到时泄漏一份，数量有限）
+    if let Some(x) = crate::stdlib::static_name(name) {
+        return Some(x);
+    }
     let n = canonical(name)?;
     BUILTIN_NAMES.iter().find(|x| **x == n).copied()
 }
 
 /// 正式名字表。**全英文**——语言是给程序员用的，不搞易语言那套中文关键字。
-pub const BUILTIN_NAMES: [&str; 100] = [
-    "dictallkey", "dictallval",
+pub const BUILTIN_NAMES: [&str; 101] = [
+    "dictallkey", "dictallval", "sorted",
     "alloc", "free",
     "len", "str", "int", "float", "bool", "type", "abs", "floor", "ceil", "round", "sqrt", "pow",
     "mod", "min", "max", "idiv", "random", "rand", "range", "sin", "cos", "tan", "sqrt2", "log", "exp", "join",
@@ -89,6 +93,12 @@ fn canonical(name: &str) -> Option<&'static str> {
 }
 
 pub fn call_builtin(name: &str, args: &[Value]) -> R<Value> {
+    // 标准库函数是 `库.函数` 的形式，先交给 stdlib 分发（不认识再往下走）
+    if name.contains('.') {
+        if let Some(r) = crate::stdlib::call(name, args) {
+            return r;
+        }
+    }
     // 兼容别名先归一：内核内部只认英文正式名
     let name: &str = match canonical(name) {
         Some(n) => n,
@@ -291,6 +301,17 @@ pub fn call_builtin(name: &str, args: &[Value]) -> R<Value> {
         "tan" => Ok(Value::Float(num(&arg0(args, "tan")?, "tan")?.tan())),
         "log" => Ok(Value::Float(num(&arg0(args, "log")?, "log")?.ln())),
         "exp" => Ok(Value::Float(num(&arg0(args, "exp")?, "exp")?.exp())),
+        "sorted" => {
+            // 全局排序：返回排好序的**新**列表，原列表不动（和 xs.sort() 的就地排序互补）
+            need(args, 1, "sorted")?;
+            let l = match &args[0] {
+                Value::List(l) => Rc::clone(l),
+                other => return Err(format!("sorted() 要的是列表，收到 {}", other.type_name())),
+            };
+            let mut items: Vec<Value> = l.borrow().clone();
+            sort_values(&mut items);
+            Ok(Value::List(Rc::new(std::cell::RefCell::new(items))))
+        }
         "join" => {
             let mut s = String::new();
             for a in args {
@@ -851,7 +872,7 @@ pub fn call_method(recv: &Value, name: &str, args: &[Value]) -> R<Value> {
     }
 }
 
-fn str_method(s: &Rc<String>, name: &str, args: &[Value]) -> R<Value> {
+pub fn str_method(s: &Rc<String>, name: &str, args: &[Value]) -> R<Value> {
     match name {
         "upper" => Ok(Value::string(s.to_uppercase())),
         "lower" => Ok(Value::string(s.to_lowercase())),
@@ -927,7 +948,7 @@ fn str_method(s: &Rc<String>, name: &str, args: &[Value]) -> R<Value> {
     }
 }
 
-fn list_method(l: &crate::value::ListRef, name: &str, args: &[Value]) -> R<Value> {
+pub fn list_method(l: &crate::value::ListRef, name: &str, args: &[Value]) -> R<Value> {
     match name {
         // add 是 push 的别名（和 TS 兼容引擎一致）；返回新长度
         "push" | "add" => {
@@ -992,16 +1013,7 @@ fn list_method(l: &crate::value::ListRef, name: &str, args: &[Value]) -> R<Value
         }
         "sort" => {
             let mut items = l.borrow_mut();
-            items.sort_by(|a, b| {
-                let (x, y) = (a.to_display(), b.to_display());
-                match (a, b) {
-                    (Value::Int(_) | Value::Float(_), Value::Int(_) | Value::Float(_)) => a
-                        .as_num()
-                        .partial_cmp(&b.as_num())
-                        .unwrap_or(std::cmp::Ordering::Equal),
-                    _ => x.cmp(&y),
-                }
-            });
+            sort_values(&mut items);
             drop(items);
             // 返回列表自己（和 TS 兼容引擎一致）
             Ok(Value::List(Rc::clone(l)))
@@ -1046,7 +1058,7 @@ fn list_method(l: &crate::value::ListRef, name: &str, args: &[Value]) -> R<Value
     }
 }
 
-fn dict_method(d: &crate::value::DictRef, name: &str, args: &[Value]) -> R<Value> {
+pub fn dict_method(d: &crate::value::DictRef, name: &str, args: &[Value]) -> R<Value> {
     match name {
         "keys" => Ok(Value::list(
             d.borrow().keys().iter().map(|k| Value::string(k.to_string())).collect(),
@@ -1100,4 +1112,21 @@ fn dict_method(d: &crate::value::DictRef, name: &str, args: &[Value]) -> R<Value
 /// 让空字典也能被构造（供 VM 的 BuildDict 之外的地方用）
 pub fn empty_dict() -> Value {
     Value::Dict(Rc::new(std::cell::RefCell::new(Dict::new())))
+}
+
+/// Copper 的统一排序规则：数字比数字（int/float 混排都行），
+/// 其余一律按字符串字典序。列表方法 xs.sort() 和全局 sorted() 都走这里，
+/// 两边永远不会跑偏。
+pub fn sort_values(items: &mut [Value]) {
+    items.sort_by(|a, b| {
+        match (a, b) {
+            (Value::Int(_) | Value::Float(_), Value::Int(_) | Value::Float(_)) => {
+                a.as_num().partial_cmp(&b.as_num()).unwrap_or(std::cmp::Ordering::Equal)
+            }
+            _ => {
+                let (x, y) = (a.to_display(), b.to_display());
+                x.cmp(&y)
+            }
+        }
+    });
 }

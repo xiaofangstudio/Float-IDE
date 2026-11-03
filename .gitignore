@@ -38,6 +38,7 @@ desktop.ini
 
 # ===== 测试用的打包产物（每次跑测试都会重新生成）=====
 scaffold/tests/.*.mjs
+scaffold/tests/.p2.*
 scaffold/tests/parity/.run-ts.mjs
 scaffold/tests/parity/rust.json
 scaffold/tests/parity/ts.json

@@ -158,6 +158,32 @@ function labels(list: Completion[]): string[] {
   ok('残缺类定义的名字仍能补到', brokenCls.some((c) => c.label === '人'));
 }
 
+/* ── 8. 标准库：`os.` 之后只列这个库的函数，且不带括号 ── */
+{
+  const osC = compsAt('import os\nprint(os.▮)\n');
+  const ol = labels(osC);
+  ok('os. 之后能补 readfile', ol.includes('readfile'));
+  ok('os. 之后能补 listdir/basename', ol.includes('listdir') && ol.includes('basename'));
+  ok('os. 之后不混进列表方法 push', !ol.includes('push'));
+  ok('os. 之后不混进字符串方法 upper', !ol.includes('upper'));
+  ok('补全只插名字，不自动加括号', osC.every((c) => !c.insertText.includes('(')));
+
+  const dataC = compsAt('import data\nprint(data.▮)\n');
+  const dl = labels(dataC);
+  ok('data. 之后能补 sort/median/avg', dl.includes('sort') && dl.includes('median') && dl.includes('avg'));
+
+  const reC = compsAt('import re\nprint(re.▮)\n');
+  ok('re. 之后能补 findall/replace', labels(reC).includes('findall') && labels(reC).includes('replace'));
+}
+
+/* ── 9. 标准库函数在全局补全里也能搜到（带库名前缀） ── */
+{
+  const all = compsAt(SRC + 'print(▮)');
+  const names = labels(all);
+  ok('全局补全能搜到 data.sum', names.includes('data.sum'));
+  ok('全局补全能搜到 json.parse', names.includes('json.parse'));
+}
+
 console.log(`\n通过 ${pass} 项，失败 ${fail} 项`);
 if (fail) process.exit(1);
 console.log('全部通过');

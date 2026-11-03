@@ -196,6 +196,23 @@ for (const c of errCases) {
   ok('作用域：字典传进函数能改', dictArg.out.join('|') === '2', dictArg.err ?? dictArg.out.join('|'));
 }
 
+/* ── 排序：xs.sort() / 全局 sorted()，三引擎同一条规则（数字比数字，其余字典序） ── */
+{
+  const cases: [string, string][] = [
+    ['sorted 返回新列表不改原列表', 'list xs = [3, 1, 2]\nlist ys = sorted(xs)\nprint(xs)\nprint(ys)', '[3, 1, 2]|[1, 2, 3]'],
+    ['中英混排与 Rust 内核一致', 'print(sorted(["梨", "苹果", "ban"]))', '["ban", "梨", "苹果"]'],
+    ['浮点混排', 'print(sorted([2.5, 1, 3.2]))', '[1, 2.5, 3.2]'],
+    ['xs.sort 就地排序', 'list xs = [3, 1, 2]\nxs.sort()\nprint(xs)', '[1, 2, 3]'],
+    ['链式 sort', 'print([5, 3, 4].sort())', '[3, 4, 5]'],
+  ];
+  for (const [name, src, want] of cases) {
+    const a = await run(src), b = await run(src, { mode: 'debug' });
+    ok(`排序：${name}`, a.out.join('|') === want && b.out.join('|') === want, `F5 ${a.out.join('|')} / F6 ${b.out.join('|')}`);
+  }
+  const e = await run('sorted(5)');
+  ok('排序：sorted(非列表) 报错', e.err !== null, e.err ?? '没报错');
+}
+
 console.log(`\n通过 ${pass} 项，失败 ${fail} 项`);
 if (fail) process.exit(1);
 console.log('全部通过');

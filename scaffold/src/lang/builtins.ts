@@ -7,6 +7,7 @@
  */
 
 import { dict, fmtVal, isDict, isInstance, isList, toNum, toStr, truthy, type Val, isPtr, allocPtr, typeName } from './values';
+import { STDLIB_SPECS, STDLIB_MAP, setStdlibFs, type StdFs } from './stdlib';
 
 export type BuiltinSpec = {
   name: string;
@@ -24,15 +25,14 @@ export type BuiltinSpec = {
 
 /** 文件系统桥：桌面版由 IDE 注入（Tauri 的 fs 命令），浏览器预览里没有。
  *  相对路径由注入方按工程目录解析好；read 读不到返回 null。
- *  这一处抽象让 F5（Rust 内核）和 F6（解释器）的文件行为一致。 */
-export type FsBridge = {
-  read(path: string): Promise<string | null>;
-  write(path: string, content: string): Promise<boolean>;
-  append(path: string, content: string): Promise<boolean>;
-  has(path: string): Promise<boolean>;
-};
+ *  这一处抽象让 F5（Rust 内核）和 F6（解释器）的文件行为一致。
+ *  标准库（stdlib.ts）的 os / net 那几个函数也吃同一份桥。 */
+export type FsBridge = StdFs;
 let fsBridge: FsBridge | null = null;
-export function setFsBridge(b: FsBridge | null): void { fsBridge = b; }
+export function setFsBridge(b: FsBridge | null): void {
+  fsBridge = b;
+  setStdlibFs(b);
+}
 function needBridge(): FsBridge {
   if (!fsBridge) {
     bad('文件功能要在 Float IDE 桌面版里用（F5 运行 / F6 调试都行），浏览器预览里没有文件系统');
@@ -112,6 +112,18 @@ const REGISTRY: BuiltinSpec[] = [
   spec({ name: 'dictin', sig: 'dictin(字典, 键)', category: '字典', doc: '键是否在字典里', min: 2, max: 2, writes: '__last_cmp', fn: (a) => dictArg(a[0], 'dictin').has(toStr(a[1])) }),
 
   /* 字符串 */
+  spec({ name: 'sorted', sig: 'sorted(列表)', category: '列表', doc: '返回排好序的新列表，原列表不动', min: 1, max: 1, writes: '__last_str', fn: (a) => {
+    const xs = a[0] as Val[];
+    if (!isList(xs)) bad('sorted() 要的是列表，收到 ' + typeName(xs));
+    const isNum = (x: unknown): x is number => typeof x === 'number';
+    const cp = xs.slice();
+    cp.sort((p, q) => {
+      if (isNum(p) && isNum(q)) return (p as number) - (q as number);
+      const sp = toStr(p), sq = toStr(q);
+      return sp < sq ? -1 : sp > sq ? 1 : 0;
+    });
+    return cp;
+  } }),
   spec({ name: 'join', sig: 'join(a, b, …)', category: '字符串', doc: '把多个值拼成字符串', min: 1, max: 99, writes: '__last_str', fn: (a) => a.map((x) => toStr(x)).join('') }),
   spec({ name: 'char', sig: 'char(s, i)', category: '字符串', doc: '取第 i 个字符（从 0 开始）', min: 2, max: 2, writes: '__last_str', fn: (a) => {
     const s = toStr(a[0]);
@@ -325,7 +337,11 @@ const REGISTRY: BuiltinSpec[] = [
   spec({ name: 'filesize', sig: 'filesize(路径)', category: '系统', doc: '文件大小（字节）', min: 1, max: 1, writes: '__last_calc', fn: (a) => desktopOnly('filesize', a) }),
   spec({ name: 'getenv', sig: 'getenv(名字)', category: '系统', doc: '读环境变量；没有就给空字符串', min: 1, max: 1, writes: '__last_str', fn: (a) => desktopOnly('getenv', a) }),
   spec({ name: 'pathjoin', sig: 'pathjoin(a, b, …)', category: '系统', doc: '把路径片段拼起来（统一用 /）', min: 1, max: 99, writes: '__last_str', fn: (a) => a.map((x) => toStr(x).replace(/\\/g, '/').replace(/\/+$/, '')).filter(Boolean).join('/') }),
-  spec({ name: 'runcmd', sig: 'runcmd(命令)', category: '系统', doc: '跑一条系统命令，返回 {code, out}（out 含标准输出和错误输出）', min: 1, max: 1, fn: (a) => desktopOnly('runcmd', a) })
+  spec({ name: 'runcmd', sig: 'runcmd(命令)', category: '系统', doc: '跑一条系统命令，返回 {code, out}（out 含标准输出和错误输出）', min: 1, max: 1, fn: (a) => desktopOnly('runcmd', a) }),
+
+  /* 标准库（os / data / json / time / random / ui / re / net）
+   * 名字带点，直接并进这张总表：补全、悬停、参数检查、求值全都走同一条路。 */
+  ...(STDLIB_SPECS as unknown as BuiltinSpec[])
 ];
 
 /** 中文别名：早期实现留下的写法，只保证老脚本还能跑，不进补全、不进文档 */
@@ -346,6 +362,7 @@ function desktopOnly(name: string, _args: Val[]): never {
 
 function typeOfVal(v: Val): string {
   if (v === null) return 'null';
+  if (isPtr(v)) return 'ptr';
   if (Array.isArray(v)) return 'list';
   if (isDict(v)) return 'dict';
   if (isInstance(v)) return 'class';
@@ -367,6 +384,55 @@ function norm(v: Val): unknown {
 }
 
 export const BUILTINS = new Map<string, BuiltinSpec>(REGISTRY.map((b) => [b.name, b]));
+
+/* 老名字 → 标准库实现。
+ *
+ * `readfile` 和 `os.readfile` 必须是同一份逻辑：以前两处各写一遍，
+ * F5 修了 F6 忘改就会"同一个脚本换个引擎结果不同"。这里统一转发，
+ * 老名字只保留自己的文档（兼容用），实现完全共用。 */
+const LEGACY_TO_STD: Record<string, string> = {
+  readfile: 'os.readfile',
+  writefile: 'os.writefile',
+  appendfile: 'os.appendfile',
+  hasfile: 'os.hasfile',
+  exists: 'os.exists',
+  isfile: 'os.isfile',
+  isdir: 'os.isdir',
+  filesize: 'os.filesize',
+  listdir: 'os.listdir',
+  makedir: 'os.makedir',
+  removedir: 'os.removedir',
+  removefile: 'os.removefile',
+  renamefile: 'os.renamefile',
+  cwd: 'os.cwd',
+  chdir: 'os.chdir',
+  getenv: 'os.getenv',
+  pathjoin: 'os.pathjoin',
+  runcmd: 'os.runcmd',
+  fetch: 'net.fetch',
+  post: 'net.post'
+};
+for (const [old, full] of Object.entries(LEGACY_TO_STD)) {
+  const b = BUILTINS.get(old);
+  const s = STDLIB_MAP.get(full);
+  if (!b || !s) continue;
+  const impl = s;
+  /* 报错文案里把完整名换回用户写的老名字：
+   * 写 hasfile 的人看到「os.hasfile 是桌面版功能」会以为 IDE 认错了函数。 */
+  const rename = (e: unknown): never => {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(msg.split(full).join(old));
+  };
+  b.fn = (a: Val[]): Val => {
+    try { return impl.fn(a); } catch (e) { return rename(e); }
+  };
+  if (impl.afn) {
+    const afn = impl.afn;
+    b.afn = async (a: Val[]): Promise<Val> => {
+      try { return await afn(a); } catch (e) { return rename(e); }
+    };
+  }
+}
 
 export function getBuiltin(name: string): BuiltinSpec | undefined {
   const n = ALIASES[name] ?? name;

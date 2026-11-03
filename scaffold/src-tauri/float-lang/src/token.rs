@@ -95,6 +95,18 @@ pub fn is_id_part(c: char) -> bool {
 }
 
 /// 切一行（不含换行符）为 Token 序列。结尾一定补一个 Eof。
+/// 在字符数组的第 i 位比较一个模式串（不分配内存）
+fn starts_with_at(chars: &[char], i: usize, pat: &str) -> bool {
+    let mut k = i;
+    for c in pat.chars() {
+        if k >= chars.len() || chars[k] != c {
+            return false;
+        }
+        k += 1;
+    }
+    true
+}
+
 pub fn tokenize_line(src: &str, line: u32, start_col: u32) -> Result<Vec<Token>, LexError> {
     let chars: Vec<char> = src.chars().collect();
     let n = chars.len();
@@ -255,11 +267,13 @@ pub fn tokenize_line(src: &str, line: u32, start_col: u32) -> Result<Vec<Token>,
             continue;
         }
 
-        // 运算符（长的优先）
-        let rest: String = chars[i..].iter().collect();
+        // 运算符（长的优先）。
+        // 注意：这里**不能**先 `chars[i..].collect::<String>()` 再 starts_with——
+        // 那样每个 token 都要复制一遍剩余整行，5000 行的地图表就是 O(n²)（实测 1.2 秒）。
+        // 直接在字符数组上按位比较，代价只看运算符长度（1~3 个字符）。
         let mut matched: Option<&str> = None;
         for op in OPERATORS {
-            if rest.starts_with(op) {
+            if starts_with_at(&chars, i, op) {
                 matched = Some(op);
                 break;
             }

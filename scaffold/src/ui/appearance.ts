@@ -42,12 +42,17 @@ export function applyAppearance(a: Appearance): void {
     root.style.setProperty('--user-bg-opacity', String(a.opacity));
     root.style.setProperty('--user-bg-blur', `${a.blur}px`);
     root.style.setProperty('--user-bg-dim', String(a.dim));
+    /* 磨砂程度：背景图模糊 + 面板毛玻璃共用这一个值（styles.css 的 .has-user-bg 块） */
+    root.style.setProperty('--frost', `${a.blur}px`);
+    root.style.setProperty('--panel-op', String(Math.round((1 - a.dim * 0.6) * 100)));
     root.classList.add('has-user-bg');
   } else {
     root.style.setProperty('--user-bg', 'none');
     root.style.removeProperty('--user-bg-opacity');
     root.style.removeProperty('--user-bg-blur');
     root.style.removeProperty('--user-bg-dim');
+    root.style.removeProperty('--frost');
+    root.style.removeProperty('--panel-op');
     root.classList.remove('has-user-bg');
   }
 }

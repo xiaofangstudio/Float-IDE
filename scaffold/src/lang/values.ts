@@ -40,7 +40,20 @@ export type PtrVal = {
   freed: boolean;
   /** &变量：直接绑在变量上 */
   cell?: PtrCell;
+  /** 这块内存第 0 格的"地址"（打印 address 与地址运算用）。
+   *  是一串稳定的编号，不是真实操作系统地址——所以能打印、能加减，
+   *  越界/悬空照样报错，不会真踩到别人的内存。 */
+  base: number;
 };
+
+/** 地址号从这里开始，每次分配往后挪一段（一格 8 字节，16 字节对齐） */
+let nextAddr = 0x7f0000000000;
+export function freshBase(slots: number): number {
+  const bytes = Math.max(1, slots) * 8;
+  const base = nextAddr;
+  nextAddr += Math.ceil(bytes / 16) * 16;
+  return base;
+}
 
 export type Instance = {
   kind: 'instance';
@@ -71,15 +84,15 @@ export const isPtr = (v: Val): v is PtrVal => typeof v === 'object' && v !== nul
 
 /** 申请 n 个格子（初值 null） */
 export const allocPtr = (n: number): PtrVal =>
-  ({ kind: 'ptr', buf: new Array(n).fill(null), idx: 0, owner: true, freed: false });
+  ({ kind: 'ptr', buf: new Array(n).fill(null), idx: 0, owner: true, freed: false, base: freshBase(n) });
 
 /** 取地址：列表的元素（buf 共享，写入会改到原列表） */
 export const aliasPtr = (arr: Val[], idx: number): PtrVal =>
-  ({ kind: 'ptr', buf: arr, idx, owner: false, freed: false });
+  ({ kind: 'ptr', buf: arr, idx, owner: false, freed: false, base: freshBase(arr.length) });
 
 /** 取地址：变量（读写都回到变量本身） */
 export const cellPtr = (cell: PtrCell): PtrVal =>
-  ({ kind: 'ptr', buf: [null], idx: 0, owner: false, freed: false, cell });
+  ({ kind: 'ptr', buf: [null], idx: 0, owner: false, freed: false, cell, base: freshBase(1) });
 
 /** 指针平移：共享同一块内存，只挪 idx */
 export const shiftPtr = (p: PtrVal, n: number): PtrVal =>
@@ -118,13 +131,15 @@ export function fmtVal(v: Val, seen: Set<object> = new Set(), depth = 0): string
   if (typeof v === 'boolean') return v ? 'true' : 'false';
   if (typeof v === 'number') {
     if (!Number.isFinite(v)) return String(v);
-    return Number.isInteger(v) ? String(v) : String(Number(v.toFixed(10)));
+    // 和 Rust 的 fmt_float 完全一致：整数值直接打整数，其余四舍五入到 1e-12。
+    // 两个引擎同一条规则，print 出来的小数位才不会差几位（对拍靠的就是这个）。
+    if (Number.isInteger(v) && Math.abs(v) < 9.007199254740992e15) return String(v);
+    return String(Math.round(v * 1e12) / 1e12);
   }
   if (isPtr(v)) {
-    if (v.freed) return '<ptr 已释放>';
-    if (v.cell) return '<ptr → 变量>';
-    if (!v.owner) return `<ptr → 第 ${v.idx} 格>`;
-    return `<ptr ${v.buf.length} 格@{${v.idx}}>`;
+    // 打印成地址：一格 8 字节
+    const addr = `0x${(v.base + v.idx * 8).toString(16).toUpperCase().padStart(12, '0')}`;
+    return v.freed ? `${addr}（已释放）` : addr;
   }
   const isBox = Array.isArray(v) || isDict(v) || isInstance(v) || isCInstLike(v);
   if (isBox) {
@@ -177,6 +192,8 @@ type SeenPair = Map<object, object>;
 
 function deepEqRec(a: Val, b: Val, seen: SeenPair): boolean {
   if (a === b) return true;
+  // 地址按"指向哪里"比较：同一块内存的同一格就算相等（跟 C 里比指针一个意思）
+  if (isPtr(a) && isPtr(b)) return a.base === b.base && a.idx === b.idx;
   const aBox = Array.isArray(a) || isDict(a);
   const bBox = Array.isArray(b) || isDict(b);
   if (aBox && bBox) {

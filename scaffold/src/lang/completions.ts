@@ -13,6 +13,7 @@ import type { Analysis } from './analyze';
 import type { CursorContext } from './context';
 import { BUILTIN_METHODS, INSTRUCTIONS, KEYWORDS, SNIPPETS, SPECIAL_VARS, TYPE_WORDS } from './spec';
 import { builtinList } from './builtins';
+import { isNamespace } from './stdlib';
 
 export type CompletionKind =
   | 'variable' | 'function' | 'class' | 'method' | 'field'
@@ -124,6 +125,17 @@ export function buildCompletions(input: CompletionInput): Completion[] {
   if (input.context.kind === 'member') {
     const target = input.context.object;
     const cls = input.context.cls;
+    /* `os.` / `data.` 这种标准库前缀：只列这个库的函数，
+     * 不要混进 str/list 的方法（`os.push()` 看着就离谱）。 */
+    if (isNamespace(target)) {
+      const prefix = `${target}.`;
+      for (const b of BUILTINS) {
+        if (!b.name.startsWith(prefix)) continue;
+        push(b.name.slice(prefix.length), 'function', TIER.member, b.sig, b.doc,
+          b.sig.slice(b.name.length) || '()');
+      }
+      return out;
+    }
     if (cls) {
       for (const f of fieldsOf(a, cls)) {
         push(f.name, 'field', TIER.member, `${cls}.${f.name}${f.type ? ` · ${f.type}` : ''}`,

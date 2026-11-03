@@ -16,7 +16,7 @@ use crate::token::{code_part, tokenize_line, TokKind, Token};
 use crate::TypeName;
 use std::rc::Rc;
 
-const TYPE_WORDS: [&str; 8] = ["int", "float", "str", "bool", "list", "dict", "ptr", "var"];
+const TYPE_WORDS: [&str; 9] = ["int", "float", "str", "bool", "list", "dict", "ptr", "addr", "var"];
 const FUNC_WORDS: [&str; 5] = ["function", "fn", "Function", "func", "f"];
 const ASSIGN_OPS: [&str; 7] = ["=", "+=", "-=", "*=", "/=", "%=", "**="];
 
@@ -25,10 +25,14 @@ const ASSIGN_OPS: [&str; 7] = ["=", "+=", "-=", "*=", "/=", "%=", "**="];
 struct Line {
     no: u32,
     indent: usize,
-    code: String,
-    raw: String,
+    /// 用 Rc<String>：解析时每行会被克隆好几次（语句、块、类体），
+    /// 用 String 就是每行复制源码；Rc 只是一个引用计数。
+    /// 跨行合并用 Rc::make_mut 原地追加，仍然是 O(n)。
+    code: Rc<String>,
     is_comment: bool,
     skipped: bool,
+    /// 这一行（含续行）里还有多少括号没闭合；增量维护，避免 O(n²)
+    open_depth: i32,
 }
 
 /// 把源码切成"有效行"：去 BOM、统一换行、Tab 展开成 4 空格、剥掉 `--` 注释。
@@ -56,25 +60,26 @@ fn split_source(src: &str) -> Vec<Line> {
             c.trim().to_string()
         };
         let _ = comment;
-        // 多行字面量：上一行括号还没闭合，就把它接到上一行后面
-        let open = bracket_depth(&cleaned) + out.last().map(|l| bracket_depth(&l.code)).unwrap_or(0);
+        let line_depth = bracket_depth(&cleaned);
+        /* 多行字面量：上一行括号还没闭合，就把它接到上一行后面。
+         * 关键：**增量维护**累积行的括号深度，不要每次把整段重扫一遍——
+         * 5000 行的地图表那样写就是 O(n²)，实测 1.8 秒。这里是 O(n)。 */
         if let Some(last) = out.last_mut() {
-            if bracket_depth(&last.code) > 0 {
-                last.code.push(' ');
-                last.code.push_str(&cleaned);
-                last.raw.push('\n');
-                last.raw.push_str(trimmed);
+            if last.open_depth > 0 {
+                last.open_depth += bracket_depth(&cleaned);
+                let merged = Rc::make_mut(&mut last.code);
+                merged.push(' ');
+                merged.push_str(&cleaned);
                 continue;
             }
         }
-        let _ = open;
         out.push(Line {
             no,
             indent,
-            code: cleaned,
-            raw: trimmed.to_string(),
+            code: Rc::new(cleaned),
             is_comment,
             skipped: false,
+            open_depth: line_depth,
         });
     }
     out
@@ -124,13 +129,15 @@ struct ExprParser<'a> {
     toks: &'a [Token],
     pos: usize,
     file: &'a Rc<str>,
+    /// 表达式嵌套深度（括号 / 调用 / 列表都算），防栈溢出
+    depth: usize,
 }
 
 type EResult<T> = Result<T, FloatError>;
 
 impl<'a> ExprParser<'a> {
     fn new(toks: &'a [Token], file: &'a Rc<str>) -> ExprParser<'a> {
-        ExprParser { toks, pos: 0, file }
+        ExprParser { toks, pos: 0, file, depth: 0 }
     }
 
     fn cur(&self) -> Option<&Token> {
@@ -201,7 +208,24 @@ impl<'a> ExprParser<'a> {
     }
 
     fn parse_expr(&mut self, min_prec: u8) -> EResult<Expr> {
-        let mut left = self.parse_unary()?;
+        // 嵌套保护：括号 / 调用 / 列表都会递归进来，几千层会把栈打穿
+        self.depth += 1;
+        if self.depth > MAX_EXPR_DEPTH {
+            self.depth -= 1;
+            return Err(self.err(format!(
+                "表达式嵌套太深（超过 {} 层）停下来了。拆成几个变量或几行会更清楚",
+                MAX_EXPR_DEPTH
+            )));
+        }
+        let r = self.parse_expr_inner(min_prec);
+        self.depth -= 1;
+        r
+    }
+
+    fn parse_expr_inner(&mut self, min_prec: u8) -> EResult<Expr> {
+        let left0 = self.parse_unary()?;
+        // 先把这一层的左结合链收集起来（不立刻折叠），再决定怎么折叠
+        let mut chain: Vec<(Op, Expr, Span)> = Vec::new();
         loop {
             let (op_text, tok) = match self.cur() {
                 Some(t) if t.kind == TokKind::Op => (t.text.clone(), t.clone()),
@@ -222,10 +246,11 @@ impl<'a> ExprParser<'a> {
             let next_min = if op == Op::Pow { prec } else { prec + 1 };
             let right = self.parse_expr(next_min)?;
             let span = Span::new(self.file, tok.line, tok.col, right.span.end_col);
-            left = Expr::new(
-                ExprKind::Bin { op, a: Box::new(left), b: Box::new(right) },
-                span,
-            );
+            chain.push((op, right, span));
+        }
+        let mut left = left0;
+        if !chain.is_empty() {
+            left = self.fold_chain(left, chain)?;
         }
         // 三元：`条件 ? 这个 : 那个`，优先级最低、右结合
         // （只在最外层解析，避免把 dict 里的冒号吃掉）
@@ -244,6 +269,68 @@ impl<'a> ExprParser<'a> {
             );
         }
         Ok(left)
+    }
+
+    /// 折叠左结合链。要点：
+    /// - 普通长度：按左结合叠成一棵左深树（保持原语义）
+    /// - 很长且**运算符全是同一个结合律运算符**（+ × 位运算 && ||）：改成一棵平衡树，
+    ///   深度从 n 降到 log₂n —— 这样几万项的拼接也不会把递归/析构的栈打穿，
+    ///   结果内容完全一样（加法/拼接本来就满足结合律）
+    /// - 很长但不是结合律（一连串 - 或 /）：明确报错，不硬撑
+    fn fold_chain(&mut self, left: Expr, chain: Vec<(Op, Expr, Span)>) -> EResult<Expr> {
+        const BALANCE_OVER: usize = 16;
+        /// 非结合运算（一连串 - 或 /）最多这么长；再长就报错，因为没法平衡化，
+        /// 左深树太深会把编译/析构的栈打穿
+        const MAX_CHAIN: usize = 2000;
+
+        let first_op = chain[0].0;
+        let associative = matches!(
+            first_op,
+            Op::Add | Op::Mul | Op::BitAnd | Op::BitOr | Op::BitXor | Op::And | Op::Or
+        );
+        let same_op = chain.iter().all(|(o, _, _)| *o == first_op);
+
+        if chain.len() > MAX_CHAIN && !(same_op && associative) {
+            return Err(self.err(format!(
+                "这一行的算式太长（超过 {} 个运算符，而且混了加减乘除）停下来了。拆成几行，或者用列表 + join 拼",
+                MAX_CHAIN
+            )));
+        }
+
+        if chain.len() > BALANCE_OVER && same_op && associative {
+            let op = first_op;
+            let mut level: Vec<Expr> = Vec::with_capacity(chain.len() + 1);
+            level.push(left);
+            for (_, e, _) in chain {
+                level.push(e);
+            }
+            // 一轮轮两两合并，天然是平衡树；顺序仍是原顺序（短路语义不变）
+            while level.len() > 1 {
+                let mut next: Vec<Expr> = Vec::with_capacity(level.len() / 2 + 1);
+                let mut it = level.into_iter();
+                while let Some(a) = it.next() {
+                    match it.next() {
+                        Some(b) => {
+                            let span = Span::new(self.file, a.span.line, a.span.col, b.span.end_col);
+                            next.push(Expr::new(
+                                ExprKind::Bin { op, a: Box::new(a), b: Box::new(b) },
+                                span,
+                            ));
+                        }
+                        None => next.push(a),
+                    }
+                }
+                level = next;
+            }
+            return Ok(level.pop().expect("至少一个操作数"));
+        }
+
+        // 普通左结合折叠
+        let mut acc = left;
+        for (op, right, span) in chain {
+            acc = Expr::new(ExprKind::Bin { op, a: Box::new(acc), b: Box::new(right) }, span);
+        }
+        Ok(acc)
     }
 
     fn parse_unary(&mut self) -> EResult<Expr> {
@@ -313,6 +400,43 @@ impl<'a> ExprParser<'a> {
             if t.is_punc("(") {
                 let args = self.parse_args()?;
                 let span = Span::new(self.file, e.span.line, e.span.col, t.end_col);
+                /* 指针新写法：全是词，没有 & 和 * 那些符号。
+                 *   addr(x)      取变量地址
+                 *   addr(xs, i)  取列表第 i 格的地址
+                 *   read(p)      读地址里的值
+                 * 都在解析期改写成原有的取地址/解引用节点，
+                 * 所以 VM、AOT、TS 引擎不用各写一份。 */
+                let rewritten = match &e.kind {
+                    ExprKind::Var(name) => match (&**name, args.len()) {
+                        ("addr", 1) => Some(Expr::new(
+                            ExprKind::Un { op: Op::Addr, a: Box::new(args[0].clone()) },
+                            span.clone(),
+                        )),
+                        ("addr", 2) => Some(Expr::new(
+                            ExprKind::Un {
+                                op: Op::Addr,
+                                a: Box::new(Expr::new(
+                                    ExprKind::Idx {
+                                        obj: Box::new(args[0].clone()),
+                                        index: Box::new(args[1].clone()),
+                                    },
+                                    span.clone(),
+                                )),
+                            },
+                            span.clone(),
+                        )),
+                        ("read", 1) => Some(Expr::new(
+                            ExprKind::Un { op: Op::Deref, a: Box::new(args[0].clone()) },
+                            span.clone(),
+                        )),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(x) = rewritten {
+                    e = x;
+                    continue;
+                }
                 e = Expr::new(ExprKind::Call { callee: Box::new(e), args }, span);
                 continue;
             }
@@ -332,6 +456,22 @@ impl<'a> ExprParser<'a> {
                     return Err(self.err("点号后面要跟名字"));
                 }
                 let span = Span::new(self.file, e.span.line, e.span.col, name_tok.end_col);
+                /* 标准库：`os.readfile(x)` 里的 os 是命名空间，不是变量。
+                 * 编译期直接收敛成一次内建调用（内建名就叫 "os.readfile"），
+                 * 这样 VM / 解释器 / AOT 三处都不用为命名空间加新东西。 */
+                if let ExprKind::Var(base) = &e.kind {
+                    if crate::stdlib::is_namespace(base) {
+                        let full = format!("{}.{}", base, name_tok.text);
+                        if crate::stdlib::is_fn(&full) {
+                            e = Expr::new(ExprKind::Var(Rc::from(full.as_str())), span);
+                            continue;
+                        }
+                        return Err(FloatError::new(
+                            format!("{} 里没有 {} 这个函数", base, name_tok.text),
+                            span,
+                        ));
+                    }
+                }
                 e = Expr::new(
                     ExprKind::Member { obj: Box::new(e), name: Rc::from(name_tok.text.as_str()) },
                     span,
@@ -423,6 +563,17 @@ impl<'a> ExprParser<'a> {
                 continue;
             }
             if c != '{' {
+                buf.push(c);
+                i += 1;
+                continue;
+            }
+            /* 只有 `{名字}` 才算插值。`{"key": 1}` 这种 JSON、`{}` 这种字面量里的花括号
+             * 必须原样保留 —— 不然 json.parse("{\"a\":1}") 会被当成插值，报「变量 a 没有定义」。 */
+            let starts_like_name = chars
+                .get(i + 1)
+                .map(|c2| c2.is_alphanumeric() || *c2 == '_')
+                .unwrap_or(false);
+            if !starts_like_name {
                 buf.push(c);
                 i += 1;
                 continue;
@@ -567,7 +718,11 @@ impl<'a> ExprParser<'a> {
                 match t.text.as_str() {
                     "true" => Ok(Expr::new(ExprKind::Bool(true), span)),
                     "false" => Ok(Expr::new(ExprKind::Bool(false), span)),
-                    "null" | "nil" => Ok(Expr::new(ExprKind::Null, span)),
+                    "null" => Ok(Expr::new(ExprKind::Null, span)),
+                    "nil" | "none" => Err(FloatError::new(
+                        format!("Copper 只有 null，没有 {}（旧写法已取消）。把 {} 换成 null", t.text, t.text),
+                        span,
+                    )),
                     "self" | "this" => Ok(Expr::new(ExprKind::SelfRef, span)),
                     _ => Ok(Expr::new(ExprKind::Var(Rc::from(t.text.as_str())), span)),
                 }
@@ -650,7 +805,11 @@ pub struct Parser {
 
 /// 缩进块嵌套上限。正常人写代码很少超过 30 层；给了 200 层余量，
 /// 既够用，又能在恶意/失控的输入下守住进程（不然递归会把栈直接吃掉）。
-const MAX_NEST: usize = 200;
+use crate::limits::NEST as MAX_NEST;
+
+/// 单条表达式最多嵌套多少层（括号 / 调用 / 列表都算）。正常人写不到 50 层，
+/// 给 256 层余量；真超了明确报错，而不是让递归把栈打穿。
+const MAX_EXPR_DEPTH: usize = 256;
 
 /// 入口：把源码解析成 Program
 pub fn parse_program(file: &str, src: &str) -> Program {
@@ -783,7 +942,7 @@ impl Parser {
             // 字段：`int hp = 100` / `str name = ""`
             if toks_l.len() >= 2 {
                 let mut fi = 0;
-                if matches!(toks_l[0].text.as_str(), "int" | "float" | "str" | "bool" | "list" | "dict" | "ptr" | "var") {
+                if matches!(toks_l[0].text.as_str(), "int" | "float" | "str" | "bool" | "list" | "dict" | "ptr" | "addr" | "var") {
                     fi = 1;
                 }
                 if let Some(nt) = toks_l.get(fi) {
@@ -1400,7 +1559,7 @@ impl Parser {
     }
 
     fn parse_line(&mut self, ln: &Line) -> EResult<Option<Stmt>> {
-        let mut code = ln.code.as_str();
+        let mut code: &str = &ln.code;
         if let Some(rest) = code.strip_prefix('}') {
             code = rest.trim();
         }
@@ -1451,9 +1610,15 @@ impl Parser {
                     return Ok(Some(Stmt::new(StmtKind::While { cond, body }, self.line_span(ln))));
                 }
                 "for" => return Ok(Some(self.parse_for(ln, &toks)?)),
-                "break" | "out" if toks.len() == 1 => {
+                "break" if toks.len() == 1 => {
                     self.pos += 1;
                     return Ok(Some(Stmt::new(StmtKind::Break, self.line_span(ln))));
+                }
+                "out" if toks.len() == 1 => {
+                    return Err(FloatError::new(
+                        "out 已经取消，改成 break（两个名字做同一件事，留一个就够了）".to_string(),
+                        self.line_span(ln),
+                    ));
                 }
                 "balo" | "continue" if toks.len() == 1 => {
                     self.pos += 1;
@@ -1790,6 +1955,29 @@ impl Parser {
         }
 
         self.pos += 1;
+        /* 指针新写法：write(p, 值) 单独成句 → 等价的 *p = 值。
+         * 只当语句用（它没有返回值），写成表达式会明确报错。 */
+        if let ExprKind::Call { callee, args } = &first_expr.kind {
+            if let ExprKind::Var(name) = &callee.kind {
+                if &**name == "write" && args.len() == 2 {
+                    let span = self.line_span(ln);
+                    return Ok(Some(Stmt::new(
+                        StmtKind::Assign {
+                            target: crate::ast::Target::Deref(args[0].clone()),
+                            op: crate::ast::AssignOp::Set,
+                            value: args[1].clone(),
+                        },
+                        span,
+                    )));
+                }
+                if &**name == "write" {
+                    return Err(FloatError::new(
+                        "write 要写成 write(地址, 值)，两个参数",
+                        self.line_span(ln),
+                    ));
+                }
+            }
+        }
         Ok(Some(Stmt::new(StmtKind::ExprStmt(first_expr), self.line_span(ln))))
     }
 
@@ -1825,9 +2013,10 @@ impl Parser {
                 self.pos += 1;
                 continue;
             }
-            let mut code = next.code.clone();
+            let code_owned = next.code.to_string();
+            let mut code: &str = &code_owned;
             if let Some(rest) = code.strip_prefix('}') {
-                code = rest.trim().to_string();
+                code = rest.trim();
             }
             if code.is_empty() || next.indent != ln.indent {
                 break;
@@ -1921,11 +2110,12 @@ impl Parser {
             if ln.skipped {
                 return;
             }
-            let mut code = ln.code.clone();
+            let code_owned = ln.code.to_string();
+            let mut code: &str = &code_owned;
             let mut brace_close = false;
             if let Some(rest) = code.strip_prefix('}') {
                 brace_close = true;
-                code = rest.trim().to_string();
+                code = rest.trim();
             }
             if code.is_empty() {
                 return;

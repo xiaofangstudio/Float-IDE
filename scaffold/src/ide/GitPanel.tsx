@@ -163,6 +163,18 @@ export function GitPanel({ projectDir, onOpenDiff, onChanged }: Props) {
     }
   };
 
+  /* 一键上传：提交全部 → 直接推送。失败自动尝试建立上游（首次推送不用开命令行）。 */
+  const commitAndPush = async (): Promise<void> => {
+    if (!commitMsg.trim()) { setMsg('请先填写提交说明'); return; }
+    const prev = msg; // 占位：run 内部会更新 msg
+    if (await run(['add', '-A'], '已暂存全部更改')) {
+      if (await run(['commit', '-m', commitMsg.trim()], '提交完成')) {
+        setCommitMsg('');
+        await push();
+      }
+    }
+  };
+
   const push = async (): Promise<void> => {
     if (await run(['push'], '推送完成')) return;
     // 无上游时尝试 -u origin <branch>
@@ -256,6 +268,8 @@ export function GitPanel({ projectDir, onOpenDiff, onChanged }: Props) {
         <div style={{ display: 'flex', gap: 6 }}>
           <button className="btn" style={{ flex: 1, fontSize: 12, padding: '6px 8px' }} disabled={staged.length === 0} onClick={() => void commit()}>提交已暂存</button>
           <button className="btn primary" style={{ flex: 1, fontSize: 12, padding: '6px 8px' }} disabled={total === 0} onClick={() => void commitAll()}>全部提交</button>
+          <button className="btn primary" style={{ flex: 1, fontSize: 12, padding: '6px 8px' }} disabled={total === 0} title="提交全部更改并直接推送（点两下就能上传）"
+            onClick={() => void commitAndPush()}>提交并推送</button>
         </div>
       </div>
 

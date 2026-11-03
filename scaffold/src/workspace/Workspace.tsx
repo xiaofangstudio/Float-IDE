@@ -154,6 +154,7 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
       return /^[A-Za-z]:\//.test(norm) || norm.startsWith('/') ? norm : `${base}/${norm}`;
     };
     setFsBridge({
+      baseDir: () => base,
       read: async (p) => { try { return await api.fsRead(resolve(p)); } catch { return null; } },
       write: async (p, c) => { try { await api.fsWrite(resolve(p), c); return true; } catch { return false; } },
       append: async (p, c) => {
@@ -165,7 +166,25 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
           return true;
         } catch { return false; }
       },
-      has: async (p) => { try { return (await api.fsStat(resolve(p))).exists; } catch { return false; } }
+      has: async (p) => { try { return (await api.fsStat(resolve(p))).exists; } catch { return false; } },
+      /* 标准库（os.* / net.*）要用的其余能力：全都走已有的 Tauri 命令，
+       * 这样 F6 和 F5 读到的是同一份磁盘和同一份进程信息。 */
+      stat: async (p) => {
+        try { return await api.fsStat(resolve(p)); } catch { return { mtimeMs: 0, size: 0, exists: false }; }
+      },
+      list: async (p) => (await api.fsList(resolve(p))).map((e) => ({ name: e.name, isDir: e.isDir })),
+      mkdir: async (p) => { await api.fsMkdir(resolve(p)); return true; },
+      remove: async (p) => { await api.fsDelete(resolve(p)); return true; },
+      rename: async (a, b) => { await api.fsRename(resolve(a), resolve(b)); return true; },
+      copy: async (a, b) => {
+        const text = await api.fsRead(resolve(a));
+        await api.fsWrite(resolve(b), text);
+        return true;
+      },
+      host: () => api.hostInfo(),
+      setenv: (k, v) => api.hostSetenv(k, v),
+      runCmd: (cmd, dir) => api.hostRunCmd(cmd, dir),
+      http: (method, url, body) => api.hostFetch(method, url, body)
     });
     return () => setFsBridge(null);
   }, [projectDir]);
@@ -185,6 +204,26 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
     );
   }
   const [indexSize, setIndexSize] = useState(0);
+  /** 当前进程占用内存（MB）：状态栏右下角裸数字，每秒半刷新一次 */
+  const [memMb, setMemMb] = useState(0);
+  useEffect(() => {
+    if (!isTauri()) return;
+    let alive = true;
+    const tick = (): void => {
+      void api
+        .sysinfoMem()
+        .then((b) => {
+          if (alive) setMemMb(Math.max(1, Math.round(b / 1048576)));
+        })
+        .catch(() => { /* 拿不到就不显示，不打扰 */ });
+    };
+    tick();
+    const id = window.setInterval(tick, 1500);
+    return () => {
+      alive = false;
+      window.clearInterval(id);
+    };
+  }, []);
   const [searchFocus, setSearchFocus] = useState(0);
   const [pluginCommands, setPluginCommands] = useState<PluginCommandEntry[]>([]);
   const [pluginMenus, setPluginMenus] = useState<{ command: string; label: string }[]>([]);
@@ -506,7 +545,8 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
 
       /* F5 走 Rust 内核，一套实现到底：class / try / import / ask 全在里面。
        * ask 不再是"退回另一个引擎"的理由 —— 内核会停下来把提问交给界面，
-       * 拿到回答后补进 inputs 重跑（脚本是确定性的，重跑即是同一条路径）。 */
+       * 拿到回答后补进 inputs 重跑。纯计算脚本重放即同一条路径；
+       * 但 rand / time 每次结果不同，重放会重新执行它们——交互式小游戏请用 F6（真暂停）。 */
       const entrySrc = sources.get(normEntry) ?? '';
       const canNative = mode === 'run' && isTauri();
       if (canNative) {
@@ -1375,6 +1415,7 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
         <span>UTF-8</span>
         <span>LF</span>
         <span>Copper</span>
+        {memMb > 0 && <span className="sb-mem" title="Float IDE 当前占用内存">{memMb} MB</span>}
       </div>
 
       {rename && (

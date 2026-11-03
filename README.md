@@ -8,6 +8,136 @@
 
 0.2 把语言内核整个换掉了——不再是"一行一条正则"，而是 **词法 → AST → 解释器** 三层。所以 `for` 的次数能写变量、函数能有参数和返回值、类能继承。
 
+## 文档
+
+- [语言支持矩阵](docs/语言支持矩阵.md)：每个特性在三个引擎（F5 编译 / F6 解释 / Rust 内核）里到底支不支持
+- [标准库（v1）](docs/标准库规划.md)：`import os` / `data` / `json` / `time` / `random` / `ui` / `re` / `net` 的完整函数表与实现状态
+- [教程](docs/tutorial.md) / [MCP](docs/mcp.md) / [插件](docs/plugins.md)
+
+---
+
+## 标准库：`import 库名` 就能用
+
+不用下载、不用装包，写一行 `import data` 就等于"我要用这个库"。函数是带库名的，
+写全了才认得（`data.sum(xs)`），补全里输入 `data.` 就会把 26 个函数列出来。
+
+```copper
+import data
+import json
+
+list 学生 = [{"name": "老陈", "score": 88}, {"name": "阿方", "score": 93}, {"name": "小北", "score": 78}]
+
+for s in data.sort_by(学生, "score", "desc") {
+  print(s["name"] + " " + str(s["score"]))
+}
+print("平均 " + str(data.avg(学生, "score")))     -- 86.333333333333
+print("中位 " + str(data.median([78, 88, 93])))  -- 88
+
+var 数据 = json.parse(readfile("成绩.json"))
+print(json.pretty(数据))
+```
+
+| 库 | 能干什么 |
+|---|---|
+| `data` | 排序（含按字段）、求和/平均/中位数/标准差、去重、频次、切片、拍平、zip、字典合并 |
+| `json` | `parse` / `stringify` / `pretty` / `valid` / `try_parse`（坏 JSON 不炸，返回 `{ok, error}`） |
+| `time` | `format` / `parse` / `parts` / `iso` / `diff` / `mark` + `since` 计时 |
+| `random` | `rand` / `float` / `choice` / `shuffle` / `sample` / `gauss` / `weighted`，`seed` 之后可复现 |
+| `re` | `findall`（带分组提取）/ `replace` / `split` / `test` / `escape` |
+| `ui` | `bar` / `progress` / `table`（中文按 2 格对齐）/ `color` / `title` / `clear` |
+| `os` | 文件、目录、路径（`basename` / `dirname` / `extname` / `pathjoin`）、环境变量、`runcmd` |
+| `net` | `fetch` / `post` / `download` / `request` / `encode` / `decode` / `query` / `ip` |
+
+旧名字（`readfile` / `now` / `fetch` / `sorted` …）全部保留，和 `os.readfile` 这类新名字是同一份实现。
+文件与网络要桌面版（F5/F6 都行），浏览器预览里会明确说"桌面版功能"。
+
+---
+
+## 原生编译（AOT）：把 .co 编成真正的 exe
+
+Copper 现在有两条执行路：**VM（默认，F5/F6 用）** 和 **AOT（原生编译）**。
+
+```bash
+cd scaffold/src-tauri/float-lang
+cargo run --release --example aot -- 你的脚本.co -o 程序.exe --run
+```
+
+它做的事：源码 →（import / 宏展开）→ AST → **Rust 源码** → rustc -O3 → 本机 exe。
+翻译层是纯新增模块（`src/aot.rs`），VM、词法、语法、AST 一行没动。
+
+**语义和 VM 完全一样**：算术/比较/下标/成员/方法全部复用 VM 的实现；
+作用域规则照旧（块里声明的变量块外可见、for 变量活到循环外、函数局部出不来）。
+
+**实测（同一台机器，扣除进程启动开销）**
+
+| 用例 | VM | AOT | CPython |
+|---|---|---|---|
+| fib(30) 递归 | 93.1 ms | **33.7 ms** | 124.4 ms |
+| 循环累加 500 万 | 79.5 ms | **0.8 ms** | 139.9 ms |
+| 字符串拼接 5 万 | 0.9 ms | **2.5 ms** | 3.0 ms |
+
+fib 是 CPython 的 **3.7 倍**、VM 的 2.8 倍；循环被 LLVM 直接算成了闭式解。
+字符串拼接两者同一档（VM 有就地追加，AOT 走同一份 `compound_value`）。
+
+**AOT 不支持什么（编译期明确报，自动回落 VM 跑，结果不变）**
+
+- 指针 `&` / `*`、`alloc` 之外的裸内存操作
+- `ask`（需要交互宿主）、`wait until`、`time read`
+- 函数里再定义函数、try 块里带 return/break/continue
+- 用到这些的脚本会打印「AOT 暂不支持：…（第 N 行）」，然后照常用 VM 出结果
+
+**大工程：分块 + 增量编译**
+
+整份程序塞进一个 `.rs` 时，代码上到一两万行，单个 rustc 会吃掉几个 G 内存（实测把整台机器顶崩）。
+超过体积闸门后自动切换成**分块编译**：
+
+```
+rt/        运行时（值模型/算术/方法/函数注册表）—— 永远不变，编一次就缓存住
+chunkK/    每块最多 200 个函数，跨块调用走运行时注册表（块内调用仍是直接调用）
+dataK/     超大表格（几百上千行的地图/敌人表）编成一段紧凑数据串，运行时一次解析
+initK/     顶层语句超过 120 条时按组拆开
+app/       顶层代码 + main + 装配
+```
+
+关键点：
+- **只重写变了的文件**（内容比对），未改动 crate 的 cargo 产物直接复用 —— 这就是增量
+- 大表格用 `parse_data(...)`：编译期瞬间完成，运行时解析 2000 行约 0.5ms
+- `-j 2` 限制并行：一次开十几个 rustc 会把内存打满开始 swap，反而更慢
+
+实测（6.3 千行游戏：2000 行地图 + 1000 条敌人表 + 500 个规则函数）：
+
+| 场景 | 耗时 |
+|---|---|
+| 首次编译（含依赖） | ~47 s |
+| 什么都没改 | **0.4 s** |
+| 改一个函数 | ~34 s（其中约 28 s 是最后的链接） |
+
+**正确性怎么保证**：`examples/aot_parity.rs` 把对拍用例逐条用 VM 和 AOT 跑一遍比输出；
+`tests/aot.rs` 是翻译层回归（10 条，含分块结构、紧凑数据、跨块调用）。两者都进 CI 前的手工清单。
+
+---
+
+## Copper 写法速查：新代码推荐写法（legacy 对照）
+
+Copper 保留了一批旧写法做兼容（老 .cw 文件不用改也能跑）。**新代码请一律用左列**；
+右列是 legacy，能跑但教程、补全、示例都不再使用，迟早会收进「仅兼容」名单。
+
+| 场景 | ✅ 新代码推荐写法 | ⚠️ legacy（仅兼容，别在新代码里用） |
+|---|---|---|
+| 定义函数 | `fn 名字(参数)` | `function 名字` / `func 名字` / `define 名字` |
+| 列表追加 | `xs.push(x)` | `add x to xs` |
+| 排序 | `xs.sort()` 就地 / `sorted(xs)` 返回新列表 | ——（两种都是正式写法） |
+| 字典字面量 | `{"k": v}`（也可省花括号，但别省） | 裸 `k: v` |
+| 取地址 / 读写 | `addr(x)` / `read(p)` / `write(p, 值)` | `&x` / `*p` / `*p = 值`（IDE 会提示换新写法） |
+| 空值 | `null` | `nil` / `none`（**已取消**，写了会报错并提示改 `null`） |
+| 跳出循环 | `break` | `out`（**已取消**，写了会报错并提示改 `break`） |
+| 输出 | `print(值)` | `print 值`（括号可省是历史习惯） |
+| 实例化 | `new Hero("阿方")` 或 `Hero("阿方")` | ——（两种都算正式写法） |
+| 旧扩展名 | `.co` | `.cw`（打开 / 运行 / import 双候选，永久兼容） |
+| 中文关键字 | 英文正式名（`readfile` / `now` / `report`…） | 中文别名（`读文件` / `现在` / `报告`…只保留兼容，不进补全不进文档） |
+
+原则一句话：**教程和示例里出现的就是推荐写法**；不在教程里的写法都是兼容层，别教给别人。
+
 ---
 
 ## 1.6 这次改了什么（改名 Copper + 全链路大改）
@@ -58,6 +188,20 @@
 - 🐞 修掉「一按运行就显示程序终止」与 Monaco 模型并发冲突
 - 📚 右侧变量面板的字典 / 列表可展开收起，超长内容截断
 - 🪶 移除 FFmpeg 依赖，安装包瘦身
+
+## 补丁（1.6.0 之后·二）：标准库 v1 + AOT 的配套与周边
+
+标准库 v1 和 AOT 本机编译是这轮的主菜（见顶部两章）；这里记同一轮一起落地的配套：
+
+- 🌉 **F6 补上宿主信息**（`commands/host.rs`）：`os.getenv / os.args / os.pid / os.runcmd` 原本只有 Rust 内核（F5）能答，现在 WebView 侧经桥接命令拿到同一份进程信息——同一个脚本 F5 / F6 结果一致，不再一边能跑一边报错
+- 🩺 **状态栏显示 IDE 自身内存占用**（`commands/sysinfo.rs`）：只读当前进程工作集（Working Set），不做统计不采样
+- 📏 **运行上限集中成 `limits.rs` / `limits.ts`**：递归 400 / import 嵌套 100 / 块嵌套 200 / 输出缓存 32MB，三引擎同一张表，报错统一「当前 X（上限 Y）」
+- 🔘 **Git 面板新增「提交并推送」**：add -A → commit → push 一条龙，首次推送失败自动建上游，不用开命令行
+- 🌫️ **背景设置入驻偏好设置页**：磨砂程度 / 透明度 / 压暗三个滑杆实时生效，已设置时面板换磨砂
+- 🏝️ **示例第 17 个：《方岛物语》**（`language/samples/main.co`）——文字开放世界游戏，数字选项 + 自由文字指令，配套存档示例与无头冒烟验证器（`tests/_fang_headless.ts`）
+- 🧹 **删掉 4184 行的旧 TS 基准脚本**（`tests/.bench.mjs`），性能基准改走 Rust 侧：`bigbench.rs` / `lexbench.rs` / `bigfile.rs`（含两万行大文件解析用例）
+- 🧪 **测试**：`stdlib.test.ts` + Rust `stdlib.rs` 对拍 8 库函数；`pointer-words.test.ts`（指针与分词边界）；`tutorial.test.ts`（教程示例逐段可运行）；parity 用例扩到 cases11 / cases12
+- 📖 文档：《标准库规划》兼设计稿与函数表，《语言支持矩阵》同步更新
 
 ## 补丁（1.6.0 之后）：变量作用域大修
 
@@ -496,7 +640,7 @@ print(h.name + " 剩余 " + h.hurt(30))
 - **条件运算符**：用 `> < == != && || !`，也支持 `and / or / not` 关键字写法（等价）
 - **import**：`import "lib.co"` 按文件，`import "tools"` 按文件夹（找 `tools/main.co`）
 
-十六份示例在 `language/samples/`，从 hello 到类与继承，再到手动内存与指针游戏。
+十七份示例在 `language/samples/`，从 hello 到类与继承，再到手动内存、指针游戏与《方岛物语》开放世界。
 
 ---
 

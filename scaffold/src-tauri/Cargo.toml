@@ -33,4 +33,4 @@ lto = false
 
 # Windows 文件关联走系统 API（RegCreateKeyW / SHChangeNotify），不调用 reg.exe
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Registry", "Win32_UI_Shell"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Registry", "Win32_UI_Shell", "Win32_System_ProcessStatus", "Win32_System_Threading"] }

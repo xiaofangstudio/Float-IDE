@@ -1,0 +1,124 @@
+### 标准库 data 排序与统计
+import data
+list 学生 = [{"name": "老陈", "score": 88}, {"name": "阿方", "score": 93}, {"name": "小北", "score": 78}]
+for s in data.sort_by(学生, "score", "desc") {
+  print(s["name"] + " " + str(s["score"]))
+}
+print(str(data.avg(学生, "score")))
+print(str(data.median([78, 88, 93, 100])))
+print(str(data.sum([1, 2, 3, 4])))
+print(str(data.stdev([2, 4, 4, 4, 5, 5, 7, 9])))
+print(str(data.max([3, 9, 2])) + " " + str(data.min([3, 9, 2])))
+
+### 标准库 data 集合操作
+import data
+print(str(data.unique([1, 2, 2, 3, 1])))
+print(str(data.freq(["a", "a", "b"])))
+print(str(data.count([1, 2, 1, 3, 1], 1)))
+print(str(data.slice([1, 2, 3, 4, 5], 1, 3)))
+print(str(data.slice([1, 2, 3, 4, 5], -2)))
+print(str(data.flatten([1, [2, [3, [4]]]])))
+print(str(data.flatten([1, [2, [3, [4]]]], 2)))
+print(str(data.chunk([1, 2, 3, 4, 5], 2)))
+print(str(data.zip([1, 2, 3], ["a", "b"])))
+print(str(data.enumerate(["x", "y"], 1)))
+print(str(data.reverse([1, 2, 3])))
+
+### 标准库 data 字典操作
+import data
+dict d = {"a": 1, "b": 2}
+print(str(data.keys(d)))
+print(str(data.values(d)))
+print(str(data.entries(d)))
+print(str(data.merge(d, {"b": 9, "c": 3})))
+print(str(data.pick(d, ["a"])))
+print(str(data.omit(d, ["a"])))
+print(str(data.get(d, "b")))
+print(str(data.get(d, "zz", "没")))
+print(str(data.is_empty({})))
+
+### 标准库 json 往返
+import json
+var j = json.parse("{\"a\": [1, 2.5, true, null], \"b\": \"中文\"}")
+print(j["b"])
+print(str(j["a"]))
+print(json.stringify(j))
+print(json.stringify({"x": 1, "y": [1, 2]}))
+print(json.pretty({"x": 1}))
+print(str(json.valid("{\"a\": 1}")))
+print(str(json.valid("{oops}")))
+
+### 标准库 json 解析失败
+import json
+var r = json.try_parse("{bad}")
+print(str(r["ok"]))
+print(json.parse("{bad}"))
+
+### 标准库 time 固定时间戳
+import time
+print(time.format(0, "YYYY-MM-DD"))
+print(time.format(0, "YYYY-MM-DD HH:mm:ss"))
+print(time.format(86400, "YYYY/MM/DD"))
+print(str(time.diff(100, 160)))
+print(str(time.add(1000, 60)))
+var p = time.parts(0)
+print(str(p["year"]) + " " + str(p["month"]) + " " + str(p["day"]) + " " + str(p["hour"]))
+print(str(time.parts(0)["weekday"]))
+print(time.iso(0))
+
+### 标准库 random 固定种子
+import random
+random.seed(42)
+print(str(random.rand(1, 100)) + " " + str(random.rand(1, 100)) + " " + str(random.rand(1, 100)))
+print(str(random.choice(["a", "b", "c", "d"])))
+list xs = [1, 2, 3, 4, 5]
+random.shuffle(xs)
+print(str(xs))
+random.seed(7)
+print(str(random.sample([1, 2, 3, 4, 5], 3)))
+print(str(random.rand(5, 1)))
+
+### 标准库 re 基本
+import re
+print(str(re.findall("[0-9]+", "a1b22c333")))
+print(str(re.test("\\d+", "abc123")))
+print(str(re.test("\\d+", "abc")))
+print(str(re.search("\\d+", "ab12cd")))
+print(str(re.split(",", "a,b,,c")))
+print(re.escape("a.b*c"))
+
+### 标准库 re 分组与替换
+import re
+print(str(re.findall("href=\"([^\"]+)\"", "a href=\"/a\" b href=\"/b\"")))
+print(re.replace("[0-9]+", "N", "a1b22c333"))
+print(re.replace("a", "", "banana"))
+
+### 标准库 ui 排版
+import ui
+print(ui.bar(3, 10, 10))
+for ln in split(ui.title("标题"), "\n") {
+  print(ln)
+}
+for ln in split(ui.table(["名字", "分数"], [["阿方", "93"], ["chen", "88"]]), "\n") {
+  print(ln)
+}
+print(ui.progress(1, 4))
+
+### 标准库 os 路径函数
+import os
+print(os.basename("a/b/c.co"))
+print(os.dirname("a/b/c.co"))
+print(os.dirname("c.co"))
+print(os.extname("a/b/c.co"))
+print(os.extname("a/b/c"))
+print(os.pathjoin("a/", "b", "c.co"))
+
+### 标准库 命名空间里没有的函数要报错
+import os
+print(os.nothing(1))
+
+### 标准库 import 不改变行号
+import data
+import json
+print(str(data.sum([1, 2])))
+print(str(json.valid("1")))
