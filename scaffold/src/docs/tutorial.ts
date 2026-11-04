@@ -81,7 +81,7 @@ export const CHAPTERS: Chapter[] = [
           '类型也有中文别名（整数 = int），老代码能继续跑；但 if / for / fn / print 这些关键字不做中文版——中文关键字是易语言那条路，读起来反而更别扭，这里不走。'
         ],
         codes: [{
-          code: 'int 血量 = 100\nstr 名字 = "小方"\nprint(名字, 血量)\n\n-- 类型名有中文别名\n整数 数量 = 3\nprint(数量)',
+          code: 'int 血量 = 100\nstr 名字 = "小方"\nprint(名字, 血量)\n\n/* 类型名有中文别名\n整数 数量 = 3\nprint(数量)',
           out: '小方 100\n3'
         }],
         tips: [
@@ -105,7 +105,7 @@ export const CHAPTERS: Chapter[] = [
           '可以带类型写，也可以不带。带类型时编译器知道它是什么，补全和检查更准；不带也可以，运行时按值推断。'
         ],
         codes: [{
-          code: 'int age = 20\nfloat pi = 3.14159\nstr name = "小方"\nbool ok = true\n\n-- 也可以不写类型\nscore = 95\nprint(age)\nprint(name)\nprint(ok)\nprint(score)',
+          code: 'int age = 20\nfloat pi = 3.14159\nstr name = "小方"\nbool ok = true\n\n/* 也可以不写类型\nscore = 95\nprint(age)\nprint(name)\nprint(ok)\nprint(score)',
           out: '20\n小方\ntrue\n95'
         }]
       },
@@ -114,7 +114,7 @@ export const CHAPTERS: Chapter[] = [
         title: '六种基本类型',
         paras: ['这就是全部的内置类型，没有更多了——刻意保持小。'],
         codes: [{
-          code: 'print(type(1))          -- int\nprint(type(1.5))        -- float\nprint(type("abc"))      -- str\nprint(type(true))       -- bool\nprint(type([1, 2]))     -- list\nprint(type({"k": 1}))   -- dict',
+          code: 'print(type(1))          /* int\nprint(type(1.5))        /* float\nprint(type("abc"))      /* str\nprint(type(true))       /* bool\nprint(type([1, 2]))     /* list\nprint(type({"k": 1}))   /* dict',
           out: 'int\nfloat\nstr\nbool\nlist\ndict'
         }],
         tips: [
@@ -143,7 +143,7 @@ export const CHAPTERS: Chapter[] = [
           '类的方法里，self.xxx 是实例字段，裸名 xxx 也能读到同名字段。'
         ],
         codes: [{
-          code: 'int total = 100\n\nfunction show()\n    print(total)   -- 读得到全局\n\nshow()',
+          code: 'int total = 100\n\nfunction show()\n    print(total)   /* 读得到全局\n\nshow()',
           out: '100'
         }]
       }
@@ -225,7 +225,7 @@ export const CHAPTERS: Chapter[] = [
         id: 'slice',
         title: '下标与切片',
         codes: [{
-          code: 'str s = "abcdef"\nprint(s[0])          -- a\nprint(s[-1])         -- f\nprint(s.substr(1, 3))  -- bcd\nprint(s.substr(0, 3))  -- abc\nprint(s.substr(3))     -- def',
+          code: 'str s = "abcdef"\nprint(s[0])          /* a\nprint(s[-1])         /* f\nprint(s.substr(1, 3))  /* bcd\nprint(s.substr(0, 3))  /* abc\nprint(s.substr(3))     /* def',
           out: 'a\nf\nbcd\nabc\ndef'
         }],
         tips: [
@@ -310,7 +310,7 @@ export const CHAPTERS: Chapter[] = [
         id: 'repeat',
         title: 'repeat 与 forever',
         codes: [{
-          code: 'repeat(3)\n    print("滴答")\n\n-- forever 是无限循环，靠 break 跳出\nint n = 0\nforever\n    n++\n    if (n >= 3)\n        break\nprint(n)',
+          code: 'repeat(3)\n    print("滴答")\n\n/* forever 是无限循环，靠 break 跳出\nint n = 0\nforever\n    n++\n    if (n >= 3)\n        break\nprint(n)',
           out: '滴答\n滴答\n滴答\n3'
         }]
       },
@@ -324,7 +324,7 @@ export const CHAPTERS: Chapter[] = [
           '**3. 函数里声明的变量出不了函数**：外面读它会报「变量没有定义」——这是好事，能挡住打错名字。'
         ],
         codes: [{
-          code: 'for i in range(3)\n    print(i)\nprint(i)   -- 2：循环变量活到循环外\n\nif (true)\n    int a = 1\nprint(a)      -- 1：块内声明块外可见',
+          code: 'for i in range(3)\n    print(i)\nprint(i)   /* 2：循环变量活到循环外\n\nif (true)\n    int a = 1\nprint(a)      /* 1：块内声明块外可见',
           out: '0\n1\n2\n2\n1'
         }],
         tips: [
@@ -345,7 +345,7 @@ export const CHAPTERS: Chapter[] = [
         id: 'list-basic',
         title: '创建与访问',
         codes: [{
-          code: 'list xs = [3, 1, 2]\nprint(xs)\nprint(len(xs))\nprint(xs[0])\nprint(xs[-1])\n\n-- 也可以先声明再一个个加\nlist ys\nadd 10 to ys\nadd 20 to ys\nprint(ys)',
+          code: 'list xs = [3, 1, 2]\nprint(xs)\nprint(len(xs))\nprint(xs[0])\nprint(xs[-1])\n\n/* 也可以先声明再一个个加\nlist ys\nadd 10 to ys\nadd 20 to ys\nprint(ys)',
           out: '[3, 1, 2]\n3\n3\n2\n[10, 20]'
         }]
       },
@@ -375,7 +375,7 @@ export const CHAPTERS: Chapter[] = [
         id: 'list-slice',
         title: '切片与嵌套',
         codes: [{
-          code: 'list xs = [10, 20, 30, 40, 50]\nprint(xs.slice(1, 3))\nprint(xs.slice(2))\n\n-- 列表里可以放列表\nlist grid = [[1, 2], [3, 4]]\nprint(grid[1][0])\nprint(grid)',
+          code: 'list xs = [10, 20, 30, 40, 50]\nprint(xs.slice(1, 3))\nprint(xs.slice(2))\n\n/* 列表里可以放列表\nlist grid = [[1, 2], [3, 4]]\nprint(grid[1][0])\nprint(grid)',
           out: '[20, 30]\n[30, 40, 50]\n3\n[[1, 2], [3, 4]]'
         }],
         tips: [
@@ -416,7 +416,7 @@ export const CHAPTERS: Chapter[] = [
         title: '嵌套与复杂结构',
         paras: ['字典里可以放列表，列表里也可以放字典——这就是"数据建模"的全部工具。'],
         codes: [{
-          code: '-- 一行一句：字面量要写在一行里\ndict player = {"name": "阿方", "hp": 100, "bag": ["剑", "药"]}\nprint(player["name"])\nprint(player["bag"][0])\n\nlist team = [{"name": "A", "lv": 3}, {"name": "B", "lv": 5}]\nfor m in team\n    print(join(m["name"], " Lv.", m["lv"]))',
+          code: '/* 一行一句：字面量要写在一行里\ndict player = {"name": "阿方", "hp": 100, "bag": ["剑", "药"]}\nprint(player["name"])\nprint(player["bag"][0])\n\nlist team = [{"name": "A", "lv": 3}, {"name": "B", "lv": 5}]\nfor m in team\n    print(join(m["name"], " Lv.", m["lv"]))',
           out: '阿方\n剑\nA Lv.3\nB Lv.5'
         }]
       }
@@ -586,9 +586,9 @@ export const CHAPTERS: Chapter[] = [
           '工程里的 .co 文件可以互相 import。import "lib.co" 之后，lib.co 里的顶层函数和类就能用了。后缀可以省略：import "lib" 也行。'
         ],
         codes: [{
-          code: '-- lib.co\nfunction twice(x)\n    return x * 2'
+          code: '/* lib.co\nfunction twice(x)\n    return x * 2'
         }, {
-          code: '-- main.co\nimport "lib.co"\nprint(twice(21))   -- 42'
+          code: '/* main.co\nimport "lib.co"\nprint(twice(21))   /* 42'
         }],
         tips: [
           { kind: 'warn', text: 'import 的文件里如果有运行期错误，调用方会看到带文件名的调用栈，方便定位。' },
@@ -643,7 +643,7 @@ export const CHAPTERS: Chapter[] = [
         id: 'bi-type',
         title: '类型判断',
         codes: [{
-          code: 'print(type(1))          -- int\nprint(type("1"))        -- str\nprint(type(1) == "int")  -- true\nprint(type("1") == "int")  -- false',
+          code: 'print(type(1))          /* int\nprint(type("1"))        /* str\nprint(type(1) == "int")  /* true\nprint(type("1") == "int")  /* false',
           out: 'int\nstr\ntrue\nfalse'
         }],
         tips: [
@@ -782,10 +782,10 @@ print(ui.bar(1, 4, 8))`,
         title: 'if 忘了写条件',
         paras: ['写成光秃秃的 if 会直接报错——这是故意的。否则整段分支会变成永不执行的死代码，你还以为逻辑跑过了。'],
         codes: [{
-          code: '-- 错：if 后面没有条件\nif\n    print("永远不会执行")',
+          code: '/* 错：if 后面没有条件\nif\n    print("永远不会执行")',
           out: '(报错) if 后面要跟条件，例如 if (a > 1)'
         }, {
-          code: '-- 对\nif (true)\n    print("会执行")',
+          code: '/* 对\nif (true)\n    print("会执行")',
           out: '会执行'
         }]
       },
@@ -811,7 +811,7 @@ print(ui.bar(1, 4, 8))`,
           '想要独立副本，用 a.slice()（或 a + [] 这种新建）。改副本不会影响原件。'
         ],
         codes: [{
-          code: 'list a = [1, 2]\nlist b = a\nb.push(3)\nprint(a)   -- [1, 2, 3]：同一份\n\nlist c = a.slice()\nc.push(4)\nprint(a)   -- [1, 2, 3]：c 是副本\nprint(c)',
+          code: 'list a = [1, 2]\nlist b = a\nb.push(3)\nprint(a)   /* [1, 2, 3]：同一份\n\nlist c = a.slice()\nc.push(4)\nprint(a)   /* [1, 2, 3]：c 是副本\nprint(c)',
           out: '[1, 2, 3]\n[1, 2, 3]\n[1, 2, 3, 4]'
         }]
       },
@@ -820,7 +820,7 @@ print(ui.bar(1, 4, 8))`,
         title: '字典取不存在的键',
         paras: ['会报错。不确定时用 get(键, 默认值)。'],
         codes: [{
-          code: 'dict d = {"a": 1}\nprint(d.get("b", 0))\n-- print(d["b"])  ← 这行会报错',
+          code: 'dict d = {"a": 1}\nprint(d.get("b", 0))\n/* print(d["b"])  ← 这行会报错',
           out: '0'
         }]
       },
@@ -855,7 +855,7 @@ print(ui.bar(1, 4, 8))`,
           'addr(x) 拿到变量 x 的地址，read(p) 读出它指向的那一格；write(p, 值) 写回去——改的就是变量本身。'
         ],
         codes: [{
-          code: 'int x = 10\naddr p = addr(x)\nprint(read(p))      -- 10\nwrite(p, 42)\nprint(x)       -- 42\nprint(read(p))      -- 42',
+          code: 'int x = 10\naddr p = addr(x)\nprint(read(p))      /* 10\nwrite(p, 42)\nprint(x)       /* 42\nprint(read(p))      /* 42',
           out: '10\n42\n42'
         }],
         tips: [{ kind: 'tip', text: '*p += 1、*p *= 2 这些复合赋值也走指针，写回的还是变量本身。' }]
@@ -867,7 +867,7 @@ print(ui.bar(1, 4, 8))`,
           'addr(xs, i) 指向列表里的那一格（共享同一块内存，不是拷贝）。改 read(p) 就等于改 xs[i]，写"交换两个元素"这类代码特别顺手。'
         ],
         codes: [{
-          code: 'list xs = [1, 2, 3]\naddr p = addr(xs, 1)\nprint(read(p))      -- 2\nwrite(p, 9)\nprint(xs[1])   -- 9',
+          code: 'list xs = [1, 2, 3]\naddr p = addr(xs, 1)\nprint(read(p))      /* 2\nwrite(p, 9)\nprint(xs[1])   /* 9',
           out: '2\n9'
         }]
       },
@@ -879,7 +879,7 @@ print(ui.bar(1, 4, 8))`,
           'p[k] 等价于 *(p + k)——相对当前位置的偏移，负数就是往回。'
         ],
         codes: [{
-          code: 'list ys = [10, 20, 30]\naddr a = addr(ys, 0)\nprint(read(a + 1))   -- 20\nprint(a[2])       -- 30\nptr b = a + 2\nprint(read(b - 1))   -- 20\nprint(b - a)      -- 2',
+          code: 'list ys = [10, 20, 30]\naddr a = addr(ys, 0)\nprint(read(a + 1))   /* 20\nprint(a[2])       /* 30\nptr b = a + 2\nprint(read(b - 1))   /* 20\nprint(b - a)      /* 2',
           out: '20\n30\n20\n2'
         }],
         tips: [{ kind: 'warn', text: '指针越界不会踩内存，而是当场报错——这是它比 C 安全的地方。' }]
@@ -891,7 +891,7 @@ print(ui.bar(1, 4, 8))`,
           'Copper 的参数默认按值传。想让函数改外面的变量，传它的地址进去——这就是最朴素的"输出参数"。'
         ],
         codes: [{
-          code: 'fn bump(ptr p)\n    write(p, read(p) + 1)\n\nint x = 41\nbump(addr(x))\nprint(x)   -- 42',
+          code: 'fn bump(ptr p)\n    write(p, read(p) + 1)\n\nint x = 41\nbump(addr(x))\nprint(x)   /* 42',
           out: '42'
         }]
       },
@@ -931,10 +931,10 @@ print(ui.bar(1, 4, 8))`,
           '**free 只认 alloc 出来的块**：free(addr(x))、free(addr(xs, 0)) 一律报「这不是 alloc 出来的内存…不能 free」，不会把栈或列表搞坏。'
         ],
         codes: [{
-          code: 'list xs = [1, 2]\naddr p = addr(xs, 0)\nxs.push(3)\nprint(read(p))        -- 1：扩容不影响\nprint(xs)\n\nxs = [7, 8]      -- 换了一个列表\nprint(read(p))        -- 1：指针还指旧的\nprint(xs)', 
+          code: 'list xs = [1, 2]\naddr p = addr(xs, 0)\nxs.push(3)\nprint(read(p))        /* 1：扩容不影响\nprint(xs)\n\nxs = [7, 8]      /* 换了一个列表\nprint(read(p))        /* 1：指针还指旧的\nprint(xs)', 
           out: '1\n[1, 2, 3]\n1\n[7, 8]'
         }, {
-          code: 'list xs = [1, 2]\naddr p = addr(xs, 1)\nxs.pop()\nprint(read(p))   -- 被指的这格没了',
+          code: 'list xs = [1, 2]\naddr p = addr(xs, 1)\nxs.pop()\nprint(read(p))   /* 被指的这格没了',
           out: '(报错) 指针指到第 1 格，越界了'
         }],
         tips: [
@@ -977,7 +977,7 @@ print(ui.bar(1, 4, 8))`,
           '换来的是：分配只是"游标加几格"，没有每次 alloc 的开销；释放只有一次，不会漏掉某一块。代价是不能单独释放中间某一块——arena 要的就是这个取舍。'
         ],
         codes: [{
-          code: 'addr pool = alloc(32)\nint off = 0\n\n-- 切 n 格：cursor 里存"下一个空位"，返回这块的起点偏移\nfn carve(ptr cursor, int n)\n    int at = read(cursor)\n    if at + n > len(pool)\n        return -1\n    write(cursor, at + n)\n    return at\n\nint a = carve(addr(off), 3)\npool[a] = 100\npool[a + 1] = 200\npool[a + 2] = 300\n\nint b = carve(addr(off), 2)\npool[b] = 7\npool[b + 1] = 8\n\nint big = carve(addr(off), 99)\nif big == -1\n    print("池子不够了，这块没给")\n\nprint("a 在", a, "b 在", b, "光标", off)\nprint(pool[a], pool[a + 1], pool[a + 2])\nprint(pool[b], pool[b + 1])\nfree(pool)',
+          code: 'addr pool = alloc(32)\nint off = 0\n\n/* 切 n 格：cursor 里存"下一个空位"，返回这块的起点偏移\nfn carve(ptr cursor, int n)\n    int at = read(cursor)\n    if at + n > len(pool)\n        return -1\n    write(cursor, at + n)\n    return at\n\nint a = carve(addr(off), 3)\npool[a] = 100\npool[a + 1] = 200\npool[a + 2] = 300\n\nint b = carve(addr(off), 2)\npool[b] = 7\npool[b + 1] = 8\n\nint big = carve(addr(off), 99)\nif big == -1\n    print("池子不够了，这块没给")\n\nprint("a 在", a, "b 在", b, "光标", off)\nprint(pool[a], pool[a + 1], pool[a + 2])\nprint(pool[b], pool[b + 1])\nfree(pool)',
           out: '池子不够了，这块没给\na 在 0 b 在 3 光标 5\n100 200 300\n7 8'
         }],
         tips: [
@@ -1016,7 +1016,7 @@ print(ui.bar(1, 4, 8))`,
           '想要三层也行：***p 依次解开三层。'
         ],
         codes: [{
-          code: 'int x = 7\naddr p = addr(x)\naddr pp = addr(p)\nprint(read(read(pp)))      -- 7\nwrite(read(pp), 9)\nprint(x)         -- 9',
+          code: 'int x = 7\naddr p = addr(x)\naddr pp = addr(p)\nprint(read(read(pp)))      /* 7\nwrite(read(pp), 9)\nprint(x)         /* 9',
           out: '7\n9'
         }],
         tips: [{ kind: 'note', text: '写成 *(\*pp) 结果一样。前缀 ** 只是为了少写一层括号，AST 上是同一个东西。' }]
@@ -1029,7 +1029,7 @@ print(ui.bar(1, 4, 8))`,
           '这是二级指针最常见的用途：函数里想让你手里的指针改指向，就传它的地址。'
         ],
         codes: [{
-          code: 'int x = 1\nint y = 2\naddr p = addr(x)\naddr pp = addr(p)\nwrite(read(pp), 5)  -- 改的是 x\nwrite(pp, addr(y))  -- 让 p 改指 y\nprint(x, y, read(p))  -- 5 2 2',
+          code: 'int x = 1\nint y = 2\naddr p = addr(x)\naddr pp = addr(p)\nwrite(read(pp), 5)  /* 改的是 x\nwrite(pp, addr(y))  /* 让 p 改指 y\nprint(x, y, read(p))  /* 5 2 2',
           out: '5 2 2'
         }]
       },
@@ -1079,7 +1079,7 @@ print(ui.bar(1, 4, 8))`,
           'alloc 出来的内存不受作用域限制，所以第 15 章那种"函数里申请、外面 free"才是对的用法。'
         ],
         codes: [{
-          code: 'fn bad()\n    int local = 42\n    return addr(local)\n\naddr p = bad()\nprint(read(p))   -- 这里会报错，不是打印 42',
+          code: 'fn bad()\n    int local = 42\n    return addr(local)\n\naddr p = bad()\nprint(read(p))   /* 这里会报错，不是打印 42',
           out: '(报错) 这个指针指向的变量已经离开作用域了（悬空指针）'
         }],
         tips: [{ kind: 'warn', text: 'free 之后再解引用、重复 free、free 一个来自列表的地址，同样都会当场报错。' }]

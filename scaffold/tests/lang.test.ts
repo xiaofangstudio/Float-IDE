@@ -61,10 +61,12 @@ print(near(degrees(pi()), 180))
     eq('浏览器里系统函数给明确提示', r.out.filter((s) => s.startsWith('接住')).length >= 1, true);
   }
 
-  /* ── 两个减号是整行注释（后来又恢复了） ── */
+  /* ── 老的 -- 注释：报错并给改法 ── */
   {
-    const r = await run(`-- 这行是注释\n`);
-    eq('两个减号是注释', r.err.length === 0, true);
+    const r = await run(`/* 这行是注释\n`);
+    eq('斜杠星整行注释', r.err.length === 0, true);
+    const r2 = await run(`-- 这行是老注释\n`);
+    eq('老的 -- 注释要报错', r2.err.length > 0 && r2.err.join('').includes('/*'), true);
   }
 
   /* ── alias / #define（类 #define 的文本替换） ── */
@@ -384,16 +386,16 @@ function hello()
     eq(`${name}（解释不该报错）`, b.err, []);
   };
 
-  /* ── 注释两种写法 ── */
-  await both('两个减号是整行注释', `
--- 这是注释
+  /* ── 注释：/* 到行尾 ── */
+  await both('斜杠星是整行注释', `
+/* 这是注释
 int a = 1
--- 又一行注释
+/* 又一行注释
 print(a)
 `, ['1']);
   await both('缩进的注释也算注释', `
 if (true)
-    -- 块里的注释
+    /* 块里的注释
     print("ok")
 `, ['ok']);
   await both('后缀自减照旧', `
@@ -401,11 +403,21 @@ int i = 3
 i--
 print(i)
 `, ['2']);
-  await both('行尾注释用两个减号', `
-int b = 2 -- 行尾说明
+  await both('行尾注释用斜杠星', `
+int b = 2 /* 行尾说明
 print(b)
 print("http://a.b")
 `, ['2', 'http://a.b']);
+
+  /* ── 老的 -- 注释：报错并给改法 ── */
+  {
+    const r = await run(`int a = 1 /* 行尾注释\nprint(a)\n`);
+    const r2 = await run(`int a = 1 -- 老式注释\nprint(a)\n`);
+    if (r2.err.length === 0 || !r2.err.join('').includes('/*')) {
+      throw new Error('老 -- 注释应该报错并提示改成 /*，实际：' + r2.err.join(' | '));
+    }
+    if (r.out.join('\n') !== '1') throw new Error('新注释不该报错');
+  }
   await both('两个斜杠是整除', `
 print(7 // 2)
 print(-7 // 2)

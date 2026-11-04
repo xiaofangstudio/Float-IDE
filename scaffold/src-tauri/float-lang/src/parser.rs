@@ -36,7 +36,10 @@ struct Line {
 }
 
 /// 把源码切成"有效行"：去 BOM、统一换行、Tab 展开成 4 空格、剥掉 `--` 注释。
-fn split_source(src: &str) -> Vec<Line> {
+fn split_source(src: &str) -> (Vec<Line>, Option<(u32, String)>) {
+    // 老式 `--` 注释撞上时的报错要带行号，但这里没有 Parser（拿不到 file），
+    // 所以先记下来，由 parse_program 落成正式错误。
+    let mut lex_err: Option<(u32, String)> = None;
     let text = src.trim_start_matches('\u{feff}').replace("\r\n", "\n").replace('\r', "\n");
     let mut out: Vec<Line> = Vec::new();
     for (idx, raw_line) in text.split('\n').enumerate() {
@@ -47,9 +50,15 @@ fn split_source(src: &str) -> Vec<Line> {
             continue;
         }
         let no = idx as u32 + 1;
-        // 注释只有一种写法：`--`（`--` 后面要跟空白或行尾，`i--` 自减不受影响）。
+        // 注释只有一种写法：`/*` 到行尾（不用闭合）。老写法 `--` 在 code_part 里报错。
         // `//` 不是注释，它是整除运算符。
-        let (code, comment) = code_part(trimmed);
+        let (code, comment) = match code_part(trimmed) {
+            Ok(x) => x,
+            Err(m) => {
+                lex_err.get_or_insert((no, m));
+                (trimmed.to_string(), None)
+            }
+        };
         let is_comment = code.trim().is_empty();
         let cleaned = if is_comment {
             String::new()
@@ -82,7 +91,7 @@ fn split_source(src: &str) -> Vec<Line> {
             open_depth: line_depth,
         });
     }
-    out
+    (out, lex_err)
 }
 
 /// 数一行里"没闭合的括号"（字符串里的不算）
@@ -814,14 +823,21 @@ const MAX_EXPR_DEPTH: usize = 256;
 /// 入口：把源码解析成 Program
 pub fn parse_program(file: &str, src: &str) -> Program {
     let file: Rc<str> = Rc::from(file);
+    let (lines, lex_err) = split_source(src);
     let mut p = Parser {
         class_fields: std::collections::HashMap::new(),
         file: Rc::clone(&file),
-        lines: split_source(src),
+        lines,
         pos: 0,
         errors: Vec::new(),
         depth: 0,
     };
+    if let Some((no, msg)) = lex_err {
+        // 老式 `--` 注释：报错带改法，程序体不再解析
+        p.errors.push(FloatError::new(msg, Span::new(&file, no, 1, 1)));
+        let body = Vec::new();
+        return Program { file, body, errors: p.errors };
+    }
     let body = p.parse_block(0);
     Program { file, body, errors: p.errors }
 }
@@ -884,7 +900,10 @@ impl Parser {
         let mut i = 0;
         while i < body_lines.len() {
             let bl = &body_lines[i];
-            let code_l = code_part(&bl.code).0;
+            // bl.code 已经剥过注释，理论上不会再撞上老 `--` 注释；真撞上就把错误带出去
+            let code_l = code_part(&bl.code).map_err(|m| {
+                FloatError::new(m, Span::new(&self.file, bl.no, bl.indent as u32 + 1, bl.indent as u32 + 1))
+            })?.0;
             let col = bl.indent + 1;
             let toks_l = tokenize_line(&code_l, bl.no, col as u32)
                 .map_err(|e| FloatError::new(e.message, Span::point(&self.file, e.line, e.col)))?;
@@ -1625,12 +1644,16 @@ impl Parser {
                     return Ok(Some(Stmt::new(StmtKind::Continue, self.line_span(ln))));
                 }
                 "stop" => {
-                    // stop / stop all / stop now / stop script
-                    if toks.len() == 1
-                        || matches!(toks.get(1).map(|t| t.text.as_str()), Some("all") | Some("now") | Some("script"))
-                    {
+                    // 只留 stop（原先 stop / stop all / stop now / stop script 四个名字一个行为）
+                    if toks.len() == 1 {
                         self.pos += 1;
                         return Ok(Some(Stmt::new(StmtKind::Stop, self.line_span(ln))));
+                    }
+                    if matches!(toks.get(1).map(|t| t.text.as_str()), Some("all") | Some("now") | Some("script")) {
+                        return Err(FloatError::new(
+                            format!("stop {} 已经合并：直接写 stop", toks[1].text),
+                            self.line_span(ln),
+                        ));
                     }
                 }
                 "return" => {

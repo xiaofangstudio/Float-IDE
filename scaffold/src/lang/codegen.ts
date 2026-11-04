@@ -1094,7 +1094,10 @@ ${genBlock(s.body, c2)}  }
       }
       if (getBuiltin(name)) return `B[${JSON.stringify(name)}](${args})`;
       if (fnNames.has(name)) return `$.f[${JSON.stringify(name)}]($, ${args})`;
-      if (classInfo.has(name)) return `$.newInst(${JSON.stringify(name)}, [${args}])`;
+      if (classInfo.has(name)) {
+        // 类名当函数调 = 实例化（和 new Hero(...) 撞形状，读代码的人分不清），编译期直接拦
+        throw new CompileError(`「${name}」是类名，要创建实例请写 new ${name}(…)`);
+      }
       if (ctx.className && methodsOf(ctx.className).has(name) && !ctx.locals.has(name)) {
         return `O.mcall($.self, ${JSON.stringify(name)}, [${args}], $)`;
       }

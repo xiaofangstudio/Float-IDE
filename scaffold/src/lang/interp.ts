@@ -1164,7 +1164,10 @@ export class Runner {
           const fn = this.funcs.get(name);
           if (fn) return yield* this.callUser(fn, args, null, e);
           const cls = this.classes.get(name);
-          if (cls) return yield* this.instantiate(cls, args, e);
+          if (cls) {
+            // 类名当函数调 = 实例化（和 new Hero(...) 撞形状，读代码的人分不清），直接拦
+            throw new FloatError(`「${name}」是类名，要创建实例请写 new ${name}(…)`, e);
+          }
           throw new FloatError(`函数「${name}」没有定义`, e);
         }
         if (e.callee.k === 'member') {

@@ -1,6 +1,6 @@
 [package]
 name = "floatide"
-version = "1.6.0"
+version = "1.7.0"
 description = "Float IDE：Copper 语言（原 CW Script）的写作与调试"
 authors = ["小方工作室"]
 license = "MIT"

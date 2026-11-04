@@ -255,21 +255,21 @@ fn 整除() {
     assert!(e.contains("idiv"), "{}", e);
 }
 
-/* ───────── 注释：两种写法 ───────── */
+// ───────── 注释：斜杠星到行尾 ─────────
 
 #[test]
-fn 两个减号是整行注释() {
+fn 斜杠星是整行注释() {
     assert_eq!(
-        out("-- 这是注释\nint a = 1\n-- 又一行注释\nprint(a)"),
+        out("/* 这是注释\nint a = 1\n/* 又一行注释\nprint(a)"),
         "1\n"
     );
     // 缩进的注释
     assert_eq!(
-        out("if (true)\n    -- 块里的注释\n    print(\"ok\")"),
+        out("if (true)\n    /* 块里的注释\n    print(\"ok\")"),
         "ok\n"
     );
     // 注释行不影响行号
-    let e = match run_text("-- 注释\n-- 注释\nprint(1 / 0)") {
+    let e = match run_text("/* 注释\n/* 注释\nprint(1 / 0)") {
         Err(e) => e,
         Ok(_) => panic!("该报错"),
     };
@@ -290,11 +290,17 @@ fn 两个减号不影响自减() {
 }
 
 #[test]
-fn 行尾注释用两个减号() {
-    assert_eq!(out("int a = 1 -- 行尾注释\nprint(a)"), "1\n");
+fn 行尾注释用斜杠星() {
+    assert_eq!(out("int a = 1 /* 行尾注释\nprint(a)"), "1\n");
     // 字符串里的 // 和 -- 都不算注释/运算符
     assert_eq!(out("print(\"http://a.b\")"), "http://a.b\n");
     assert_eq!(out("print(\"a--b\")"), "a--b\n");
+    // 老的 -- 注释：报错并提示改成 /*
+    let m = match run_text("int a = 1 -- 老式注释\nprint(a)") {
+        Ok(_) => panic!("老 -- 注释该报错"),
+        Err(e) => e.message,
+    };
+    assert!(m.contains("/*"), "报错要提示新写法：{}", m);
 }
 
 #[test]

@@ -98,8 +98,22 @@ const REGISTRY: BuiltinSpec[] = [
   spec({ name: 'atan2', sig: 'atan2(y, x)', category: '数学', doc: '两参数反正切', min: 2, max: 2, writes: '__last_calc', fn: (a) => Math.atan2(num(a[0], 'atan2'), num(a[1], 'atan2')) }),
   spec({ name: 'log', sig: 'log(a)', category: '数学', doc: '自然对数', min: 1, max: 1, writes: '__last_calc', fn: (a) => Math.log(num(a[0], 'log')) }),
   spec({ name: 'exp', sig: 'exp(a)', category: '数学', doc: 'e 的 a 次方', min: 1, max: 1, writes: '__last_calc', fn: (a) => Math.exp(num(a[0], 'exp')) }),
-  spec({ name: 'min', sig: 'min(a, b, …)', category: '数学', doc: '最小值', min: 1, max: 99, writes: '__last_calc', fn: (a) => Math.min(...a.map((x) => num(x, 'min'))) }),
-  spec({ name: 'max', sig: 'max(a, b, …)', category: '数学', doc: '最大值', min: 1, max: 99, writes: '__last_calc', fn: (a) => Math.max(...a.map((x) => num(x, 'max'))) }),
+  spec({
+    name: 'min', sig: 'min(a, b, …) 或 min(列表)', category: '数学', doc: '最小值（多参数或一个列表）',
+    min: 1, max: 99, writes: '__last_calc',
+    fn: (a) => {
+      const xs = a.length === 1 && Array.isArray(a[0]) ? a[0] : a;
+      return Math.min(...xs.map((x) => num(x, 'min')));
+    }
+  }),
+  spec({
+    name: 'max', sig: 'max(a, b, …) 或 max(列表)', category: '数学', doc: '最大值（多参数或一个列表）',
+    min: 1, max: 99, writes: '__last_calc',
+    fn: (a) => {
+      const xs = a.length === 1 && Array.isArray(a[0]) ? a[0] : a;
+      return Math.max(...xs.map((x) => num(x, 'max')));
+    }
+  }),
 
   /* 比较 / 逻辑 */
   spec({ name: 'lt', sig: 'lt(a, b)', category: '比较', doc: 'a < b', min: 2, max: 2, writes: '__last_cmp', fn: (a) => (typeof a[0] === 'string' && typeof a[1] === 'string' ? a[0] < a[1] : num(a[0], 'lt') < num(a[1], 'lt')) }),
@@ -242,7 +256,7 @@ const REGISTRY: BuiltinSpec[] = [
   spec({ name: 'post', sig: 'post(网址, 内容)', category: '网络', doc: 'POST 请求，把内容发出去并返回响应正文（桌面版）', min: 2, max: 2, writes: '__last_str', fn: (a) => desktopOnly('post', a) }),
 
   /* 数学：三角函数 / 对数 / 整数组合 / 判断 / 常量 */
-  spec({ name: 'idiv', sig: 'idiv(a, b)', category: '数学', doc: '整除：向下取整的除法（7 idiv 2 = 3，-7 idiv 2 = -4）。语言里的 // 是注释，所以用这个函数名', min: 2, max: 2, writes: '__last_calc', fn: (a) => {
+  spec({ name: 'idiv', sig: 'idiv(a, b)', category: '数学', doc: '整除：向下取整的除法（7 idiv 2 = 3，-7 idiv 2 = -4）。与 `//` 运算符同义，idiv 是兼容旧版本的写法', min: 2, max: 2, writes: '__last_calc', fn: (a) => {
     const x = num(a[0], 'idiv');
     const y = num(a[1], 'idiv');
     if (!y) bad('idiv 的除数不能是 0');

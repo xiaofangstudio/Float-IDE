@@ -142,9 +142,9 @@ export function registerFloatLanguage(): void {
     types: TYPE_WORDS,
     tokenizer: {
       root: [
-        // 注释只有 `--`（后面要跟空白或行尾，`i--` 自减不受影响）。
-        // `//` 不是注释，它是整除运算符，下面按 operator 上色。
-        [/(^|\s)--(?=\s|$).*$/, 'comment'],
+        // 注释：/* 到行尾（不用闭合）；字符串里的 /* 不算（Monarch 先匹配字符串规则）。
+        // `--` 是自减运算符、`//` 是整除运算符，都按 operator 上色，不当注释。
+        [/\/\*.*$/, 'comment'],
         [/"(?:[^"\\]|\\.)*"/, 'string'],
         [/'(?:[^'\\]|\\.)*'/, 'string'],
         [/__last_[a-z]+/, 'variable.predefined'],
@@ -165,8 +165,8 @@ export function registerFloatLanguage(): void {
   });
 
   monaco.languages.setLanguageConfiguration(LANG_ID, {
-    // 注释只有 `--`（`//` 是整除运算符，拿它当注释会直接把代码变成算式）
-    comments: { lineComment: '--' },
+    // 注释只有 `/*`（`//` 是整除运算符，拿它当注释会直接把代码变成算式）
+    comments: { lineComment: '/*' },
     brackets: [['{', '}'], ['(', ')'], ['[', ']']],
     autoClosingPairs: [
       { open: '{', close: '}' }, { open: '(', close: ')' }, { open: '[', close: ']' },

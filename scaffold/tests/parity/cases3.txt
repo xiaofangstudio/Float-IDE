@@ -87,7 +87,7 @@ print(r[0], r[1])
 int a = 2
 int b = 3
 print("{a} + {b} = {a + b}")
-### stop 变体
+### stop 变体已合并（两边都要报错）
 print("前")
 stop now
 print("后")

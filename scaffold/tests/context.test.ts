@@ -29,9 +29,9 @@ function at(srcWithCaret: string) {
 }
 
 /* ── 注释 ── */
-eq('整行注释', at('-- 说▮明'), { kind: 'comment' });
-eq('行尾注释', at('int a = 1 -- 说▮明'), { kind: 'comment' });
-eq('空注释行', at('--▮'), { kind: 'comment' });
+eq('整行注释', at('/* 说▮明'), { kind: 'comment' });
+eq('行尾注释', at('int a = 1 /* 说▮明'), { kind: 'comment' });
+eq('空注释行', at('/*▮'), { kind: 'comment' });
 
 /* ── 字符串 ── */
 eq('字符串里', at('print("ab▮c")'), { kind: 'string' });

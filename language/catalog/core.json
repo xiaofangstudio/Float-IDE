@@ -2,16 +2,15 @@
   "$schema": "cw-language-catalog/1",
   "name": "Copper",
   "shortName": "Float",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "basedOn": "Copper（原 CW Script）",
-  "status": "Copper 核心语言 + 0.4 扩展：异常处理、方法链、多返回值；界面按 PyCharm 新 UI 重做",
+  "status": "Copper 核心语言 + 0.5 修订：注释改 /*、// 改整除、指针全面可用；含 0.4 扩展：异常处理、方法链、多返回值",
   "fileExtension": ".cw",
   "encoding": "UTF-8",
   "lineEnding": "LF",
   "layout": {
     "mode": "line",
-    "lineComment": "//",
-    "lineSkip": "--",
+    "lineComment": "/*（写到行尾，不用闭合）",
     "semicolon": "行尾 ; 可选，匹配后忽略",
     "braces": "{ } 可选；块是否存在只由缩进决定",
     "indent": "子语句缩进必须严格大于父语句；缩进回退到父级或更浅即结束当前块",
@@ -24,7 +23,9 @@
     "str",
     "bool",
     "list",
-    "dict"
+    "dict",
+    "ptr",
+    "addr"
   ],
   "specialVariables": [
     {
@@ -156,7 +157,7 @@
     {
       "ast": "stop",
       "category": "control",
-      "syntax": "stop all\nstop now\nstop script",
+      "syntax": "stop",
       "body": false
     },
     {
@@ -196,6 +197,13 @@
       "category": "variable",
       "syntax": "name--",
       "body": false
+    },
+    {
+      "ast": "deref",
+      "category": "pointer",
+      "syntax": "*p = 值（通过指针写回）\n表达式中写 *p（读出指向的那一格）",
+      "body": false,
+      "notes": "取地址用 &变量 或 &列表[i]；指针支持加减格数、p[i] 寻址、相减求间隔、for … in 遍历；悬空与越界当场报错，不踩内存"
     },
     {
       "ast": "func_def",
@@ -554,22 +562,16 @@
     {
       "ast": "comment",
       "category": "trivia",
-      "syntax": "// 文本",
-      "body": false
+      "syntax": "/* 文本",
+      "body": false,
+      "notes": "从 /* 写到行尾，不用闭合；老写法 -- 注释已取消（-- 现在只作自减）"
     },
     {
       "ast": "group_start",
       "category": "trivia",
-      "syntax": "// ─ 组名 ─",
+      "syntax": "/* ─ 组名 ─",
       "body": false,
       "notes": "供大纲折叠，不参与执行"
-    },
-    {
-      "ast": "line_skip",
-      "category": "trivia",
-      "syntax": "-- 任意文本",
-      "body": false,
-      "notes": "整行跳过，不生成 AST 节点"
     },
     {
       "ast": "unknown",
@@ -697,7 +699,8 @@
         "operators": [
           "*",
           "/",
-          "%"
+          "%",
+          "//"
         ],
         "precedence": 60,
         "assoc": "left"
@@ -714,20 +717,24 @@
       "-",
       "+",
       "!",
-      "~"
+      "~",
+      "&（取地址：&变量、&列表[i]）",
+      "*（解引用：*p）"
     ],
     "postfix": [
       "下标 xs[i]",
       "成员 obj.field",
       "调用 f(…) / obj.method(…)",
-      "方法链 s.trim().upper()"
+      "方法链 s.trim().upper()",
+      "自增自减 x++ / x--"
     ],
     "callable": [
-      "数学：add sub mul div mod pow rand random sqrt abs floor ceil round sin cos tan asin acos atan atan2 log exp min max",
+      "数学：add sub mul div mod pow rand random sqrt abs floor ceil round sin cos tan asin acos atan atan2 log exp min max idiv",
       "比较：lt gt eq listin dictin contain",
       "逻辑：and or not",
       "字符串：join char strlen upper lower trim split indexof substr",
       "集合：len range dictallkey dictallval",
+      "内存：alloc free",
       "转换：int float str bool",
       "类型：type"
     ],
@@ -786,7 +793,10 @@
   ],
   "compatibility": [
     "0.1.0 的所有写法仍然有效：变量声明、指令行、__last_*、out / balo、if/elif/else、import",
-    "0.2 起 var_decl 允许表达式；带参函数调用已打通；类与对象是新增能力，原版 CW Script 中没有"
+    "0.2 起 var_decl 允许表达式；带参函数调用已打通；类与对象是新增能力，原版 CW Script 中没有",
+    "0.5 起 -- 不再是注释（注释改用 /*，写到行尾不用闭合），-- 只作自减运算符；用旧写法会报错并提示改法",
+    "0.5 起 // 是整除运算符（0.4 目录里它还写成注释），等价内建函数 idiv 保留",
+    "0.5 起指针全面可用：&取地址、*解引用与写回、指针加减格数与相减、p[i] 寻址、for … in 遍历、alloc/free 手动内存，悬空与越界当场报错"
   ],
   "extensions": {
     "stage": "stage.json"

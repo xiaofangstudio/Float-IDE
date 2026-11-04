@@ -127,6 +127,11 @@ const errCases: { name: string; src: string; needle: RegExp }[] = [
     name: 'free 别人（列表）的地址要明确拒绝',
     src: 'list xs = [1]\nptr p = &xs[0]\nfree(p)\n',
     needle: /不是 alloc|不能 free/
+  },
+  {
+    name: '类名当函数调要报错，提示写 new',
+    src: 'class C\n    int v = 5\nprint(C())\n',
+    needle: /是类名，要创建实例请写 new/
   }
 ];
 
@@ -184,7 +189,7 @@ for (const c of errCases) {
     ['全局读写', 'int g = 1\nfn f()\n    g = 9\nf()\nprint(g)', '9'],
     ['局部遮蔽全局', 'int g = 1\nfn f()\n    int g = 2\n    return g\nprint(f())\nprint(g)', '2|1'],
     ['列表按引用传，重新赋值不影响外面', 'fn addone(list xs)\n    xs.push(9)\nlist a = [1]\naddone(a)\nprint(a)', '[1, 9]'],
-    ['类可以省略 new，也能链式调用', 'class C\n    int v = 5\n    fn get()\n        return v\nprint(C().get())\nprint(new C().get())', '5|5'],
+    ['类要用 new 实例化，也能链式调用', 'class C\n    int v = 5\n    fn get()\n        return v\nprint(new C().get())', '5'],
   ];
   for (const [name, src, want] of cases) {
     const a = await run(src);

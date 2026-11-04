@@ -1,5 +1,5 @@
--- 02 控制结构
--- if / elif / else、while、repeat、for，缩进决定块的范围
+/* 02 控制结构
+/* if / elif / else、while、repeat、for，缩进决定块的范围
 
 int total = 0
 
@@ -7,22 +7,22 @@ repeat(3)
     total += 1
 print("repeat 之后：" + total)
 
--- 次数由变量决定，循环变量随便起名，循环体里能直接用
+/* 次数由变量决定，循环变量随便起名，循环体里能直接用
 int n = 3
 for i in range(n)
     total += i
     print(join("i = ", i, "，total = ", total))
 
--- 嵌套循环各用各的变量
+/* 嵌套循环各用各的变量
 for a in range(2)
     for b in range(2)
         print(join("坐标 ", a, ",", b))
 
--- for i = 1 to 3 含两端
+/* for i = 1 to 3 含两端
 for k = 1 to 3
     print(join("第 ", k, " 轮"))
 
--- 条件分支
+/* 条件分支
 if (total > 12)
     print("大于 12")
 elif (total == 12)
@@ -30,7 +30,7 @@ elif (total == 12)
 else
     print("小于 12")
 
--- while + 跳出：balo 跳过本轮，break 跳出整个循环
+/* while + 跳出：balo 跳过本轮，break 跳出整个循环
 int m = 0
 while (m < 6)
     m++
@@ -40,8 +40,8 @@ while (m < 6)
     if (m == 4)
         break
 
--- ── 空变量：只声明，不写等号，后面也不写东西 ──
--- 按类型给中性初值：int→0、float→0.0、str→""、bool→false、list→[]、dict→{}
+/* ── 空变量：只声明，不写等号，后面也不写东西 ──
+/* 按类型给中性初值：int→0、float→0.0、str→""、bool→false、list→[]、dict→{}
 int 合计
 str 备注
 list 记录
@@ -50,13 +50,13 @@ for i = 1 to 4
     合计 += i
 print("1+2+3+4 =", 合计)
 
--- ── 汇编式算术：add / sub / mul / div / mod ──
--- 空格分隔，不像函数那样非得写括号；也能接任意多个数（左结合）
+/* ── 汇编式算术：add / sub / mul / div / mod ──
+/* 空格分隔，不像函数那样非得写括号；也能接任意多个数（左结合）
 int a = 10
 int b = 3
 int c
 
-c = add a b          -- 等于 c = a + b
+c = add a b          /* 等于 c = a + b
 print("add 10 3 =", c)
 
 print("sub 10 3 =", sub a b)
@@ -64,8 +64,8 @@ print("mul 2 3 4 =", mul 2 3 4)
 print("div 100 5 2 =", div 100 5 2)
 print("mod 10 3 =", mod 10 3)
 
--- 和普通运算符混写也没问题
+/* 和普通运算符混写也没问题
 print("add a b + 10 =", add a b + 10)
 
--- 括号写法一样有效，两种都认
+/* 括号写法一样有效，两种都认
 print("add(1, 2) =", add(1, 2))

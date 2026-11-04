@@ -1,8 +1,8 @@
--- 16 高级指针 —— Copper
--- 多级指针、双指针原地反转、arena（内存池）——指针真正开始干活的地方。
--- 注释只能用 --（// 是整除运算符）。
+/* 16 高级指针 —— Copper
+/* 多级指针、双指针原地反转、arena（内存池）——指针真正开始干活的地方。
+/* 注释只能用 --（// 是整除运算符）。
 
--- ① 多级指针：pp 指向 p，p 指向 x
+/* ① 多级指针：pp 指向 p，p 指向 x
 int x = 7
 ptr p = &x
 ptr pp = &p
@@ -10,7 +10,7 @@ print("**pp =", **pp)
 **pp = 9
 print("x =", x)
 
--- ② 双指针：原地反转列表，不新建列表
+/* ② 双指针：原地反转列表，不新建列表
 list xs = [1, 2, 3, 4, 5]
 int i = 0
 int j = len(xs) - 1
@@ -24,12 +24,12 @@ while i < j
     j -= 1
 print("反转后 =", xs)
 
--- ③ arena：一次申请一整块池子，用游标切出多个不同大小的对象
--- 每个对象只记自己的起始偏移；最后 free(pool) 整块回收。
+/* ③ arena：一次申请一整块池子，用游标切出多个不同大小的对象
+/* 每个对象只记自己的起始偏移；最后 free(pool) 整块回收。
 ptr pool = alloc(32)
 int off = 0
 
--- 切 n 格：cursor 里存"下一个空位"，返回这一块的起点偏移
+/* 切 n 格：cursor 里存"下一个空位"，返回这一块的起点偏移
 fn carve(ptr cursor, int n)
     int at = *cursor
     if at + n > len(pool)
@@ -55,7 +55,7 @@ print("a 块 =", pool[a], pool[a + 1], pool[a + 2])
 print("b 块 =", pool[b], pool[b + 1])
 free(pool)
 
--- ④ 指针当游标：起点不动，p + k 一格一格读
+/* ④ 指针当游标：起点不动，p + k 一格一格读
 ptr buf = alloc(4)
 int m = 0
 while m < 4

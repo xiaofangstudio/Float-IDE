@@ -251,7 +251,16 @@ pub fn call_builtin(name: &str, args: &[Value]) -> R<Value> {
         }
         "min" | "max" => {
             need(args, 1, name)?;
-            let vals: Vec<f64> = args.iter().map(|v| num(v, name)).collect::<R<_>>()?;
+            // 两种用法：min(3, 1, 2) 多参数，或 min([3, 1, 2]) 传一个列表
+            let flat: Vec<Value> = if args.len() == 1 {
+                match &args[0] {
+                    Value::List(l) => l.borrow().clone(),
+                    v => vec![v.clone()],
+                }
+            } else {
+                args.to_vec()
+            };
+            let vals: Vec<f64> = flat.iter().map(|v| num(v, name)).collect::<R<_>>()?;
             let pick = if name == "min" {
                 vals.iter().cloned().fold(f64::INFINITY, f64::min)
             } else {

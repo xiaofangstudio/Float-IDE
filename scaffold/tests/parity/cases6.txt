@@ -20,10 +20,10 @@ int i = 3
 i--
 print(i)
 int j = 5
-j-- -- 说明文字
+j-- /* 说明文字
 print(j)
 ### 行尾注释
-int hp = 100 -- 血量
+int hp = 100 /* 血量
 print(hp)
 ### 字符串里两个减号不注释
 print("a--b")

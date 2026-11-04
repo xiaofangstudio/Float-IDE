@@ -1590,10 +1590,14 @@ fn emit_call(cg: &mut Cg, name: &str, args: &[Expr], e: &Expr) -> Result<String,
         return Ok(format!("call_builtin({}, &[{}]){}", lit_str(name), cloned.join(", "), em(e)));
     }
 
-    // 类名省略 new：C(...) → __new_C_
+    // 类名省略 new：与 VM / TS 引擎对齐——强制写 new，
+    // 不然 `Hero(...)` 到底是实例化还是调函数，读代码的人分不清。
     let ctor = format!("__new_{}_", name);
     if cg.meta.contains_key(ctor.as_str()) {
-        return emit_call(cg, ctor.as_str(), args, e);
+        return Err(AotError {
+            message: format!("「{}」是类名，要创建实例请写 new {}(…)", name, name),
+            line: e.span.line,
+        });
     }
 
     // 都不是 → 可能是装着函数值的变量

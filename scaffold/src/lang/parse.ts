@@ -532,9 +532,9 @@ function splitSource(src: string): Line[] {
     const indent = expanded.length - expanded.trimStart().length;
     const trimmed = expanded.trim();
     if (trimmed === '') return;
-    // 注释只有一种：`--`（`--` 后面要跟空白或行尾，`i--` 自减不受影响）。
+    // 注释只有一种写法：`/*` 到行尾（不用闭合）。老写法 `--` 在 codePart 里报错。
     // `//` 不是注释，它是整除运算符。
-    const { code, comment } = codePart(trimmed);
+    const { code, comment } = codePart(trimmed, idx + 1);
     const isComment = code.trim() === '';
     // 行尾的 { 是"块开始"标记，不是字典字面量（字典字面量必然以 } 结尾）
     const cleaned = isComment ? '' : code.trim().replace(/\{\s*$/, '').trim();
@@ -778,8 +778,10 @@ export function parseProgram(file: string, src: string): Program {
           if (toks.length === 1) { i++; return { k: 'continue', ...stmtSpan(ln) }; }
           break;
         case 'stop':
-          if (toks.length === 1 || toks[1]?.v === 'all' || toks[1]?.v === 'now' || toks[1]?.v === 'script') {
-            i++; return { k: 'stop', ...stmtSpan(ln) };
+          if (toks.length === 1) { i++; return { k: 'stop', ...stmtSpan(ln) }; }
+          if (toks[1]?.v === 'all' || toks[1]?.v === 'now' || toks[1]?.v === 'script') {
+            // 四个名字一个行为，留一个就够了
+            throw new ParseError(`stop ${toks[1].v} 已经合并：直接写 stop`, toks[0], 'stmt');
           }
           break;
         case 'return': {

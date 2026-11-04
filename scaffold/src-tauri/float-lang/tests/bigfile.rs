@@ -8,7 +8,7 @@ use float_lang::{bytecode, parser, Vm};
 /// 造一个"游戏规模"的脚本：数据表 + 规则函数 + 主循环
 fn make_game(lines_target: usize) -> String {
     let mut out: Vec<String> = Vec::new();
-    out.push("-- 生成的大文件".to_string());
+    out.push("/* 生成的大文件".to_string());
 
     // 数据表：每行一条记录，凑到目标行数的四成
     let rows = (lines_target * 2 / 5).max(100);

@@ -1340,17 +1340,17 @@ impl Compiler {
                     let idx = self.intern(name);
                     self.emit(Op::CallMethod(idx, args.len() as u8));
                 } else {
-                    /* C(...) 省略 new 也能实例化：类在解析阶段降级成了 __new_类_，
-                     * 所以名字查不到时先看有没有对应的构造函数（和 TS 引擎一致）。 */
+                    /* C(...) 省略 new：TS 引擎直接报「要写 new C(…)」，这里对齐——
+                     * 类名调用和函数调用长得一模一样，读代码的人分不清，强制写 new。 */
                     if let ExprKind::Var(name) = &callee.kind {
                         if self.lookup(name).is_none() {
                             let ctor: Rc<str> = Rc::from(format!("__new_{}_", name).as_str());
                             if let Some(slot) = self.lookup(&ctor) {
-                                self.load(slot);
-                                for a in args {
-                                    self.expr(a);
-                                }
-                                self.emit(Op::Call(args.len() as u8));
+                                let _ = slot;
+                                self.err(
+                                    format!("「{}」是类名，要创建实例请写 new {}(…)", name, name),
+                                    &callee.span,
+                                );
                                 return;
                             }
                         }

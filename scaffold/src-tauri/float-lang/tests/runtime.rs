@@ -246,8 +246,8 @@ fn 语法错误会被报出来() {
 #[test]
 fn 空程序不炸() {
     assert_eq!(out(""), "");
-    assert_eq!(out("-- 只有注释\n"), "");
-    assert_eq!(out("-- 注释\n\n-- 又一行\n"), "");
+    assert_eq!(out("/* 只有注释\n"), "");
+    assert_eq!(out("/* 注释\n\n/* 又一行\n"), "");
 }
 
 #[test]

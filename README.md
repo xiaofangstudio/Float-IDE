@@ -30,8 +30,8 @@ list 学生 = [{"name": "老陈", "score": 88}, {"name": "阿方", "score": 93},
 for s in data.sort_by(学生, "score", "desc") {
   print(s["name"] + " " + str(s["score"]))
 }
-print("平均 " + str(data.avg(学生, "score")))     -- 86.333333333333
-print("中位 " + str(data.median([78, 88, 93])))  -- 88
+print("平均 " + str(data.avg(学生, "score")))     /* 86.333333333333
+print("中位 " + str(data.median([78, 88, 93])))  /* 88
 
 var 数据 = json.parse(readfile("成绩.json"))
 print(json.pretty(数据))
@@ -59,7 +59,7 @@ Copper 现在有两条执行路：**VM（默认，F5/F6 用）** 和 **AOT（原
 
 ```bash
 cd scaffold/src-tauri/float-lang
-cargo run --release --example aot -- 你的脚本.co -o 程序.exe --run
+cargo run --release --example aot /* 你的脚本.co -o 程序.exe --run
 ```
 
 它做的事：源码 →（import / 宏展开）→ AST → **Rust 源码** → rustc -O3 → 本机 exe。
@@ -220,7 +220,7 @@ Copper 保留了一批旧写法做兼容（老 .cw 文件不用改也能跑）�
 
 ## 1.5 这次改了什么（语言规则定型 + 类型检查）
 
-- 📝 **注释统一为 `--`**：语言只认一种注释符，不再有歧义
+- 📝 **注释统一为 `/*`**：从 `/*` 写到行尾，不用闭合。`--` 现在只当自减运算符
 - ➗ **`//` 改为整除**：跟主流语言对齐，除法 `/`、整除 `//` 各司其职
 - ❓ **三元表达式落地**：`条件 ? 值1 : 值2` 直接用
 - ✅ **类型检查真的落地**：配独立检查入口，写错类型运行前就报
@@ -554,7 +554,7 @@ int low, int high = minmax([])
 
 | 能力 | 说明 |
 | --- | --- |
-| 行式语法 | 一行一句，缩进定块，`{ }` 可选，行尾 `;` 忽略，`--` 整行跳过 |
+| 行式语法 | 一行一句，缩进定块，`{ }` 可选，行尾 `;` 忽略，`/*` 到行尾整行跳过 |
 | 表达式 | 完整优先级、一元/二元运算符、`&& \|\| !` 短路、字符串转义、列表与字典字面量、下标、成员访问 |
 | 循环 | `for i in range(n)`（n 可为表达式）、`range(a,b,step)`、`for x in 列表/字符串/字典`、`for k, v in 字典`、`for i = 1 to 10 step 2`、`while`、`repeat`、`forever` |
 | 跳转 | `break` / `out`、`balo` / `continue`、`if out(条件)`、`stop` |
@@ -632,7 +632,7 @@ print(h.name + " 剩余 " + h.hurt(30))
 
 要点（详见 `language/catalog/core.json`）：
 
-- **一行一句**：缩进定块，`{ }` 可写可不写，`--` 开头整行跳过
+- **一行一句**：缩进定块，`{ }` 可写可不写，`/*` 开头整行跳过
 - **表达式到处能用**：赋值右值、`print`、`if`/`while` 条件、`for` 的次数、函数参数都走同一套解析
 - **循环变量真可用**：`for i in range(n)` 里的 i 每轮绑定，嵌套循环各用各的
 - **函数**：`function name(a, b = 1)` 定义，`name(1)` 调用，`return` 返回值，可递归

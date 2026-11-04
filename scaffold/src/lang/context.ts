@@ -58,9 +58,10 @@ export function contextAt(src: string, line: number, col: number, analysis?: Ana
   const text = lines[line - 1] ?? '';
   const a = analysis ?? analyze('main.co', src);
 
-  /* ── 1. 注释：光标落在 `--` 之后的注释文字里 ── */
-  // codePart 返回的 head 就是 `--` 之前那段，它的长度就是注释起始下标
-  const head = codePart(text).code;
+  /* ── 1. 注释：光标落在 `/*` 之后的注释文字里 ── */
+  // codePart 返回的 head 就是 `/*` 之前那段，它的长度就是注释起始下标。
+  // 第二个参数传 0：这里是编辑器上下文推断，老 `--` 注释不在这里报错（解析阶段会报）。
+  const head = codePart(text, 0).code;
   const commentStart = head.length;
   if (commentStart < text.length && col - 1 > commentStart) {
     return { kind: 'comment' };

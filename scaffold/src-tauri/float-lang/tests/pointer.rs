@@ -88,7 +88,7 @@ fn mod_关键字() {
 
 #[test]
 fn if_链中间夹注释不断链() {
-    let src = "int k = 2\nif k == 1\n    print(\"one\")\n-- 插一句注释\nelif k == 2\n    print(\"two\")\nelse\n    print(\"other\")\n";
+    let src = "int k = 2\nif k == 1\n    print(\"one\")\n/* 插一句注释\nelif k == 2\n    print(\"two\")\nelse\n    print(\"other\")\n";
     assert_eq!(out(src), "two");
 }
 

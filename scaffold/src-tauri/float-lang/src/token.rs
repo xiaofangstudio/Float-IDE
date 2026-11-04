@@ -134,7 +134,7 @@ pub fn tokenize_line(src: &str, line: u32, start_col: u32) -> Result<Vec<Token>,
             continue;
         }
 
-        // 注意：`//` 不是注释，是整除运算符（注释在 code_part 里按 `--` 剥掉）
+        // 注意：`//` 不是注释，是整除运算符（注释在 code_part 里按 `/*` 剥掉）
 
         // 字符串
         if c == '"' || c == '\'' {
@@ -322,16 +322,14 @@ pub fn tokenize_line(src: &str, line: u32, start_col: u32) -> Result<Vec<Token>,
     Ok(out)
 }
 
-/// 取一行的有效代码，把 `--` 注释剥掉（跳过字符串里的 `--`）。
+/// 取一行的有效代码，把 `/*` 注释剥掉（跳过字符串里的 `/*`）。
 ///
-/// 消歧规则：`--` **左边是行首或空白**，并且**右边是空白或行尾**，才算注释。
-/// 这样三种写法都对得上：
-/// * `-- 整行注释`     → 注释
-/// * `int hp = 100 -- 血量` → 注释
-/// * `i--` / `i-- -- 注释`  → 自减运算符（左边不是空白，不当注释）
+/// 注释只有一种写法：`/*` 开头、到行尾结束（不用闭合）。
+/// 老写法 `--` 注释已取消：`--` 现在只可能是自减运算符，
+/// 撞上老注释的形状（左边行首/空白、右边空白/行尾）返回 Err（带改法提示）。
 ///
 /// **`//` 不是注释**，它是整除运算符（`7 // 2` = 3）。
-pub fn code_part(line: &str) -> (String, Option<String>) {
+pub fn code_part(line: &str) -> Result<(String, Option<String>), String> {
     let chars: Vec<char> = line.chars().collect();
     let mut in_str: Option<char> = None;
     let mut i = 0usize;
@@ -353,6 +351,11 @@ pub fn code_part(line: &str) -> (String, Option<String>) {
             i += 1;
             continue;
         }
+        if c == '/' && i + 1 < chars.len() && chars[i + 1] == '*' {
+            let head: String = chars[..i].iter().collect();
+            let tail: String = chars[i + 2..].iter().collect();
+            return Ok((head, Some(tail)));
+        }
         if c == '-' && i + 1 < chars.len() && chars[i + 1] == '-' {
             let left_ok = i == 0 || chars[i - 1].is_whitespace();
             let right = chars.get(i + 2).copied();
@@ -361,14 +364,12 @@ pub fn code_part(line: &str) -> (String, Option<String>) {
                 Some(n) => n.is_whitespace(),
             };
             if left_ok && right_ok {
-                let head: String = chars[..i].iter().collect();
-                let tail: String = chars[i + 2..].iter().collect();
-                return (head, Some(tail));
+                return Err("注释的 -- 写法已取消：注释改成 /*（从 /* 写到行尾，不用闭合）".to_string());
             }
         }
         i += 1;
     }
-    (line.to_string(), None)
+    Ok((line.to_string(), None))
 }
 
 #[cfg(test)]
@@ -405,11 +406,11 @@ mod tests {
 
     #[test]
     fn 整行注释被丢弃() {
-        // 注释是 `--`（在 code_part 里剥），分词阶段已经看不到它
-        let (code, _) = code_part("x = 1 -- 这是注释");
+        // 注释是 `/*`（在 code_part 里剥），分词阶段已经看不到它
+        let (code, _) = code_part("x = 1 /* 这是注释").expect("不能报错");
         assert_eq!(texts(code.trim()), vec!["x", "=", "1"]);
-        let (code, _) = code_part("-- 全注释");
-        assert_eq!(texts(code.as_str()), Vec::<String>::new());
+        let (code, _) = code_part("/* 全注释").expect("不能报错");
+        assert_eq!(texts(code.trim()), Vec::<String>::new());
     }
 
     #[test]
@@ -450,32 +451,38 @@ mod tests {
 
     #[test]
     fn code_part_跳过字符串内注释() {
-        // 字符串里的 `--` 不是注释
-        let (code, comment) = code_part(r#"x = "a--b" -- 真注释"#);
-        assert_eq!(code, r#"x = "a--b" "#);
+        // 字符串里的 /* 不是注释（先扫到字符串，注释规则不生效）
+        let (code, comment) = code_part(r#"x = "a/*b" /* 真注释"#).expect("不能报错");
+        assert_eq!(code, r#"x = "a/*b" "#);
         assert_eq!(comment.as_deref(), Some(" 真注释"));
+        // 字符串里的 -- 也只是内容
+        let (code, comment) = code_part(r#"print("a--b")"#).expect("不能报错");
+        assert!(comment.is_none());
     }
 
     #[test]
     fn code_part_不把自减当注释() {
         // `i--` 是自减（左边贴着标识符）
-        let (code, comment) = code_part("i--");
+        let (code, comment) = code_part("i--").expect("自减不能报错");
         assert_eq!(code, "i--");
         assert!(comment.is_none());
-        // `i-- -- 说明`：前一个是自减，后一个是注释
-        let (code, comment) = code_part("i-- -- 说明");
+        // `i--` 后面想跟说明要写 /*
+        let (code, comment) = code_part("i-- /* 说明").expect("不能报错");
         assert_eq!(code, "i-- ");
         assert_eq!(comment.as_deref(), Some(" 说明"));
-        // 行尾注释（前面有空白）
-        let (code, comment) = code_part("int hp = 100 -- 血量");
+        // 行尾注释（/* 到行尾）
+        let (code, comment) = code_part("int hp = 100 /* 血量").expect("不能报错");
         assert_eq!(code, "int hp = 100 ");
         assert_eq!(comment.as_deref(), Some(" 血量"));
+        // 老的 -- 注释：报错带改法
+        let e = code_part("int hp = 100 -- 血量").unwrap_err();
+        assert!(e.contains("/*"), "报错要提示新写法：{}", e);
     }
 
     #[test]
     fn code_part_不把整除当注释() {
         // `//` 是整除运算符，整行都是代码
-        let (code, comment) = code_part("a = 7 // 2");
+        let (code, comment) = code_part("a = 7 // 2").expect("不能报错");
         assert_eq!(code, "a = 7 // 2");
         assert!(comment.is_none());
     }

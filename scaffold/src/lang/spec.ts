@@ -30,7 +30,7 @@ export const INSTRUCTIONS: InstDoc[] = [
   { name: 'if out', args: 'if out(条件)', desc: '条件成立时跳出当前块（条件式 break）', category: '控制' },
   { name: 'break', args: 'break / out', desc: '跳出当前循环', category: '控制' },
   { name: 'balo', args: 'balo / continue', desc: '跳过本轮，进入下一轮', category: '控制' },
-  { name: 'stop', args: 'stop / stop all / stop now / stop script', desc: '直接停止脚本', category: '控制' },
+  { name: 'stop', args: 'stop', desc: '直接停止脚本（stop all/now/script 已合并成 stop）', category: '控制' },
 
   /* 函数与类 */
   { name: 'fn', args: 'fn name(a, b = 默认值)', insert: 'fn ${1:名字}(${2:参数})\n    $0', desc: '定义函数；支持多参数、默认值、返回值、递归。fn 是主写法，function / Function / f 仍然兼容', category: '函数' },

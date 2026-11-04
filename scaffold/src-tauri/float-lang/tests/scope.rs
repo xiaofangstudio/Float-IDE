@@ -69,6 +69,6 @@ fn 字典字段可改() {
 
 #[test]
 fn 类里字段与方法局部同名() {
-    assert_eq!(out("class C\n    int v = 5\n    fn get()\n        return v\nprint(C().get())\n"), "5");
-    assert_eq!(out("class C\n    int v = 5\n    fn get()\n        int v = 9\n        return v\nprint(C().get())\n"), "9");
+    assert_eq!(out("class C\n    int v = 5\n    fn get()\n        return v\nprint(new C().get())\n"), "5");
+    assert_eq!(out("class C\n    int v = 5\n    fn get()\n        int v = 9\n        return v\nprint(new C().get())\n"), "9");
 }

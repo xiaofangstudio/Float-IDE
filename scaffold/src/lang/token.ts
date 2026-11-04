@@ -56,7 +56,7 @@ export function tokenizeLine(src: string, line: number, startCol = 1): Token[] {
     if (c === ' ' || c === '\t' || c === '\u3000') { i++; continue; }
     if (c === '\r') { i++; continue; }
 
-    // 注意：`//` 不是注释，是整除运算符（注释在 codePart 里按 `--` 剥掉）
+    // 注意：`//` 不是注释，是整除运算符（注释在 codePart 里按 `/*` 剥掉）
 
     // 字符串
     if (c === '"' || c === "'") {
@@ -166,11 +166,13 @@ export function describeTok(t: Token): string {
   return `「${t.v}」`;
 }
 
-/** 取一行的有效代码，把 `--` 注释剥掉（跳过字符串里的 `--`）。
- *  消歧：`--` 左边是行首/空白、右边是空白/行尾，才算注释。
- *  所以 `i--` 是自减，`i-- -- 说明` 前半是自减、后半是注释。
+/** 取一行的有效代码，把 `/*` 注释剥掉（跳过字符串里的 `/*`）。
+ *  注释只有一种写法：`/*` 开头、到行尾结束（不用闭合）。
+ *  老写法 `--` 注释已取消：`--` 现在只可能是自减运算符，
+ *  撞上老注释的形状（左边行首/空白、右边空白/行尾）就报错并给出改法。
+ *  legacyLine 传行号时才报错（编辑器上下文推断传 0，不在这里报）。
  *  **`//` 不是注释**，它是整除运算符。 */
-export function codePart(line: string): { code: string; comment: string | null } {
+export function codePart(line: string, legacyLine = 0): { code: string; comment: string | null } {
   let inStr: string | null = null;
   for (let i = 0; i < line.length; i++) {
     const c = line[i];
@@ -180,12 +182,23 @@ export function codePart(line: string): { code: string; comment: string | null }
       continue;
     }
     if (c === '"' || c === "'") { inStr = c; continue; }
+    if (c === '/' && line[i + 1] === '*') {
+      return { code: line.slice(0, i), comment: line.slice(i + 2) };
+    }
     if (c === '-' && line[i + 1] === '-') {
       const leftOk = i === 0 || /\s/.test(line[i - 1]);
       const after = line[i + 2];
       const rightOk = after === undefined || /\s/.test(after);
       if (leftOk && rightOk) {
-        return { code: line.slice(0, i), comment: line.slice(i + 2) };
+        if (legacyLine > 0) {
+          throw new LexError(
+            '注释的 -- 写法已取消：注释改成 /*（从 /* 写到行尾，不用闭合）',
+            legacyLine,
+            i + 1
+          );
+        }
+        // legacyLine = 0：编辑器上下文路径，不当注释、也不报错，整段当代码
+        return { code: line, comment: null };
       }
     }
   }

@@ -34,7 +34,7 @@ int a = 1
 print(a > 0 ? "正" : "负")
 ### 幂与整除
 print(2 ** 10)
-print(7 -- 2)
+print(7 /* 2)
 ### 负数下标
 list xs = [1,2,3]
 print(xs[-1])
