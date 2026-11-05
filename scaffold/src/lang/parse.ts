@@ -329,14 +329,16 @@ class ExprParser {
         const nameTok = this.cur;
         if (nameTok.k !== 'ident') throw new ParseError('「.」后面要跟成员名', nameTok, 'member');
         this.eat();
-        // 标准库命名空间：`os.readfile(x)` 收敛成内建名 "os.readfile"（与 Rust 内核同一规则）
+        /* 标准库命名空间：`os.readfile(x)` 收敛成内建名 "os.readfile"（与 Rust 内核同一规则）。
+         * 但解析期不知道 `data` 是标准库还是用户自己的变量——`str data = "a,b"` 之后
+         * 写 `data.split(",")` 是字符串方法，不是命名空间调用。所以名字对不上函数时
+         * 不在这里判错，退回普通成员调用，交给运行期按实际值分派。 */
         if (e.k === 'var' && isNamespace(e.name)) {
           const full = `${e.name}.${nameTok.v}`;
-          if (!isStdlibFn(full)) {
-            throw new ParseError(`${e.name} 里没有 ${nameTok.v} 这个函数`, nameTok, 'stdlib');
+          if (isStdlibFn(full)) {
+            e = { k: 'var', name: full, ...this.span(startOf(e), nameTok) };
+            continue;
           }
-          e = { k: 'var', name: full, ...this.span(startOf(e), nameTok) };
-          continue;
         }
         e = { k: 'member', obj: e, name: nameTok.v, ...this.span(startOf(e), nameTok) };
         continue;

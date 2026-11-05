@@ -50,3 +50,17 @@ while (true)
     i++
     if (i == 2)
         out
+
+### 内存护栏：range 一次要 200 万个元素
+list xs = range(2_000_000)
+print(len(xs))
+
+### 内存护栏：字符串重复到 2000 万字符
+print("ab".repeat(20_000_000))
+
+### 内存护栏：列表 push 超过 100 万项
+list xs = range(1_000_000)
+xs.push(1)
+
+### 字符串乘法（双引擎对齐）
+print("ab" * 3)

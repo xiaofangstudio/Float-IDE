@@ -452,3 +452,25 @@ fn 合理赋值不该被误报() {
     // 右边是变量/调用时静态看不出来，不拦
     assert_eq!(out("str s = \"a\"\nint n = 2\nprint(s + \"b\", n + 1)"), "ab 3\n");
 }
+
+/* ── 内存护栏 ──────────────────────────────────────────────────────────────
+ * `while true { add 1 to xs }` 这类脚本以前会一路把内存吃满，整机开始 swap。
+ * 现在必须在撑爆之前明确报错（措辞和 TS 引擎 / limits.rs 保持一致）。 */
+#[test]
+fn 容器与字符串有内存上限() {
+    for (src, what) in [
+        ("list xs = range(2_000_000)\nprint(len(xs))", "列表"),
+        ("print(\"ab\".repeat(20_000_000))", "字符串"),
+        ("print(\"a\" * 20_000_000)", "字符串"),
+        ("list xs = range(1_000_000)\nxs.push(1)", "列表"),
+    ] {
+        let m = err_of(src);
+        assert!(m.contains(what), "报错要写明是哪种对象：{}", m);
+        assert!(m.contains("上限") && m.contains("忘了停"), "报错要给改法：{}", m);
+    }
+    // 正常大小的脚本不能被误杀
+    assert_eq!(
+        out("list xs = [1, 2, 3]\nxs.push(4)\nprint(len(xs))\nprint(\"ab\" * 2)"),
+        "4\nabab\n"
+    );
+}

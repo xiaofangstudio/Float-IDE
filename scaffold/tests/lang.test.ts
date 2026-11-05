@@ -386,6 +386,26 @@ function hello()
     eq(`${name}（解释不该报错）`, b.err, []);
   };
 
+  /* ── 内存护栏：死循环往容器里塞东西，要在吃满内存前明确报错 ── */
+  {
+    const guards: [string, string, string][] = [
+      ['超大 range', 'list xs = range(2_000_000)\nprint(len(xs))\n', '列表'],
+      ['超大字符串重复', 'print("ab".repeat(20_000_000))\n', '字符串'],
+      ['字符串乘法超限', 'print("a" * 20_000_000)\n', '字符串'],
+      ['push 撑破列表', 'list xs = range(1_000_000)\nxs.push(1)\n', '列表'],
+    ];
+    for (const [name, src, what] of guards) {
+      for (const mode of ['run', 'debug'] as const) {
+        const r = await run(src, { mode, timeoutMs: 30_000 });
+        const msg = r.err.join(' ');
+        eq(`${name}（${mode}）报内存护栏`, msg.includes(what) && msg.includes('上限') && msg.includes('忘了停'), true);
+      }
+    }
+    // 正常大小的脚本不能被误杀
+    await both('护栏不误杀正常脚本', 'list xs = [1, 2, 3]\nxs.push(4)\nprint(len(xs))\nprint("ab" * 2)\n', ['4', 'abab']);
+  }
+
+
   /* ── 注释：/* 到行尾 ── */
   await both('斜杠星是整行注释', `
 /* 这是注释

@@ -8,6 +8,7 @@
 
 import { dict, fmtVal, isDict, isInstance, isList, toNum, toStr, truthy, type Val, isPtr, allocPtr, typeName } from './values';
 import { STDLIB_SPECS, STDLIB_MAP, setStdlibFs, type StdFs } from './stdlib';
+import { guardList, guardString } from './limits';
 
 export type BuiltinSpec = {
   name: string;
@@ -72,9 +73,23 @@ const spec = (s: BuiltinSpec): BuiltinSpec => s;
 
 const REGISTRY: BuiltinSpec[] = [
   /* 数学 */
-  spec({ name: 'add', sig: 'add(a, b)', category: '数学', doc: '相加；任一参数是字符串时按拼接处理。也支持汇编式写法 c = add a b（空格分隔，可多个）', min: 2, max: 8, writes: '__last_calc', fn: (a) => a.slice(1).reduce((x, y) => (typeof x === 'string' || typeof y === 'string' ? toStr(x) + toStr(y) : num(x, 'add') + num(y, 'add')), a[0]) }),
+  spec({ name: 'add', sig: 'add(a, b)', category: '数学', doc: '相加；任一参数是字符串时按拼接处理。也支持汇编式写法 c = add a b（空格分隔，可多个）', min: 2, max: 8, writes: '__last_calc', fn: (a) => a.slice(1).reduce<Val>((x, y) => {
+    if (typeof x === 'string' || typeof y === 'string') {
+      const p = toStr(x), q = toStr(y);
+      guardString(p.length, q.length);
+      return p + q;
+    }
+    return num(x, 'add') + num(y, 'add');
+  }, a[0]) }),
   spec({ name: 'sub', sig: 'sub(a, b)', category: '数学', doc: '相减。也支持汇编式写法 c = sub a b', min: 2, max: 8, writes: '__last_calc', fn: (a) => a.slice(1).reduce((x, y) => num(x, 'sub') - num(y, 'sub'), a[0]) }),
-  spec({ name: 'mul', sig: 'mul(a, b)', category: '数学', doc: '相乘；字符串乘整数可重复。也支持汇编式写法 c = mul a b', min: 2, max: 8, writes: '__last_calc', fn: (a) => a.slice(1).reduce((x, y) => (typeof x === 'string' && typeof y === 'number' ? x.repeat(Math.max(0, Math.trunc(y))) : num(x, 'mul') * num(y, 'mul')), a[0]) }),
+  spec({ name: 'mul', sig: 'mul(a, b)', category: '数学', doc: '相乘；字符串乘整数可重复。也支持汇编式写法 c = mul a b', min: 2, max: 8, writes: '__last_calc', fn: (a) => a.slice(1).reduce<Val>((x, y) => {
+    if (typeof x === 'string' && typeof y === 'number') {
+      const n = Math.max(0, Math.trunc(y));
+      guardString(0, x.length * n);
+      return x.repeat(n);
+    }
+    return num(x, 'mul') * num(y, 'mul');
+  }, a[0]) }),
   spec({ name: 'div', sig: 'div(a, b)', category: '数学', doc: '相除（除数为 0 报错）。也支持汇编式写法 c = div a b', min: 2, max: 8, writes: '__last_calc', fn: (a) => a.slice(1).reduce((x, y) => div(num(x, 'div'), num(y, 'div')), a[0]) }),
   spec({ name: 'mod', sig: 'mod(a, b)', category: '数学', doc: '取余。也支持汇编式写法 c = mod a b', min: 2, max: 8, writes: '__last_calc', fn: (a) => a.slice(1).reduce((x, y) => mod(num(x, 'mod'), num(y, 'mod')), a[0]) }),
   spec({ name: 'pow', sig: 'pow(a, b)', category: '数学', doc: 'a 的 b 次方', min: 2, max: 2, writes: '__last_calc', fn: (a) => Math.pow(num(a[0], 'pow'), num(a[1], 'pow')) }),
@@ -138,7 +153,11 @@ const REGISTRY: BuiltinSpec[] = [
     });
     return cp;
   } }),
-  spec({ name: 'join', sig: 'join(a, b, …)', category: '字符串', doc: '把多个值拼成字符串', min: 1, max: 99, writes: '__last_str', fn: (a) => a.map((x) => toStr(x)).join('') }),
+  spec({ name: 'join', sig: 'join(a, b, …)', category: '字符串', doc: '把多个值拼成字符串', min: 1, max: 99, writes: '__last_str', fn: (a) => {
+    const parts = a.map(toStr);
+    guardString(0, parts.reduce((n, x) => n + x.length, 0));
+    return parts.join('');
+  } }),
   spec({ name: 'char', sig: 'char(s, i)', category: '字符串', doc: '取第 i 个字符（从 0 开始）', min: 2, max: 2, writes: '__last_str', fn: (a) => {
     const s = toStr(a[0]);
     const i = Math.trunc(num(a[1], 'char'));
@@ -150,7 +169,11 @@ const REGISTRY: BuiltinSpec[] = [
   spec({ name: 'upper', sig: 'upper(s)', category: '字符串', doc: '转大写', min: 1, max: 1, fn: (a) => toStr(a[0]).toUpperCase() }),
   spec({ name: 'lower', sig: 'lower(s)', category: '字符串', doc: '转小写', min: 1, max: 1, fn: (a) => toStr(a[0]).toLowerCase() }),
   spec({ name: 'trim', sig: 'trim(s)', category: '字符串', doc: '去掉首尾空白', min: 1, max: 1, fn: (a) => toStr(a[0]).trim() }),
-  spec({ name: 'split', sig: 'split(s, 分隔符)', category: '字符串', doc: '按分隔符切成列表', min: 2, max: 2, fn: (a) => toStr(a[0]).split(toStr(a[1])) }),
+  spec({ name: 'split', sig: 'split(s, 分隔符)', category: '字符串', doc: '按分隔符切成列表', min: 2, max: 2, fn: (a) => {
+    const src = toStr(a[0]);
+    guardList(0, src.length + 1);
+    return src.split(toStr(a[1])) as unknown as Val;
+  } }),
   spec({ name: 'indexof', sig: 'indexof(s, 子串)', category: '字符串', doc: '子串位置，找不到返回 -1', min: 2, max: 2, fn: (a) => toStr(a[0]).indexOf(toStr(a[1])) }),
   spec({ name: 'substr', sig: 'substr(s, 起点, 长度)', category: '字符串', doc: '截取子串', min: 2, max: 3, fn: (a) => {
     const s = toStr(a[0]);
@@ -193,10 +216,13 @@ const REGISTRY: BuiltinSpec[] = [
     if (a.length === 1) to = num(a[0], 'range');
     else { from = num(a[0], 'range'); to = num(a[1], 'range'); if (a.length >= 3) step = num(a[2], 'range'); }
     if (step === 0) bad('range 的步长不能为 0');
+    // 先估算个数：等生成完再拒绝，内存已经吃下去了
+    const est = Math.max(0, Math.ceil((to - from) / step));
+    guardList(0, est);
     const out: Val[] = [];
     if (step > 0) for (let v = from; v < to; v += step) out.push(v);
     else for (let v = from; v > to; v += step) out.push(v);
-    if (out.length > 1_000_000) bad('range 生成的列表超过 100 万个元素');
+    guardList(0, out.length);
     return out;
   } }),
   spec({ name: 'dictallkey', sig: 'dictallkey(字典)', category: '字典', doc: '取出全部键（列表）', min: 1, max: 1, writes: '__last_read', fn: (a) => [...dictArg(a[0], 'dictallkey').keys()] }),

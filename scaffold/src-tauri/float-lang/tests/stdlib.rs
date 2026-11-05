@@ -41,10 +41,13 @@ fn import_之后行号还是对的() {
 
 #[test]
 fn 库里没有的函数当场拦住() {
+    /* 以前解析期直接报「data 里没有 nothing」，但那会误伤
+     * `str data = "a,b"` + `data.split(",")` 这种同名变量的正常调用。
+     * 现在改成运行期指出「是命名空间、不是变量，检查函数名拼写」。 */
     let m = err("import data\nprint(data.nothing(1))\n");
-    assert!(m.contains("没有 nothing"), "报错文案不对：{}", m);
+    assert!(m.contains("命名空间") && m.contains("拼写"), "报错文案不对：{}", m);
     let m2 = err("import os\nprint(os.nothing(1))\n");
-    assert!(m2.contains("没有 nothing"), "报错文案不对：{}", m2);
+    assert!(m2.contains("命名空间") && m2.contains("拼写"), "报错文案不对：{}", m2);
 }
 
 /* ─────────────── data ─────────────── */

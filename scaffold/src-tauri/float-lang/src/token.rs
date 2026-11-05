@@ -456,7 +456,7 @@ mod tests {
         assert_eq!(code, r#"x = "a/*b" "#);
         assert_eq!(comment.as_deref(), Some(" 真注释"));
         // 字符串里的 -- 也只是内容
-        let (code, comment) = code_part(r#"print("a--b")"#).expect("不能报错");
+        let (_, comment) = code_part(r#"print("a--b")"#).expect("不能报错");
         assert!(comment.is_none());
     }
 

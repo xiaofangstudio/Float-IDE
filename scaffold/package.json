@@ -1,6 +1,6 @@
 {
   "name": "float-ide",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "description": "Copper 专用 IDE（Float IDE）：写脚本、调试、跑起来",
   "author": "小方工作室",
   "license": "MIT",

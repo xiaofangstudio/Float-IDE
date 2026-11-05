@@ -1,6 +1,6 @@
 [package]
 name = "float-lang"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Copper（原 CW Script）原生语言核心：词法 → 语法 → 字节码 → 虚拟机"
 license = "MIT"

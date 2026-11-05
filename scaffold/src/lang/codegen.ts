@@ -12,7 +12,7 @@
  */
 
 import type { Expr, Param, Program, Stmt, Target, TypeName } from './ast';
-import { LIMITS } from './limits';
+import { LIMITS, guardDict, guardList, guardString } from './limits';
 import { builtinList, getBuiltin } from './builtins';
 import {
   cloneVal, deepEq, dict, fmtVal, isDict, isInstance, isList, toNum, toStr, truthy, typeName, ThrownValue,
@@ -255,9 +255,13 @@ export const O = {
       return { ...b, idx: b.idx + Math.trunc(n) };
     }
     if (typeof a === 'number' && typeof b === 'number') return a + b;
-    if (typeof a === 'string' && typeof b === 'string') return a + b;
-    if (typeof a === 'string' || typeof b === 'string') return toStr(a) + toStr(b);
-    if (isList(a) && isList(b)) return [...a, ...b];
+    if (typeof a === 'string' && typeof b === 'string') { guardString(a.length, b.length); return a + b; }
+    if (typeof a === 'string' || typeof b === 'string') {
+      const x = toStr(a), y = toStr(b);
+      guardString(x.length, y.length);
+      return x + y;
+    }
+    if (isList(a) && isList(b)) { guardList(0, a.length + b.length); return [...a, ...b]; }
     return O.num(a, '「+」') + O.num(b, '「+」');
   },
   sub(a: Val, b: Val): Val {
@@ -273,7 +277,11 @@ export const O = {
   },
   mul(a: Val, b: Val): Val {
     if (typeof a === 'number' && typeof b === 'number') return a * b;
-    if (typeof a === 'string' && typeof b === 'number') return a.repeat(Math.max(0, Math.trunc(b)));
+    if (typeof a === 'string' && typeof b === 'number') {
+      const n = Math.max(0, Math.trunc(b));
+      guardString(0, a.length * n);
+      return a.repeat(n);
+    }
     return O.num(a, '「*」') * O.num(b, '「*」');
   },
   div(a: Val, b: Val): Val {
@@ -448,13 +456,14 @@ export const O = {
       obj[real] = val;
       return;
     }
-    if (isDict(obj)) { obj.map.set(toStr(idx), val); return; }
+    if (isDict(obj)) { guardDict(obj.map.size); obj.map.set(toStr(idx), val); return; }
     if (isCInst(obj)) { obj.f[toStr(idx)] = val; return; }
     throw new RuntimeError(`这个值不能按下标赋值：${fmtVal(obj)}`, 0);
   },
 
   listAdd(target: Val, val: Val): void {
     if (!isList(target)) throw new RuntimeError(`「${fmtVal(target)}」不是列表`, 0);
+    guardList(target.length);
     target.push(cloneVal(val));
   },
 
@@ -464,6 +473,7 @@ export const O = {
     if (n === null) throw new RuntimeError('插入位置必须是数字', 0);
     const i = Math.trunc(n);
     if (i < 0 || i > target.length) throw new RuntimeError(`插入位置 ${i} 超出范围（长度 ${target.length}）`, 0);
+    guardList(target.length);
     target.splice(i, 0, cloneVal(val));
   },
 
@@ -513,6 +523,7 @@ export const O = {
 
   dictSet(target: Val, key: Val, val: Val): void {
     if (!isDict(target)) throw new RuntimeError(`「${fmtVal(target)}」不是字典`, 0);
+    guardDict(target.map.size);
     target.map.set(toStr(key), cloneVal(val));
   },
 
@@ -586,8 +597,6 @@ export type CompiledUnit = {
   src?: string;
 };
 
-/** 退回解释模式的提示只打一次，别每次运行都刷 */
-let warnedFallback = false;
 
 const BUILTINS_REF: Record<string, (...args: Val[]) => Val> = {};
 for (const b of builtinList()) BUILTINS_REF[b.name] = (...args: Val[]) => b.fn(args);
@@ -670,12 +679,11 @@ ${body}
       (b: typeof BUILTINS_REF, o: typeof O, v: typeof VALUES_REF) => CompiledUnit['main'];
     const main = factory(BUILTINS_REF, O, VALUES_REF);
     return { main, functions: fnNames.size, src };
-  } catch (e) {
-    // 同一个问题只提示一次：否则每次运行都会往浏览器控制台刷一条，看着很吵
-    if (!(e instanceof CompileError) && !warnedFallback) {
-      warnedFallback = true;
-      console.warn('[Float 编译器] 退回解释模式（只提示一次）：' + (e instanceof Error ? e.message : String(e)));
-    }
+  } catch {
+    /* 静默降级：编译不出来就走解释器，控制台一个字都不说。
+     * 理由：降级之后照样比 Python 快，用户不需要知道内部换了哪条路；
+     * 而且这条提示一刷就是一大块，把真正的程序输出挤下去，很难受。
+     * 要排查的话看 tests/ 里的 aot-check（那边有开关）。 */
     return null;
   }
 

@@ -433,7 +433,23 @@ impl Vm {
     pub fn run(&mut self) -> Result<RunOutcome, FloatError> {
         // 收尾不需要再扫栈抹 null：OpStack 的 Drop 只析构 [0, sp) 这段活值，
         // 被 ptr::read 搬走的格子天然不在里面。
-        self.run_inner()
+        let result = self.run_inner();
+
+        /* 断开自引用环：`xs.push(xs)` 会让 Rc 计数永远不归零，每次运行都是新的
+         * Vm，不主动断环就一点一点漏。运行已经结束，全局里的值不再被观察；
+         * 唯独 outcome.value 可能和某个全局共享同一个 Rc，那个要留着。 */
+        let keep = match &result { Ok(o) => Some(&o.value), Err(_) => None };
+        for g in self.globals.iter_mut() {
+            break_value_cycles(g, keep);
+        }
+        self.frames.clear();
+        self.iters.clear();
+        self.ranges.clear();
+        self.handlers.clear();
+        self.thrown = None;
+        self.allocs.clear();
+        self.reports.clear();
+        result
     }
 
     fn run_inner(&mut self) -> Result<RunOutcome, FloatError> {
@@ -597,6 +613,13 @@ impl Vm {
                     let idx = i as usize;
                     if idx < glen && !self.gdefined[idx] {
                         let name = self.chunk.global_names.get(idx).cloned().unwrap_or_else(|| Rc::from("?"));
+                        if crate::stdlib::is_namespace(&name) {
+                            // 标准库命名空间不是变量：多半是函数名打错了
+                            return Err(self.err_at(ip, format!(
+                                "「{}」是标准库命名空间，不是变量——检查函数名拼写（帮助 → 标准库 里有全表）",
+                                name
+                            )));
+                        }
                         return Err(self.err_at(ip, format!("变量「{}」没有定义（先声明或赋值）", name)));
                     }
                     let v = if idx < glen { (*gptr.add(idx)).clone() } else { Value::Null };
@@ -1980,6 +2003,26 @@ fn bop_to_op(bop: u8) -> Option<Op> {
     })
 }
 
+
+/// 断开一个值里的容器自引用环（列表里放自己、字典里放自己）。
+/// `keep` 是本次运行的返回值，可能和它共享同一个 Rc，不能动。
+fn break_value_cycles(v: &mut Value, keep: Option<&Value>) {
+    let shared = match (&*v, keep) {
+        (Value::List(a), Some(Value::List(b))) => std::rc::Rc::ptr_eq(a, b),
+        (Value::Dict(a), Some(Value::Dict(b))) => std::rc::Rc::ptr_eq(a, b),
+        _ => false,
+    };
+    if shared {
+        return;
+    }
+    match v {
+        Value::List(l) => l.borrow_mut().clear(),
+        Value::Dict(d) => *d.borrow_mut() = crate::value::Dict::new(),
+        _ => return,
+    }
+    *v = Value::Null;
+}
+
 pub fn arith(op: Op, a: &Value, b: &Value) -> Result<Value, String> {
     // 指针运算：p + n / p - n / p - q（两个指针相减 = 隔了几格）
     if op == Op::Add || op == Op::Sub {
@@ -2008,11 +2051,26 @@ pub fn arith(op: Op, a: &Value, b: &Value) -> Result<Value, String> {
                 Value::Str(sa) => sa.as_str().to_string(),
                 other => other.to_display(),
             };
-            match b {
-                Value::Str(sb) => s.push_str(sb.as_str()),
-                other => s.push_str(&other.to_display()),
-            }
+            // 拼接前先划线：死循环里 s = s + "x" 会一路把内存吃光。
+            // 用 Cow 借用现成的字符串，别为了量长度就 to_string() 多分配一次——
+            // 字符串拼接是热路径，5 万次拼接多 5 万次堆分配会实打实掉性能。
+            let extra: std::borrow::Cow<'_, str> = match b {
+                Value::Str(sb) => std::borrow::Cow::Borrowed(sb.as_str()),
+                other => std::borrow::Cow::Owned(other.to_display()),
+            };
+            crate::limits::guard_string(s.len(), extra.len())?;
+            s.push_str(&extra);
             return Ok(Value::string(s));
+        }
+    }
+    /* 字符串重复：`"ab" * 3`（TS 引擎一直支持，Rust 内核原来会报「不是数字」，
+     * 属于双引擎不一致）。顺手对齐，并且同样受字符串内存护栏约束。 */
+    if op == Op::Mul {
+        if let (Value::Str(s), other) = (a, b) {
+            let n = other.as_num().ok_or_else(|| "字符串只能乘整数".to_string())?;
+            let times = n.max(0.0) as usize;
+            crate::limits::guard_string(0, s.len().saturating_mul(times))?;
+            return Ok(Value::string(s.repeat(times)));
         }
     }
     if let (Value::Int(x), Value::Int(y)) = (a, b) {
@@ -2200,6 +2258,7 @@ pub fn index_set(obj: &Value, idx: &Value, val: Value) -> Result<(), String> {
         }
         Value::Dict(d) => {
             let key = Rc::from(idx.to_display().as_str());
+            crate::limits::guard_dict(d.borrow().len(), 1)?;
             d.borrow_mut().set(key, val.clone_deep());
             Ok(())
         }
@@ -2284,5 +2343,32 @@ fn iter_source(v: &Value) -> Result<(IterSrc, usize), String> {
             Ok((IterSrc::Ptr(Rc::clone(p)), n))
         }
         other => Err(format!("{} 不能用于 for 遍历", other.to_display())),
+    }
+}
+
+#[cfg(test)]
+mod cycle_tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    #[test]
+    fn 自引用列表的环能断开() {
+        let l = Rc::new(RefCell::new(Vec::new()));
+        l.borrow_mut().push(Value::List(Rc::clone(&l)));
+        assert!(Rc::strong_count(&l) > 1, "先构造出一个环");
+        let mut v = Value::List(Rc::clone(&l));
+        break_value_cycles(&mut v, None);
+        assert!(matches!(v, Value::Null));
+        assert_eq!(Rc::strong_count(&l), 1, "环没断开，Rc 计数降不回来");
+    }
+
+    #[test]
+    fn 返回值共享的容器不会被清掉() {
+        let l = Rc::new(RefCell::new(vec![Value::Int(7)]));
+        let mut global = Value::List(Rc::clone(&l));
+        let keep = Value::List(Rc::clone(&l));
+        break_value_cycles(&mut global, Some(&keep));
+        assert_eq!(l.borrow().len(), 1, "返回给调用方的值不能被清空");
     }
 }

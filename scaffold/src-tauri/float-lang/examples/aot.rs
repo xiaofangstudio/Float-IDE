@@ -11,6 +11,23 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
+
+/// 递归统计目录占用（只算文件长度，不跟 symlink）。
+fn dir_bytes(path: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(rd) = std::fs::read_dir(path) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                total = total.saturating_add(dir_bytes(&p));
+            } else {
+                total = total.saturating_add(e.metadata().map(|m| m.len()).unwrap_or(0));
+            }
+        }
+    }
+    total
+}
+
 /// 清掉以前留下的 AOT 构建目录。
 ///
 /// 为什么要有这个：每编译一个脚本就要在临时目录建一个完整 cargo 工程（5MB 上下），
@@ -49,9 +66,59 @@ fn cleanup_stale_build_dirs() {
             removed += 1;
         }
     }
-    if removed > 0 {
+    if removed > 0 && verbose() {
         println!("清掉 {} 个旧的 AOT 构建目录（临时文件不留在磁盘上）", removed);
     }
+
+    /* 共享 cargo 缓存是分块编译能增量的关键，但它会一直长（每个脚本一份产物）。
+     * 给它一个硬上限：超了就整个删掉，下次自动重建——磁盘不能无底洞。 */
+    const MAX_CACHE_BYTES: u64 = 512 * 1024 * 1024;
+    let cache = tmp.join("copper_aot_cache");
+    if cache.is_dir() && dir_bytes(&cache) > MAX_CACHE_BYTES {
+        if std::fs::remove_dir_all(&cache).is_ok() && verbose() {
+            println!("AOT 共享缓存超过 512MB，已清掉（下次会自动重建）");
+        }
+    }
+}
+
+/// 把脚本文件名变成合法的 cargo 包名 / Rust 标识符前缀。
+///
+/// 示例文件名普遍以数字开头（`03_collections.co`），cargo 会直接拒收
+/// （"invalid character `0` in package name"），所以统一补一个字母前缀；
+/// 中文等非 ASCII 字符一律换成下划线。两个构建路径（单文件 / 分块）都用它，
+/// 免得只修好一处、另一处又炸。
+fn sanitize_name(stem: &str) -> String {
+    let mut s: String = stem
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .collect();
+    if s.is_empty() {
+        s.push_str("copper_program");
+    }
+    if !s.chars().next().map(|c| c.is_ascii_alphabetic()).unwrap_or(false) {
+        s.insert_str(0, "copper_");
+    }
+    s
+}
+
+/// 降级/回落提示只在开发排障时打开（`COPPER_AOT_VERBOSE=1`）。
+///
+/// 默认一个字都不输出：降级之后照样比 Python 快，用户不需要知道内部换了哪条路，
+/// 而且这些提示一刷就是一大块，把程序自己的输出挤下去。测试脚本会开这个开关，
+/// 好判断某个示例到底是"编译过了"还是"回落了"。
+fn verbose() -> bool {
+    std::env::var("COPPER_AOT_VERBOSE").map(|v| v == "1").unwrap_or(false)
+}
+
+/// 回落到 VM 时的提示（静默版：默认什么都不打）
+fn notice_fallback(reason: Option<&str>) {
+    if !verbose() {
+        return;
+    }
+    if let Some(r) = reason {
+        eprintln!("{}", r);
+    }
+    eprintln!("── 回落 VM 运行，结果不变 ──");
 }
 
 fn main() {
@@ -127,30 +194,32 @@ fn main() {
                 .file_stem()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| "copper_program".into());
-            let safe: String = stem.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect();
+            let safe = sanitize_name(&stem);
             match aot::emit_split(&prog, &safe, env!("CARGO_MANIFEST_DIR")) {
                 Ok(files) => {
-                    println!("分块编译：{} 个文件（{:.0} 个函数），改一个函数只重编一块", files.len(), 0.0);
+                    if verbose() {
+                        println!("分块编译：{} 个文件（{:.0} 个函数），改一个函数只重编一块", files.len(), 0.0);
+                    }
                     split = Some(files);
                     String::new()
                 }
                 Err(e2) => {
-                    eprintln!("{}", e2.message);
-                    eprintln!("── 回落 VM 运行，结果不变 ──");
+                    notice_fallback(Some(&e2.message));
                     run_vm(&script, &src, base.as_deref());
                     return;
                 }
             }
         }
         Err(e) => {
-            eprintln!("{}", e.message);
-            eprintln!("── 回落 VM 运行，结果不变 ──");
+            notice_fallback(Some(&e.message));
             run_vm(&script, &src, base.as_deref());
             return;
         }
     };
     if split.is_none() {
-        println!("AST → Rust 源码：{} 行（{}）", rust_src.lines().count(), fmt_ms(t0.elapsed()));
+        if verbose() {
+            println!("AST → Rust 源码：{} 行（{}）", rust_src.lines().count(), fmt_ms(t0.elapsed()));
+        }
         if show_rust {
             print!("{}", rust_src);
             return;
@@ -166,13 +235,16 @@ fn main() {
     let out_exe = match built {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("本机编译失败：{}", e);
-            eprintln!("── 回落 VM 运行，结果不变 ──");
+            // 本机编译失败（工具链问题）也照样静默回落；排障时开 COPPER_AOT_VERBOSE=1
+            let why = if verbose() { Some(format!("本机编译失败：{}", e)) } else { None };
+            notice_fallback(why.as_deref());
             run_vm(&script, &src, base.as_deref());
             return;
         }
     };
-    println!("rustc 编译完成：{}（{}）", out_exe.display(), fmt_ms(t1.elapsed()));
+    if verbose() {
+        println!("rustc 编译完成：{}（{}）", out_exe.display(), fmt_ms(t1.elapsed()));
+    }
 
     if let Some(o) = out {
         if let Some(parent) = o.parent() {
@@ -199,7 +271,9 @@ fn main() {
     if run_after {
         let t2 = Instant::now();
         let st = Command::new(&out_exe).status();
-        println!("── 本机执行用时 {} ──", fmt_ms(t2.elapsed()));
+        if verbose() {
+            println!("── 本机执行用时 {} ──", fmt_ms(t2.elapsed()));
+        }
         if let Ok(st) = st {
             std::process::exit(st.code().unwrap_or(1));
         }
@@ -218,7 +292,7 @@ fn build_native(rust_src: &str, script: &Path) -> Result<PathBuf, String> {
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "copper_program".into());
-    let safe_stem: String = stem.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect();
+    let safe_stem = sanitize_name(&stem);
     // 同一个脚本固定用同一个构建目录：第二次起是增量编译（1~2 秒），不再每次从零编
     let dir = std::env::temp_dir().join(format!("copper_aot_{}", safe_stem));
     std::fs::create_dir_all(dir.join("src")).map_err(|e| e.to_string())?;
@@ -226,7 +300,11 @@ fn build_native(rust_src: &str, script: &Path) -> Result<PathBuf, String> {
     std::fs::write(
         dir.join("Cargo.toml"),
         format!(
-            "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nfloat-lang = {{ path = {:?} }}\n\n[[bin]]\nname = \"{}\"\npath = \"src/main.rs\"\n\n[profile.release]\nopt-level = 3\nlto = true\ncodegen-units = 1\npanic = \"abort\"\n",
+            /* 别用 lto=true + codegen-units=1：那是最吃 rustc 内存的组合，
+             * 编译一个脚本就能顶到几个 G（整机卡死过）。分块路径早就是这套温和参数，
+             * 单文件也对齐：opt-level 2 + 关 LTO + 4 个 codegen 单元 + strip。
+             * 降级一点编译优化无所谓——VM 本来就比 Python 快。 */
+            "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nfloat-lang = {{ path = {:?} }}\n\n[[bin]]\nname = \"{}\"\npath = \"src/main.rs\"\n\n[profile.release]\nopt-level = 2\nlto = false\ncodegen-units = 4\npanic = \"abort\"\nincremental = false\ndebug = false\nstrip = \"symbols\"\n",
             safe_stem,
             env!("CARGO_MANIFEST_DIR"),
             safe_stem
@@ -236,8 +314,7 @@ fn build_native(rust_src: &str, script: &Path) -> Result<PathBuf, String> {
     std::fs::write(dir.join("src").join("main.rs"), rust_src).map_err(|e| e.to_string())?;
 
     let st = Command::new("cargo")
-        .arg("build")
-        .arg("--release")
+        .args(["build", "--release", "-j", "1"])
         .current_dir(&dir)
         .output()
         .map_err(|e| format!("cargo 起不来（{}）。AOT 需要本机装 Rust 工具链。", e))?;
@@ -300,7 +377,9 @@ fn build_split(files: &[aot::SplitFile], script: &Path) -> Result<PathBuf, Strin
             written += 1;
         }
     }
-    println!("分块写入：{} 个文件里改了 {} 个", files.len(), written);
+    if verbose() {
+        println!("分块写入：{} 个文件里改了 {} 个", files.len(), written);
+    }
 
     // 共享 target 目录：所有分块工程共用一份编译缓存，float-lang 这类不变的依赖只编一次
     let shared_target = std::env::temp_dir().join("copper_aot_cache");

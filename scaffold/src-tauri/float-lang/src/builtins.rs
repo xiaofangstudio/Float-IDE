@@ -287,13 +287,17 @@ pub fn call_builtin(name: &str, args: &[Value]) -> R<Value> {
             let all_int = matches!(&args[0], Value::Int(_))
                 && (args.len() < 2 || matches!(&args[1], Value::Int(_)))
                 && (args.len() < 3 || matches!(&args[2], Value::Int(_)));
+            // 先估算个数：等生成完再拒绝，内存已经吃下去了
+            let est = ((to - from) / step).max(0.0);
+            if est > crate::limits::MAX_LIST_ITEMS as f64 {
+                return Err(crate::limits::grow_error(
+                    "range 生成的列表", est as usize, crate::limits::MAX_LIST_ITEMS));
+            }
             let mut out: Vec<Value> = Vec::new();
             let mut v = from;
             while (step > 0.0 && v < to) || (step < 0.0 && v > to) {
+                crate::limits::guard_list(out.len(), 1)?;
                 out.push(if all_int { Value::Int(v as i64) } else { Value::Float(v) });
-                if out.len() > 1_000_000 {
-                    return Err("range 生成的列表超过 100 万个元素".into());
-                }
                 v += step;
             }
             Ok(Value::list(out))
@@ -324,7 +328,9 @@ pub fn call_builtin(name: &str, args: &[Value]) -> R<Value> {
         "join" => {
             let mut s = String::new();
             for a in args {
-                s.push_str(&a.to_display());
+                let t = a.to_display();
+                crate::limits::guard_string(s.len(), t.len())?;
+                s.push_str(&t);
             }
             Ok(Value::string(s))
         }
@@ -335,6 +341,7 @@ pub fn call_builtin(name: &str, args: &[Value]) -> R<Value> {
             need(args, 2, "split")?;
             let s = s_of(&args[0]);
             let sep = s_of(&args[1]);
+            crate::limits::guard_list(0, s.len().saturating_add(1))?;
             let parts: Vec<Value> = if sep.is_empty() {
                 s.chars().map(|c| Value::string(c.to_string())).collect()
             } else {
@@ -916,6 +923,7 @@ pub fn str_method(s: &Rc<String>, name: &str, args: &[Value]) -> R<Value> {
         "split" => {
             need(args, 1, "split")?;
             let sep = s_of(&args[0]);
+            crate::limits::guard_list(0, s.len().saturating_add(1))?;
             let parts: Vec<Value> = if sep.is_empty() {
                 s.chars().map(|c| Value::string(c.to_string())).collect()
             } else {
@@ -942,6 +950,7 @@ pub fn str_method(s: &Rc<String>, name: &str, args: &[Value]) -> R<Value> {
         "repeat" => {
             need(args, 1, "repeat")?;
             let n = int_of(&args[0], "repeat")?.max(0) as usize;
+            crate::limits::guard_string(0, s.len().saturating_mul(n))?;
             Ok(Value::string(s.repeat(n)))
         }
         "chars" => Ok(Value::list(
@@ -963,6 +972,7 @@ pub fn list_method(l: &crate::value::ListRef, name: &str, args: &[Value]) -> R<V
         "push" | "add" => {
             need(args, 1, "push")?;
             let mut items = l.borrow_mut();
+            crate::limits::guard_list(items.len(), 1)?;
             items.push(args[0].clone_deep());
             Ok(Value::Int(items.len() as i64))
         }
@@ -982,6 +992,7 @@ pub fn list_method(l: &crate::value::ListRef, name: &str, args: &[Value]) -> R<V
             let i = int_of(&args[0], "insert")?;
             let idx = if i < 0 { (items.len() as i64 + i + 1).max(0) } else { i } as usize;
             let idx = idx.min(items.len());
+            crate::limits::guard_list(items.len(), 1)?;
             items.insert(idx, args[1].clone_deep());
             Ok(Value::Int(items.len() as i64))
         }
@@ -1013,6 +1024,9 @@ pub fn list_method(l: &crate::value::ListRef, name: &str, args: &[Value]) -> R<V
             let sep = if args.is_empty() { String::new() } else { s_of(&args[0]) };
             let items = l.borrow();
             let parts: Vec<String> = items.iter().map(|x| x.to_display()).collect();
+            let total: usize = parts.iter().map(|p| p.len()).sum::<usize>()
+                .saturating_add(sep.len().saturating_mul(parts.len().saturating_sub(1)));
+            crate::limits::guard_string(0, total)?;
             Ok(Value::string(parts.join(&sep)))
         }
         "reverse" => {
@@ -1097,6 +1111,7 @@ pub fn dict_method(d: &crate::value::DictRef, name: &str, args: &[Value]) -> R<V
         "set" => {
             need(args, 2, "set")?;
             let k: Rc<str> = Rc::from(args[0].to_display().as_str());
+            crate::limits::guard_dict(d.borrow().len(), 1)?;
             d.borrow_mut().set(k, args[1].clone_deep());
             Ok(Value::Dict(Rc::clone(d)))
         }

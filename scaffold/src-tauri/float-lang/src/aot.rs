@@ -96,12 +96,6 @@ impl Cg {
         self.locals.as_ref().map(|l| l.contains(name)).unwrap_or(false)
     }
 
-    fn mark_local(&mut self, name: &str) {
-        if let Some(l) = self.locals.as_mut() {
-            l.insert(Rc::from(name));
-        }
-    }
-
     /// 这个变量是否按 i64 存（能证明是整数）
     fn is_int_var(&self, name: &str) -> bool {
         if self.is_local(name) {
@@ -208,20 +202,58 @@ fn needs_control_flow(body: &[Stmt]) -> bool {
     false
 }
 
+
+/// 扫生成代码里 `g.v[N]` / `g.gi[N]` 的最大下标，把「至少需要的槽数」抬上去。
+///
+/// 背景：`slot_of` 会在生成函数体时动态新增全局槽，只按顶层语句算出的数量
+/// 开 `Globals.v` 就可能越界 panic（嵌套 for 踩过一次）。按最终代码反推是最
+/// 可靠的兜底——宁可多开几个 V::Null，也绝不让生成出来的程序崩。
+fn needed_slots(code: &str, need_v: &mut usize, need_gi: &mut usize) {
+    let b = code.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        let (is_v, skip) = if b[i..].starts_with(b"g.v[") {
+            (true, 4)
+        } else if b[i..].starts_with(b"g.gi[") {
+            (false, 5)
+        } else {
+            i += 1;
+            continue;
+        };
+        let mut j = i + skip;
+        let mut n: usize = 0;
+        let mut any = false;
+        while j < b.len() && b[j].is_ascii_digit() {
+            n = n.saturating_mul(10).saturating_add((b[j] - b'0') as usize);
+            any = true;
+            j += 1;
+        }
+        if any {
+            let need = n + 1;
+            if is_v { *need_v = (*need_v).max(need); } else { *need_gi = (*need_gi).max(need); }
+        }
+        i = if j > i { j } else { i + 1 };
+    }
+}
+
 fn collect_locals(body: &[Stmt], out: &mut HashSet<Rc<str>>) -> Result<(), AotError> {
     for s in body {
         match &s.kind {
             StmtKind::Decl { name, .. } => {
                 out.insert(Rc::clone(name));
             }
-            StmtKind::ForRange { var, .. } => {
+            /* 循环变量和循环体里的声明都得算局部：以前这里没递归 body，
+             * 嵌套 for 的 j 会被当成全局，生成代码里冒出没登记过的槽号。 */
+            StmtKind::ForRange { var, body, .. } => {
                 out.insert(Rc::clone(var));
+                collect_locals(body, out)?;
             }
-            StmtKind::ForIn { var, value_name, .. } => {
+            StmtKind::ForIn { var, value_name, body, .. } => {
                 out.insert(Rc::clone(var));
                 if let Some(v) = value_name {
                     out.insert(Rc::clone(v));
                 }
+                collect_locals(body, out)?;
             }
             StmtKind::If { branches, else_body } => {
                 for (_, b) in branches {
@@ -295,8 +327,9 @@ fn classify_int_vars(body: &[Stmt]) -> HashSet<Rc<str>> {
                     out.insert(Rc::clone(name));
                 }
                 // for 变量是 range 产生的整数；for-in 的变量来源不定，不算
-                StmtKind::ForRange { var, .. } => {
+                StmtKind::ForRange { var, body, .. } => {
                     out.insert(Rc::clone(var));
+                    find_cands(body, out);
                 }
                 StmtKind::If { branches, else_body } => {
                     for (_, b) in branches {
@@ -307,10 +340,6 @@ fn classify_int_vars(body: &[Stmt]) -> HashSet<Rc<str>> {
                     }
                 }
                 StmtKind::While { body, .. } | StmtKind::Repeat { body, .. } | StmtKind::Group(body) => find_cands(body, out),
-                StmtKind::ForRange { var, body, .. } => {
-                    out.insert(Rc::clone(var));
-                    find_cands(body, out);
-                }
                 StmtKind::ForIn { body, .. } => find_cands(body, out),
                 StmtKind::Try { body, catch_body, finally, .. } => {
                     find_cands(body, out);
@@ -344,7 +373,7 @@ fn classify_int_vars(body: &[Stmt]) -> HashSet<Rc<str>> {
                             }
                         }
                     }
-                    StmtKind::ForIn { var, value_name, .. } => {
+                    StmtKind::ForIn { var, value_name, body, .. } => {
                         if cands.contains(var) {
                             bad.insert(Rc::clone(var));
                         }
@@ -353,6 +382,8 @@ fn classify_int_vars(body: &[Stmt]) -> HashSet<Rc<str>> {
                                 bad.insert(Rc::clone(v));
                             }
                         }
+                        // 循环体也得扫：这个分支原先吞掉所有 ForIn，后面的递归永远走不到
+                        scan_assigns(body, cands, bad);
                     }
                     StmtKind::If { branches, else_body } => {
                         for (_, b) in branches {
@@ -363,7 +394,7 @@ fn classify_int_vars(body: &[Stmt]) -> HashSet<Rc<str>> {
                         }
                     }
                     StmtKind::While { body, .. } | StmtKind::Repeat { body, .. } | StmtKind::Group(body) => scan_assigns(body, cands, bad),
-                    StmtKind::ForRange { body, .. } | StmtKind::ForIn { body, .. } => scan_assigns(body, cands, bad),
+                    StmtKind::ForRange { body, .. } => scan_assigns(body, cands, bad),
                     StmtKind::Try { body, catch_body, finally, .. } => {
                         scan_assigns(body, cands, bad);
                         scan_assigns(catch_body.as_deref().unwrap_or(&[]), cands, bad);
@@ -727,6 +758,15 @@ pub fn emit(prog: &Program) -> Result<String, AotError> {
         fn_code.push(std::mem::take(&mut fcg.out));
     }
 
+    /* 兜底：按最终生成的代码反推槽数。顶层算出的 n_globals 可能漏掉函数体里
+     * 动态新增的槽，少开一格就是一次越界 panic。 */
+    let mut n_globals = n_globals;
+    let mut n_gi = n_gi;
+    needed_slots(&body_code, &mut n_globals, &mut n_gi);
+    for f in &fn_code {
+        needed_slots(f, &mut n_globals, &mut n_gi);
+    }
+
     /* ── 组装 ── */
     let mut doc: Vec<String> = Vec::new();
     doc.push("// 本文件由 Float IDE AOT 自动生成（Copper → Rust）。要改逻辑请改源 .co 再编译。".into());
@@ -815,7 +855,7 @@ fn emit_stmt(cg: &mut Cg, s: &Stmt, top_level: bool) -> Result<(), AotError> {
     match &s.kind {
         StmtKind::Nop => Ok(()),
         StmtKind::Group(b) => emit_stmts_owned(cg, b, top_level),
-        StmtKind::Decl { name, init, .. } => {
+        StmtKind::Decl { name, ty, init } => {
             let is_int = cg.is_int_var(name);
             match (is_int, init) {
                 (true, Some(e)) => {
@@ -832,7 +872,21 @@ fn emit_stmt(cg: &mut Cg, s: &Stmt, top_level: bool) -> Result<(), AotError> {
                     let v = emit_expr(cg, e)?;
                     cg.assign_var(name, &v);
                 }
-                (false, None) => cg.assign_var(name, "V::Null"),
+                /* `list xs` / `str s` / `dict d` 不给初值时要按类型给空容器，
+                 * 不能一律 null —— 不然一句 `add 3 to xs` 就崩在 null 上。
+                 * 这条和 VM 的默认值必须一模一样（VM 那边是 BuildList(0) 之类）。 */
+                (false, None) => {
+                    let d = match ty {
+                        crate::TypeName::List => "V::List(Rc::new(std::cell::RefCell::new(Vec::new())))",
+                        crate::TypeName::Dict => "V::Dict(Rc::new(std::cell::RefCell::new(Dict::new())))",
+                        crate::TypeName::Str => "V::Str(Rc::new(String::new()))",
+                        crate::TypeName::Bool => "V::Bool(false)",
+                        crate::TypeName::Float => "V::Float(0.0)",
+                        crate::TypeName::Int => "V::Int(0)",
+                        _ => "V::Null",
+                    };
+                    cg.assign_var(name, d)
+                }
             }
             Ok(())
         }
@@ -1542,7 +1596,6 @@ fn emit_expr(cg: &mut Cg, e: &Expr) -> Result<String, AotError> {
 /// 调用：用户函数（补默认值）→ 内建 → 动态（一等公民函数值）
 fn emit_call(cg: &mut Cg, name: &str, args: &[Expr], e: &Expr) -> Result<String, AotError> {
     let aa = emit_args(cg, args)?;
-    let call_args = aa.join(", ");
 
     let meta_clone = cg.meta.get(name).cloned();
     if let Some(m) = meta_clone {
@@ -2258,7 +2311,7 @@ pub fn emit_split(prog: &Program, bin: &str, dep_path: &str) -> Result<Vec<Split
     let mut init_code: Vec<String> = Vec::new();
     let mut cur: Option<Cg> = None;
     let mut cur_count = 0usize;
-    let mut flush = |cg: &mut Option<Cg>, code: &mut Vec<String>, app_top: &mut String, uses_mcall: &mut bool, uses_dcall: &mut bool| {
+    let flush = |cg: &mut Option<Cg>, code: &mut Vec<String>, app_top: &mut String, uses_mcall: &mut bool, uses_dcall: &mut bool| {
         if let Some(mut c) = cg.take() {
             *uses_mcall |= c.uses_mcall;
             *uses_dcall |= c.uses_dcall;
@@ -2330,7 +2383,6 @@ pub fn emit_split(prog: &Program, bin: &str, dep_path: &str) -> Result<Vec<Split
             .collect();
         return Err(AotError::msg(format!("内部错误：全局槽位在分块时不一致（多出来的：{:?}）", extra)));
     }
-    let body_code = String::new();
 
     // 分组后每块单独一个 crate（只依赖 rt，跨块/方法调用都走注册表）
     if group_top {
@@ -2372,10 +2424,18 @@ pub fn emit_split(prog: &Program, bin: &str, dep_path: &str) -> Result<Vec<Split
     for k in 0..nchunks {
         app.push_str(&format!("    register(copper_chunk{}::TABLE);\n", k));
     }
+    // 同上：分块路径也要按实际生成的代码开够槽，不然 chunk 里新增的全局会越界
+    let mut need_v = globals.len();
+    let mut need_gi = gi_list0.len();
+    for f in &files {
+        if f.rel.ends_with(".rs") {
+            needed_slots(&f.content, &mut need_v, &mut need_gi);
+        }
+    }
     app.push_str(&format!(
         "    let mut g = Globals {{ v: vec![V::Null; {}], gi: vec![0i64; {}] }};\n",
-        globals.len(),
-        gi_list0.len()
+        need_v,
+        need_gi
     ));
     if group_top {
         // 顶层语句按顺序跑：任意一块出错就整体停下（和单块 run_top 的语义一致）
@@ -2423,7 +2483,9 @@ pub fn emit_split(prog: &Program, bin: &str, dep_path: &str) -> Result<Vec<Split
     files.push(SplitFile {
         rel: "Cargo.toml".into(),
         content: format!(
-            "[workspace]\nresolver = \"2\"\nmembers = [{}]\n\n[profile.release]\nopt-level = 3\nlto = false\ncodegen-units = 16\npanic = \"abort\"\nincremental = false\ndebug = false\nstrip = \"symbols\"\n",
+            /* opt-level 2 + 4 个 codegen 单元：16 个单元会让 LLVM 并行吃更多内存，
+             * 整机卡死过。AOT 慢一点点没关系，稳定和不占内存优先。 */
+            "[workspace]\nresolver = \"2\"\nmembers = [{}]\n\n[profile.release]\nopt-level = 2\nlto = false\ncodegen-units = 4\npanic = \"abort\"\nincremental = false\ndebug = false\nstrip = \"symbols\"\n",
             members.iter().map(|m| format!("\"{}\"", m)).collect::<Vec<_>>().join(", ")
         ),
     });

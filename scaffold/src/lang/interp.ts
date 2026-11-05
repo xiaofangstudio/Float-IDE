@@ -9,9 +9,10 @@
  */
 
 import type { Expr, Program, Span, Stmt, Target, TypeName } from './ast';
-import { LIMITS } from './limits';
+import { LIMITS, growError, guardDict, guardList, guardString } from './limits';
 import { parseProgram } from './parse';
 import { getBuiltin, emptyDict } from './builtins';
+import { isNamespace } from './stdlib';
 import { compileProgram, CompiledRuntime, RuntimeError as CodeRuntimeError, StopSignal as CodeStopSignal, isCInst } from './codegen';
 import { callBuiltinMethod, MethodError } from './methods';
 
@@ -192,6 +193,8 @@ export class Runner {
   private lastNode: Stmt | null = null;
   /** 当前 import 嵌套层数（防递归吃栈） */
   private importDepth = 0;
+  /** 本次运行已输出的字节数（和 Rust 内核 MAX_OUTPUT 对齐） */
+  private outBytes = 0;
 
   constructor(
     private entryFile: string,
@@ -203,6 +206,20 @@ export class Runner {
     private explicitSources: Map<string, string> | null = null
   ) {
     this.env = this.globals;
+    /* 输出字节上限：死循环里不停 print 时明确停下来报错，别让宿主一路攒字符串。
+     * 包在 hook 出口上，编译通道与解释通道都自动受管。 */
+    const rawHook = this.hook;
+    const rawOutput = rawHook.output;
+    this.hook = {
+      ...rawHook,
+      output: (l) => {
+        this.outBytes += l.text.length * 2;
+        if (this.outBytes > LIMITS.outputBytes) {
+          throw growError('输出', this.outBytes, LIMITS.outputBytes);
+        }
+        rawOutput.call(rawHook, l);
+      },
+    };
   }
 
   /* ── 对外接口 ── */
@@ -298,6 +315,7 @@ export class Runner {
   /* ── 启动 ── */
 
   start(mode: 'run' | 'debug'): void {
+    this.outBytes = 0;
     this.mode = mode;
     // 调试模式先停在第一条语句，运行模式一路跑
     this.stepMode = mode === 'debug' ? 'into' : 'none';
@@ -381,15 +399,16 @@ export class Runner {
         };
         this.crt = rt;
         this.gen = unit.main(rt) as unknown as SigGen;
-        this.hook.output({ kind: 'info', text: '运行开始（编译执行）' });
       }
     }
     if (!this.gen) {
+      // F5（运行）不写"编译执行/解释执行"：降级是内部的事，说了只是噪音。
+      // F6 是用户自己选的调试模式，照旧标出来（断点快捷键要提示）。
       this.hook.output({
         kind: 'info',
         text: mode === 'debug'
           ? '调试开始（解释执行 · F8 继续 · F10 跳过 · F11 进入 · Shift+F11 跳出）'
-          : '运行开始（解释执行）'
+          : '运行开始'
       });
       this.gen = this.execBlock(program.body, this.globals, 0);
     }
@@ -895,6 +914,7 @@ export class Runner {
         yield { kind: 'stmt', node: s, depth };
         const target = yield* this.evalExpr(targetExpr(s.target), env);
         if (!isList(target)) throw new FloatError(`「${this.targetName(s.target)}」不是列表`, s);
+        guardList(target.length);
         target.push(cloneVal(yield* this.evalExpr(s.value, env)));
         return 'normal';
       }
@@ -907,6 +927,7 @@ export class Runner {
         if (at === null) throw new FloatError('插入位置必须是数字', s);
         const i = Math.trunc(at);
         if (i < 0 || i > target.length) throw new FloatError(`插入位置 ${i} 超出范围（长度 ${target.length}）`, s);
+        guardList(target.length);
         target.splice(i, 0, cloneVal(yield* this.evalExpr(s.value, env)));
         return 'normal';
       }
@@ -975,6 +996,7 @@ export class Runner {
         const target = yield* this.evalExpr(targetExpr(s.target), env);
         if (!isDict(target)) throw new FloatError(`「${this.targetName(s.target)}」不是字典`, s);
         const key = toStr(yield* this.evalExpr(s.key, env));
+        guardDict(target.map.size);
         target.map.set(key, cloneVal(yield* this.evalExpr(s.value, env)));
         return 'normal';
       }
@@ -1104,6 +1126,10 @@ export class Runner {
         if (this.classes.has(e.name)) throw new FloatError(`「${e.name}」是类名，要创建实例请写 new ${e.name}(…)`, e);
         if (this.funcs.has(e.name)) throw new FloatError(`「${e.name}」是函数，调用要写 ${e.name}(…)`, e);
         if (env.selfObj && env.selfObj.fields.has(e.name)) return env.selfObj.fields.get(e.name) as Val;
+        // 标准库命名空间不是变量：多半是函数名打错了
+        if (isNamespace(e.name)) {
+          throw new FloatError(`「${e.name}」是标准库命名空间，不是变量——检查函数名拼写（帮助 → 标准库 里有全表）`, e);
+        }
         throw new FloatError(`变量「${e.name}」没有定义（先声明或赋值）`, e);
       }
       case 'self': {
@@ -1225,8 +1251,12 @@ export class Runner {
           if (n === null) throw new FloatError(`指针只能加上整数格数，得到 ${fmtVal(a)}`, e);
           return shiftPtr(b, Math.trunc(n));
         }
-        if (typeof a === 'string' || typeof b === 'string') return toStr(a) + toStr(b);
-        if (isList(a) && isList(b)) return [...a, ...b];
+        if (typeof a === 'string' || typeof b === 'string') {
+          const x = toStr(a), y = toStr(b);
+          guardString(x.length, y.length);
+          return x + y;
+        }
+        if (isList(a) && isList(b)) { guardList(0, a.length + b.length); return [...a, ...b]; }
         return this.numOr(a, '+', e) + this.numOr(b, '+', e);
       case '-': {
         // 指针相减 = 中间隔了几格；指针减整数 = 往回挪
@@ -1242,7 +1272,11 @@ export class Runner {
         return this.numOr(a, '-', e) - this.numOr(b, '-', e);
       }
       case '*':
-        if (typeof a === 'string' && typeof b === 'number') return a.repeat(Math.max(0, Math.trunc(b)));
+        if (typeof a === 'string' && typeof b === 'number') {
+          const n = Math.max(0, Math.trunc(b));
+          guardString(0, a.length * n);
+          return a.repeat(n);
+        }
         return this.numOr(a, '*', e) * this.numOr(b, '*', e);
       case '/': {
         const d = this.numOr(b, '/', e);
@@ -1543,8 +1577,12 @@ export class Runner {
   private applyCompound(op: string, cur: Val, rhs: Val, s: Stmt): Val {
     switch (op) {
       case '+=':
-        if (typeof cur === 'string' || typeof rhs === 'string') return toStr(cur) + toStr(rhs);
-        if (isList(cur) && isList(rhs)) return [...cur, ...rhs];
+        if (typeof cur === 'string' || typeof rhs === 'string') {
+          const x = toStr(cur), y = toStr(rhs);
+          guardString(x.length, y.length);
+          return x + y;
+        }
+        if (isList(cur) && isList(rhs)) { guardList(0, cur.length + rhs.length); return [...cur, ...rhs]; }
         return this.numOr(cur, '+=', s) + this.numOr(rhs, '+=', s);
       case '-=': return this.numOr(cur, '-=', s) - this.numOr(rhs, '-=', s);
       case '*=': return this.numOr(cur, '*=', s) * this.numOr(rhs, '*=', s);

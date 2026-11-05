@@ -5,6 +5,7 @@
  */
 
 import { dict, fmtVal, isDict, isList, toNum, toStr, type DictVal, type Val } from './values';
+import { guardDict, guardList, guardString } from './limits';
 
 export type MethodResult = { handled: true; value: Val } | { handled: false };
 
@@ -41,11 +42,13 @@ function strMethod(s: string, name: string, a: Val[]): MethodResult {
     case 'upper': return { handled: true, value: s.toUpperCase() };
     case 'lower': return { handled: true, value: s.toLowerCase() };
     case 'trim': return { handled: true, value: s.trim() };
-    case 'split': return { handled: true, value: s.split(a.length ? str(a[0]) : '') };
+    case 'split': { guardList(0, s.length + 1); return { handled: true, value: s.split(a.length ? str(a[0]) : '') }; }
     case 'replace': {
       const from = str(a[0] ?? '');
       const to = str(a[1] ?? '');
-      return { handled: true, value: s.split(from).join(to) };
+      const parts = s.split(from);
+      guardString(0, s.length + (parts.length - 1) * (to.length - from.length));
+      return { handled: true, value: parts.join(to) };
     }
     case 'find':
     case 'index_of': return { handled: true, value: s.indexOf(str(a[0] ?? '')) };
@@ -59,8 +62,12 @@ function strMethod(s: string, name: string, a: Val[]): MethodResult {
       const len = a.length >= 2 ? Math.trunc(num(a[1], 'substr')) : s.length;
       return { handled: true, value: s.slice(start, start + len) };
     }
-    case 'repeat': return { handled: true, value: s.repeat(Math.max(0, Math.trunc(num(a[0] ?? 1, 'repeat')))) };
-    case 'chars': return { handled: true, value: s.split('') };
+    case 'repeat': {
+      const n = Math.max(0, Math.trunc(num(a[0] ?? 1, 'repeat')));
+      guardString(0, s.length * n);
+      return { handled: true, value: s.repeat(n) };
+    }
+    case 'chars': { guardList(0, s.length); return { handled: true, value: s.split('') }; }
     case 'to_int': return { handled: true, value: Math.trunc(num(s.trim() === '' ? 0 : s, 'to_int')) };
     case 'to_float': return { handled: true, value: num(s.trim() === '' ? 0 : s, 'to_float') };
     case 'len': return { handled: true, value: s.length };
@@ -71,11 +78,12 @@ function strMethod(s: string, name: string, a: Val[]): MethodResult {
 function listMethod(xs: Val[], name: string, a: Val[]): MethodResult {
   switch (name) {
     case 'push':
-    case 'add': xs.push(a[0] ?? null); return { handled: true, value: xs.length };
+    case 'add': guardList(xs.length); xs.push(a[0] ?? null); return { handled: true, value: xs.length };
     case 'pop': return { handled: true, value: xs.length ? (xs.pop() as Val) : null };
     case 'insert': {
       const i = Math.trunc(num(a[0] ?? 0, 'insert'));
       const at = Math.max(0, Math.min(xs.length, i));
+      guardList(xs.length);
       xs.splice(at, 0, a[1] ?? null);
       return { handled: true, value: xs.length };
     }
@@ -86,7 +94,12 @@ function listMethod(xs: Val[], name: string, a: Val[]): MethodResult {
     }
     case 'index_of': return { handled: true, value: xs.findIndex((x) => JSON.stringify(x) === JSON.stringify(a[0] ?? null)) };
     case 'contains': return { handled: true, value: xs.some((x) => JSON.stringify(x) === JSON.stringify(a[0] ?? null)) };
-    case 'join': return { handled: true, value: xs.map((x) => str(x)).join(a.length ? str(a[0]) : '') };
+    case 'join': {
+      const sep = a.length ? str(a[0]) : '';
+      const parts = xs.map(str);
+      guardString(0, parts.reduce((n, x) => n + x.length, 0) + sep.length * Math.max(0, parts.length - 1));
+      return { handled: true, value: parts.join(sep) };
+    }
     case 'reverse': xs.reverse(); return { handled: true, value: xs };
     case 'sort': {
       /* 与 Rust 内核对齐：数字比数字，其余一律按字符串字典序（不用 locale，
@@ -126,6 +139,7 @@ function dictMethod(d: DictVal, name: string, a: Val[]): MethodResult {
     }
     case 'get': return { handled: true, value: d.map.has(str(a[0] ?? '')) ? (d.map.get(str(a[0] ?? '')) as Val) : (a[1] ?? null) };
     case 'set': {
+      guardDict(d.map.size);
       d.map.set(str(a[0] ?? ''), a[1] ?? null);
       return { handled: true, value: dict() };
     }

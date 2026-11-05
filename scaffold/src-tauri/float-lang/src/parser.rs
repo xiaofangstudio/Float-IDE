@@ -468,6 +468,9 @@ impl<'a> ExprParser<'a> {
                 /* 标准库：`os.readfile(x)` 里的 os 是命名空间，不是变量。
                  * 编译期直接收敛成一次内建调用（内建名就叫 "os.readfile"），
                  * 这样 VM / 解释器 / AOT 三处都不用为命名空间加新东西。 */
+                /* 解析期不知道 `data` 是标准库还是用户变量：`str data = "a,b"` 之后
+                 * 写 `data.split(",")` 是字符串方法。所以只在名字确实是标准库函数时
+                 * 收敛成内建名，其余退回普通成员调用，运行期按实际值分派。 */
                 if let ExprKind::Var(base) = &e.kind {
                     if crate::stdlib::is_namespace(base) {
                         let full = format!("{}.{}", base, name_tok.text);
@@ -475,10 +478,6 @@ impl<'a> ExprParser<'a> {
                             e = Expr::new(ExprKind::Var(Rc::from(full.as_str())), span);
                             continue;
                         }
-                        return Err(FloatError::new(
-                            format!("{} 里没有 {} 这个函数", base, name_tok.text),
-                            span,
-                        ));
                     }
                 }
                 e = Expr::new(
@@ -817,8 +816,9 @@ pub struct Parser {
 use crate::limits::NEST as MAX_NEST;
 
 /// 单条表达式最多嵌套多少层（括号 / 调用 / 列表都算）。正常人写不到 50 层，
-/// 给 256 层余量；真超了明确报错，而不是让递归把栈打穿。
-const MAX_EXPR_DEPTH: usize = 256;
+/// 给 64 层余量；真超了明确报错，而不是让递归把栈打穿（debug 构建栈帧很肥，
+/// 256 层实测就能溢出，128 层也是边缘，64 层才稳）。
+const MAX_EXPR_DEPTH: usize = 64;
 
 /// 入口：把源码解析成 Program
 pub fn parse_program(file: &str, src: &str) -> Program {
