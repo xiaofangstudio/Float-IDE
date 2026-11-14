@@ -2,7 +2,7 @@
  * 这几个都是用户明确点名的毛病，任何时候回退都要在这里炸出来。 */
 
 import { analyze } from '../src/lang/analyze';
-import { buildCompletions, type Completion } from '../src/lang/completions';
+import { buildCompletions, visibleCompletions, type Completion } from '../src/lang/completions';
 import { contextAt } from '../src/lang/context';
 
 let pass = 0;
@@ -182,6 +182,24 @@ function labels(list: Completion[]): string[] {
   const names = labels(all);
   ok('全局补全能搜到 data.sum', names.includes('data.sum'));
   ok('全局补全能搜到 json.parse', names.includes('json.parse'));
+}
+
+/* ── 10. 变量优先；模板不许抢位（for 里的 i 不能被 if 顶掉） ──
+ * 用户原话：在 for 里写 i 很容易被判成 if，一敲回车整段都换成 if 了。 */
+{
+  const all = compsAt('for i in range(5)\n    i▮\n', 'i');
+  const sorted = [...all].sort((a, b) => a.sortText.localeCompare(b.sortText));
+  eq('for 里的 i 排第一', sorted[0]?.label, 'i');
+  eq('i 是变量（不是关键字/模板）', sorted[0]?.kind, 'variable');
+
+  // 特殊变量（ans / __last_*）不许挤在变量后面抢位置
+  const names = sorted.map((c) => c.label);
+  ok('特殊变量 ans 排在关键字 if 之后', names.indexOf('ans') > names.indexOf('if'));
+
+  // 前缀太短时模板根本不进候选：回车不可能换成整段 if else
+  ok('打 i 时没有模板片段', visibleCompletions(all, 'i').every((c) => c.kind !== 'snippet'));
+  ok('打 if 时没有模板片段', visibleCompletions(all, 'if').every((c) => c.kind !== 'snippet'));
+  ok('打 ife 时模板才出现', visibleCompletions(all, 'ife').some((c) => c.kind === 'snippet'));
 }
 
 console.log(`\n通过 ${pass} 项，失败 ${fail} 项`);

@@ -27,7 +27,18 @@ type ConfirmReq = {
   resolve: (v: boolean) => void;
 };
 
-type Req = TextReq | ConfirmReq;
+/** 三选一：取消 / 第二个动作 / 主按钮。关软件时问「保存 / 不保存 / 取消」用。 */
+type ChoiceReq = {
+  kind: 'choice';
+  title: string;
+  hint?: string;
+  okText: string;
+  altText: string;
+  danger: boolean;
+  resolve: (v: 'ok' | 'alt' | null) => void;
+};
+
+type Req = TextReq | ConfirmReq | ChoiceReq;
 
 let current: Req | null = null;
 const listeners = new Set<(r: Req | null) => void>();
@@ -71,6 +82,24 @@ export function askConfirm(
   });
 }
 
+export function askChoice(
+  title: string,
+  opts: { hint?: string; okText: string; altText: string; danger?: boolean }
+): Promise<'ok' | 'alt' | null> {
+  return new Promise((resolve) => {
+    current = {
+      kind: 'choice',
+      title,
+      hint: opts.hint,
+      okText: opts.okText,
+      altText: opts.altText,
+      danger: opts.danger ?? false,
+      resolve: (v) => { current = null; emit(); resolve(v); }
+    };
+    emit();
+  });
+}
+
 /** 挂在 App 根部一次即可 */
 export function PromptHost(): React.ReactElement | null {
   const [req, setReq] = useState<Req | null>(current);
@@ -95,6 +124,7 @@ export function PromptHost(): React.ReactElement | null {
   const ok = useCallback((): void => {
     if (!req) return;
     if (req.kind === 'confirm') { req.resolve(true); return; }
+    if (req.kind === 'choice') { req.resolve('ok'); return; }
     const v = text.trim();
     const bad = req.validate?.(v) ?? (v ? null : '不能为空');
     if (bad) { setErr(bad); return; }
@@ -103,8 +133,9 @@ export function PromptHost(): React.ReactElement | null {
 
   const cancel = useCallback((): void => {
     if (!req) return;
-    if (req.kind === 'confirm') req.resolve(false);
-    else req.resolve(null);
+    if (req.kind === 'text') { req.resolve(null); return; }
+    if (req.kind === 'confirm') { req.resolve(false); return; }
+    req.resolve(null);
   }, [req]);
 
   if (!req) return null;
@@ -134,8 +165,11 @@ export function PromptHost(): React.ReactElement | null {
         )}
         <div className="prompt-actions">
           <button className="btn" onClick={cancel}>取消</button>
-          <button className={`btn ${req.kind === 'confirm' && req.danger ? 'danger' : 'primary'}`} onClick={ok}>
-            {req.kind === 'confirm' ? req.okText : '确定'}
+          {req.kind === 'choice' && (
+            <button className="btn" onClick={() => req.resolve('alt')}>{req.altText}</button>
+          )}
+          <button className={`btn ${req.kind !== 'text' && req.danger ? 'danger' : 'primary'}`} onClick={ok}>
+            {req.kind === 'text' ? '确定' : req.okText}
           </button>
         </div>
       </div>

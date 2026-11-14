@@ -37,6 +37,33 @@ export class LexError extends Error {
   }
 }
 
+/* 中文输入法打出来的全角符号：**代码区一律按半角处理**，字符串内容不动。
+ * 不处理的话，用户写 `print（"a"）` 只会看到「无法识别的字符「（」」——
+ * 从屏幕上看两个括号几乎一模一样，根本猜不到是全角。
+ * 只映射"代码里一定当符号用"的字符；全角数字/全角字母不映射（那些更可能是笔误）。 */
+const FULLWIDTH: Record<string, string> = {
+  '＋': '+', '－': '-', '＊': '*', '／': '/', '％': '%', '＝': '=', '＜': '<', '＞': '>',
+  '！': '!', '＆': '&', '｜': '|', '＾': '^', '～': '~', '〜': '~',
+  '（': '(', '）': ')', '［': '[', '］': ']', '｛': '{', '｝': '}',
+  '，': ',', '；': ';', '：': ':', '？': '?', '。': '.',
+  '“': '"', '”': '"', '‘': "'", '’': "'"
+};
+
+/** 全角符号 → 半角；其他字符原样返回 */
+export const normChar = (c: string): string => FULLWIDTH[c] ?? c;
+
+/** 从 at 开始，归一化后是否等于 want（多字符运算符也能跨全角匹配） */
+const startsWithNorm = (s: string, at: number, want: string): boolean => {
+  if (at + want.length > s.length) return false;
+  for (let k = 0; k < want.length; k++) {
+    if (normChar(s[at + k]) !== want[k]) return false;
+  }
+  return true;
+};
+
+/** 全角区 / 中文标点区：报错时用来给"换成半角"的提示 */
+const isFullwidthRange = (c: string): boolean => /[\uFF00-\uFFEF\u3000-\u303F]/.test(c);
+
 export const isIdStart = (c: string): boolean =>
   /[A-Za-z_]/.test(c) || (c >= '\u4e00' && c <= '\u9fa5') || (c >= '\u3400' && c <= '\u4dbf');
 
@@ -51,7 +78,8 @@ export function tokenizeLine(src: string, line: number, startCol = 1): Token[] {
   };
 
   while (i < src.length) {
-    const c = src[i];
+    const raw = src[i];
+    const c = normChar(raw);   // 全角符号在这里归一成半角，字符串内容不受影响
 
     if (c === ' ' || c === '\t' || c === '\u3000') { i++; continue; }
     if (c === '\r') { i++; continue; }
@@ -65,9 +93,9 @@ export function tokenizeLine(src: string, line: number, startCol = 1): Token[] {
       let j = i + 1;
       let text = '';
       let depth = 0; // {…} 插值里允许出现引号
-      while (j < src.length && !(src[j] === quote && depth === 0)) {
-        if (src[j] === '{') depth++;
-        else if (src[j] === '}' && depth > 0) depth--;
+      while (j < src.length && !(normChar(src[j]) === quote && depth === 0)) {
+        if (normChar(src[j]) === '{') depth++;
+        else if (normChar(src[j]) === '}' && depth > 0) depth--;
         if (src[j] === '\\' && j + 1 < src.length) {
           const e = src[j + 1];
           text += e === 'n' ? '\n'
@@ -135,10 +163,10 @@ export function tokenizeLine(src: string, line: number, startCol = 1): Token[] {
       continue;
     }
 
-    // 运算符（长的优先）
+    // 运算符（长的优先）。按归一化字符逐位比，`＝` 这类全角写法也能匹配 `=`
     let matched = '';
     for (const op of OPERATORS) {
-      if (src.startsWith(op, i)) { matched = op; break; }
+      if (startsWithNorm(src, i, op)) { matched = op; break; }
     }
     if (matched) {
       push('op', matched, startCol + i, startCol + i + matched.length);
@@ -152,7 +180,11 @@ export function tokenizeLine(src: string, line: number, startCol = 1): Token[] {
       continue;
     }
 
-    throw new LexError(`无法识别的字符「${c}」`, line, startCol + i);
+    throw new LexError(
+      `无法识别的字符「${raw}」${isFullwidthRange(raw) ? '——这是全角/中文标点，代码里要写半角' : ''}`,
+      line,
+      startCol + i
+    );
   }
 
   out.push({ k: 'eof', v: '', line, col: startCol + src.length, endCol: startCol + src.length });
@@ -178,14 +210,16 @@ export function codePart(line: string, legacyLine = 0): { code: string; comment:
     const c = line[i];
     if (inStr) {
       if (c === '\\') { i++; continue; }
-      if (c === inStr) inStr = null;
+      if (normChar(c) === inStr) inStr = null;
       continue;
     }
-    if (c === '"' || c === "'") { inStr = c; continue; }
-    if (c === '/' && line[i + 1] === '*') {
+    /* 中文引号也要当成字符串边界，否则 `print(“a /* b”)` 会把注释切在半截 */
+    const n = normChar(c);
+    if (n === '"' || n === "'") { inStr = n; continue; }
+    if (n === '/' && normChar(line[i + 1] ?? '') === '*') {
       return { code: line.slice(0, i), comment: line.slice(i + 2) };
     }
-    if (c === '-' && line[i + 1] === '-') {
+    if (n === '-' && normChar(line[i + 1] ?? '') === '-') {
       const leftOk = i === 0 || /\s/.test(line[i - 1]);
       const after = line[i + 2];
       const rightOk = after === undefined || /\s/.test(after);

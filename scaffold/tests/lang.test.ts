@@ -405,6 +405,79 @@ function hello()
     await both('护栏不误杀正常脚本', 'list xs = [1, 2, 3]\nxs.push(4)\nprint(len(xs))\nprint("ab" * 2)\n', ['4', 'abab']);
   }
 
+  /* ── 表达式链：`+` 串起来之后必须整条吃进同一个表达式 ──
+   * 以前出现过「解析到第二个 + 就收手，把后面的字符串当成新参数」，
+   * 报「参数列表要闭合 / 期望右括号，实际是字符串」。这里把「表达式能出现的
+   * 每个位置」都铺一遍：print、无括号 print、函数实参、列表元素、赋值右侧、
+   * 三元两支、比较两侧、括号嵌套。哪个抽取点又提前收手，这里会立刻红。 */
+  {
+    const chains: [string, string, string[]][] = [
+      ['print 里五个操作数', 'str name = "小明"\nint age = 18\nprint("我叫" + name + "今年" + age + "岁")\n', ['我叫小明今年18岁']],
+      ['print 里六个字符串', 'print("a" + "b" + "c" + "d" + "e" + "f")\n', ['abcdef']],
+      ['加号两边不留空格', 'str n = "x"\nprint("a"+n+"b")\n', ['axb']],
+      ['无括号 print 也要吃整条链', 'str n = "x"\nprint "a" + n + "b"\n', ['axb']],
+      ['括号嵌套里的链', 'str n = "x"\nprint(("a" + n) + ("b" + "c"))\n', ['axbc']],
+      ['调用结果夹在链里', 'int age = 18\nprint("今年" + str(age) + "岁")\n', ['今年18岁']],
+      ['三元两支各是一条链', 'int age = 18\nstr n = "明"\nprint(age > 10 ? "成年" + n : "未成年" + n)\n', ['成年明']],
+      ['列表元素里各是一条链', 'str n = "x"\nlist xs = ["a" + n, "b" + "c"]\nprint(xs[0] + xs[1])\n', ['axbc']],
+      ['赋值右侧是一条链', 'str n = "x"\nstr s = "a" + n + "b"\nprint(s + "!")\n', ['axb!']],
+      ['比较两侧各是一条链', 'str n = "x"\nif ("a" + n) == ("a" + n)\n    print("same")\n', ['same']],
+      ['函数实参里是一条链', 'str n = "x"\nprint(str(len("a" + n + "b")))\n', ['3']],
+      ['十一连加不能断', 'print("a" + "b" + "c" + "d" + "e" + "f" + "g" + "h" + "i" + "j" + "k")\n', ['abcdefghijk']],
+    ];
+    for (const [name, src, expect] of chains) await both(name, src, expect);
+  }
+
+  /* ── 全角符号：中文输入法打出来的括号/加号/逗号/引号，代码区按半角处理 ──
+   * 这条不是"贴心"，是"别让人对着两个一模一样的括号找半天"。
+   * 但字符串内容必须原样保留（里面写什么就是什么）。 */
+  {
+    const fw: [string, string, string[]][] = [
+      ['全角括号', 'print（"你好"）\n', ['你好']],
+      ['全角加号', 'print("a" ＋ "b")\n', ['ab']],
+      ['全角逗号分隔列表', 'list xs = ["a"，"b"]\nprint(xs[0] + xs[1])\n', ['ab']],
+      ['全角引号', 'print(“你好”)\n', ['你好']],
+      ['全角等号赋值', 'int x ＝ 3\nprint(x)\n', ['3']],
+      ['全角比较与括号', 'if （3 ＞ 2）\n    print("ok")\n', ['ok']],
+      ['混合全角半角', 'str n = "x"\nprint（"a" ＋ n ＋ "b"）\n', ['axb']],
+      ['字符串里的全角符号不动', 'print("a＋b，c（d）")\n', ['a＋b，c（d）']],
+    ];
+    for (const [name, src, expect] of fw) await both(name, src, expect);
+  }
+
+  /* ── AST 极端输入：长链不爆栈、深嵌套明确报错、结合性不许被折叠改掉 ──
+   * 这些形状不是"吹毛求疵"：自动生成的代码、粘贴进来的长表达式、
+   * 手滑多打了三十个括号，都会走到这里。栈溢出抛的是 RangeError，
+   * 用户看不懂，编辑器还会卡一下。 */
+  {
+    const longAdd = Array.from({ length: 5000 }, () => '1').join(' + ');
+    await both('五千项加法不爆栈', `print(${longAdd})\n`, ['5000']);
+    const longCat = Array.from({ length: 200 }, () => '"b"').join(' + ');
+    await both('两百段字符串拼接顺序不乱', `print("a" + ${longCat})\n`, ['a' + 'b'.repeat(200)]);
+    await both('减法保持左结合', 'print(10 - 3 - 2)\n', ['5']);
+    await both('除法保持左结合', 'print(8 / 4 / 2)\n', ['1']);
+    await both('幂保持右结合', 'print(2 ** 3 ** 2)\n', ['512']);
+  }
+  {
+    const deepParen = '('.repeat(200) + '1' + ')'.repeat(200);
+    for (const mode of ['run', 'debug'] as const) {
+      const r = await run(`print(${deepParen})\n`, { mode });
+      const msg = r.err.join(' ');
+      eq(`深括号（${mode}）明确说嵌套太深`, msg.includes('嵌套太深'), true);
+      eq(`深括号（${mode}）不是栈溢出`, /Maximum call stack/i.test(msg), false);
+    }
+    const deepIf = Array.from({ length: 300 }, (_, k) => '    '.repeat(k) + 'if (true)').join('\n')
+      + '\n' + '    '.repeat(300) + 'print(1)\n';
+    const rb = await run(deepIf, { mode: 'run' });
+    eq('深 if 明确说嵌套太深', rb.err.join(' ').includes('嵌套太深'), true);
+    eq('深 if 不是栈溢出', /Maximum call stack/i.test(rb.err.join(' ')), false);
+
+    for (const src of ['print("abc\n', 'print(1\n', 'list xs = [1, 2\n', 'dict d = {"a": 1\n', 'if\n    print(1)\n']) {
+      const r = await run(src, { mode: 'run' });
+      eq(`畸形输入有明确诊断：${JSON.stringify(src)}`, r.err.length > 0 && !/Maximum call stack/i.test(r.err.join(' ')), true);
+    }
+  }
+
 
   /* ── 注释：/* 到行尾 ── */
   await both('斜杠星是整行注释', `

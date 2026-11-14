@@ -474,3 +474,103 @@ fn 容器与字符串有内存上限() {
         "4\nabab\n"
     );
 }
+
+/// 表达式链不能被截断：`+` 串起来之后，整条链要进同一个表达式。
+/// 以前出现过「解析到第二个 + 就收手，把后面的字符串当成新参数」，
+/// 报「参数列表要闭合 / 期望右括号，实际是字符串」。
+/// 这里把「表达式能出现的每个位置」都铺一遍：print、无括号 print、函数实参、
+/// 列表元素、赋值右侧、三元两支、比较两侧、括号嵌套。
+#[test]
+fn 表达式链不能被截断() {
+    let cases: &[(&str, &str)] = &[
+        (
+            "str name = \"小明\"\nint age = 18\nprint(\"我叫\" + name + \"今年\" + age + \"岁\")",
+            "我叫小明今年18岁\n",
+        ),
+        ("print(\"a\" + \"b\" + \"c\" + \"d\" + \"e\" + \"f\")", "abcdef\n"),
+        ("str n = \"x\"\nprint(\"a\"+n+\"b\")", "axb\n"),
+        ("str n = \"x\"\nprint \"a\" + n + \"b\"", "axb\n"),
+        ("str n = \"x\"\nprint((\"a\" + n) + (\"b\" + \"c\"))", "axbc\n"),
+        ("int age = 18\nprint(\"今年\" + str(age) + \"岁\")", "今年18岁\n"),
+        (
+            "int age = 18\nstr n = \"明\"\nprint(age > 10 ? \"成年\" + n : \"未成年\" + n)",
+            "成年明\n",
+        ),
+        (
+            "str n = \"x\"\nlist xs = [\"a\" + n, \"b\" + \"c\"]\nprint(xs[0] + xs[1])",
+            "axbc\n",
+        ),
+        ("str n = \"x\"\nstr s = \"a\" + n + \"b\"\nprint(s + \"!\")", "axb!\n"),
+        (
+            "str n = \"x\"\nif (\"a\" + n) == (\"a\" + n)\n    print(\"same\")",
+            "same\n",
+        ),
+        ("str n = \"x\"\nprint(str(len(\"a\" + n + \"b\")))", "3\n"),
+        (
+            "print(\"a\" + \"b\" + \"c\" + \"d\" + \"e\" + \"f\" + \"g\" + \"h\" + \"i\" + \"j\" + \"k\")",
+            "abcdefghijk\n",
+        ),
+    ];
+    for (src, want) in cases {
+        assert_eq!(out(src), *want, "这条链被截断了：{}", src);
+    }
+}
+
+/// 全角符号：中文输入法打出来的括号/加号/逗号/引号，代码区按半角处理；
+/// 字符串内容必须原样保留。以前只会报「无法识别的字符「（」」——
+/// 屏幕上两个括号几乎一模一样，根本猜不到是全角。
+#[test]
+fn 全角符号按半角处理() {
+    let cases: &[(&str, &str)] = &[
+        ("print（\"你好\"）", "你好\n"),
+        ("print(\"a\" ＋ \"b\")", "ab\n"),
+        ("list xs = [\"a\"，\"b\"]\nprint(xs[0] + xs[1])", "ab\n"),
+        ("print(“你好”)", "你好\n"),
+        ("int x ＝ 3\nprint(x)", "3\n"),
+        ("if （3 ＞ 2）\n    print(\"ok\")", "ok\n"),
+        ("str n = \"x\"\nprint（\"a\" ＋ n ＋ \"b\"）", "axb\n"),
+        ("print(\"a＋b，c（d）\")", "a＋b，c（d）\n"),
+    ];
+    for (src, want) in cases {
+        assert_eq!(out(src), *want, "全角处理不对：{}", src);
+    }
+}
+
+/// AST 极端输入：长链靠平衡折叠不爆栈、结合性不许被折叠改掉、
+/// 深嵌套要明确报错而不是 abort/栈溢出。
+#[test]
+fn 极端表达式不爆栈() {
+    // 长链：全是 + 时平衡成 log₂n 深的树，五千项也只是一瞬间
+    let long_add = vec!["1"; 5000].join(" + ");
+    assert_eq!(out(&format!("print({})", long_add)), "5000\n");
+    // 结合性：- / 是左结合，** 是右结合，不能被平衡折叠改掉
+    assert_eq!(out("print(10 - 3 - 2)"), "5\n");
+    assert_eq!(out("print(8 / 4 / 2)"), "1\n");
+    assert_eq!(out("print(2 ** 3 ** 2)"), "512\n");
+    // 深括号：超过上限要报「嵌套太深」，不是进程消失。
+    // 必须放大栈线程里跑——测试线程只有 2MB，凑到上限附近本身就会爆栈。
+    fn run_big(src: String) -> Result<String, String> {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || match run_text(&src) {
+                Ok(s) => Ok(s),
+                Err(e) => Err(e.message),
+            })
+            .expect("起线程")
+            .join()
+            .expect("线程没崩")
+    }
+    let deep = format!("print({}1{})", "(".repeat(80), ")".repeat(80));
+    let m = run_big(deep).unwrap_err();
+    assert!(m.contains("嵌套太深"), "深括号报错不对：{}", m);
+    // 深缩进块：同上
+    let mut deep_if = String::new();
+    for k in 0..220 {
+        deep_if.push_str(&"    ".repeat(k));
+        deep_if.push_str("if (true)\n");
+    }
+    deep_if.push_str(&"    ".repeat(220));
+    deep_if.push_str("print(1)");
+    let m2 = run_big(deep_if).unwrap_err();
+    assert!(m2.contains("嵌套") && m2.contains("太深"), "深 if 报错不对：{}", m2);
+}

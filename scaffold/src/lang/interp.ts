@@ -382,7 +382,8 @@ export class Runner {
 
     this.setState('running');
 
-    // 运行模式：编译成 JS 交给 V8；编译失败或调试模式：走解释器
+    // TS 兼容通道内部：run 编译成 JS 交给 V8；编译失败或 debug 走逐句解释器。
+    // 真 IDE 的 F5 不经过这里——它直接调 Rust 内核（Workspace.tsx 的 rustRunOnce）。
     this.crt = null;
     this.gen = null;
     if (mode === 'run') {
@@ -1197,6 +1198,14 @@ export class Runner {
           throw new FloatError(`函数「${name}」没有定义`, e);
         }
         if (e.callee.k === 'member') {
+          /* 和编译通道同一条判据：库名当变量用、且确实没声明过这个变量，
+           * 就是"库里没这个函数"，别先报"变量没定义"把人带偏。
+           * 用户真的声明了同名变量（str data = "a,b"）则照常当成员调用。 */
+          const base = e.callee.obj;
+          if (base.k === 'var' && isNamespace(base.name) && env.lookup(base.name) === undefined) {
+            throw new FloatError(
+              `「${base.name}」是标准库命名空间，里面没有 ${e.callee.name} 这个函数——检查函数名拼写（帮助 → 标准库 里有全表）`, e);
+          }
           const obj = yield* this.evalExpr(e.callee.obj, env);
           // 内建方法：s.upper() / xs.push(1) / d.keys()
           try {

@@ -8,7 +8,7 @@ import type { ProblemItem } from '../core/types';
 import { registerFloatLanguage, LANG_ID, validateModel } from '../lang/floatlang';
 import { isCopperFile } from '../lang/spec';
 import { loadSettings, SETTINGS_EVENT, type Settings } from '../ui/settings';
-import { askText } from '../ui/prompt';
+import { askChoice, askText } from '../ui/prompt';
 import { IconClose, IconPlus } from '../ui/icons';
 
 /* Float 编辑器：多标签 + Monaco（Copper .co 高亮/补全/悬停）+ 断点 + 当前执行行 + Ctrl+S。 */
@@ -227,9 +227,12 @@ type Props = {
    *  右侧大纲、搜索索引这些"读内存"的 UI 全靠它触发刷新，
    *  谁也不许再回头读磁盘上的旧文件。 */
   onBuffersChange?: () => void;
+  /** 编辑器内容被改了（还没保存）。上层要把「上一次运行」的诊断清掉：
+   *  那些报错是针对旧代码的，代码都删了还挂着「参数列表要闭合」会让人以为没修好。 */
+  onEdit?: (path: string) => void;
 };
 
-export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoints, execPos, onCursor, onProblems, onActiveFile, onBuffersChange }: Props) {
+export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoints, execPos, onCursor, onProblems, onActiveFile, onBuffersChange, onEdit }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const diffHostRef = useRef<HTMLDivElement>(null);
   const edRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
@@ -344,11 +347,15 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
       lineNumbersMinChars: 3,
       renderLineHighlight: 'all',
       suggestSelection: 'first',
-      /* 补全弹窗：开右侧文档预览 + 底部状态条 + 行内类型，信息给足 */
+      /* 补全弹窗：底部状态条保留，行内预览关掉。
+         preview=true 时 Monaco 会把候选项的 insertText 当 ghost text 画进代码；
+         模板片段的 insertText 是整段多行骨架（if … else …），于是刚打完
+         print( 就会被一坨灰字盖住几行，看着像代码被改坏了。关掉后候选列表
+         照常弹、按回车照样展开模板，只是不再把整段骨架糊在编辑器里。 */
       suggest: {
-        preview: true,
+        preview: false,
         showStatusBar: true,
-        showInlineDetails: true,
+        showInlineDetails: false,
         insertMode: 'replace',
         snippetsPreventQuickSuggestions: false
       },
@@ -397,6 +404,35 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
         return;
       }
       ed.trigger('keyboard', 'cursorRight', null);
+    });
+
+    /* 回车：整行只剩空白时，开一行**干净**的，别把残留缩进带下去。
+     * 删光一行内容后剩下一串缩进空格，再按回车新行还是缩进的，看着很难受。
+     *
+     * 用 onKeyDown 而不是 addCommand(Enter)：后者会盖掉补全列表的"回车选候选"。
+     * 这里只在「补全没开 + 整行纯空白」两个条件同时成立时才接管，
+     * 其余情况一律不 preventDefault，让 Monaco 该干嘛干嘛（智能缩进、选候选都保留）。 */
+    ed.onKeyDown((e) => {
+      if (e.keyCode !== monaco.KeyCode.Enter || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) return;
+      const sw = document.querySelector<HTMLElement>('.monaco-editor .suggest-widget');
+      if (sw && sw.offsetHeight > 0) return;   // 补全开着：回车交给它选候选
+      const model = ed.getModel();
+      const pos = ed.getPosition();
+      if (!model || !pos) return;
+      const line = model.getLineContent(pos.lineNumber);
+      const before = line.slice(0, pos.column - 1);
+      const after = line.slice(pos.column - 1);
+      if (before.trim() !== '' || after.trim() !== '') return;   // 正常代码行：走默认智能缩进
+      e.preventDefault();
+      e.stopPropagation();
+      /* 整行空白一起清掉：光标可能停在这一串缩进的中间，
+       * 只替换光标之前那半截，光标后面的空格会跟着落到下一行。 */
+      ed.executeEdits('clean-enter', [{
+        range: new monaco.Range(pos.lineNumber, 1, pos.lineNumber, model.getLineMaxColumn(pos.lineNumber)),
+        text: '\n',
+        forceMoveMarkers: true
+      }]);
+      ed.setPosition({ lineNumber: pos.lineNumber + 1, column: 1 });
     });
 
     ed.onDidChangeCursorPosition((e) => {
@@ -609,13 +645,32 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
         const win = getCurrentWindow();
         const un = await win.onCloseRequested(async (e) => {
           if (disposed) return;
-          if (dirtyRef.current.size === 0) return;   // 没改动就别拦
+          const n = dirtyRef.current.size;
+          if (n === 0) return;   // 没改动就直接关，不问
+          /* 平时不拿颜色/文字催人保存（自动保存在后台照跑），
+           * 只在真的要关软件时问一次：保存 / 不保存 / 取消。 */
           e.preventDefault();
+          const choice = await askChoice('还有没保存的改动', {
+            hint: `${n} 个文件改过但还没写进硬盘。关掉软件之前要保存吗？`,
+            okText: '保存并关闭',
+            altText: '不保存，直接关'
+          });
+          if (choice === null) return;          // 取消：留在软件里
+          if (choice === 'ok') {
+            const ok = await saveAllRef.current();
+            if (ok < n) {                        // 有文件没写成功：别关，先让人处理
+              setStatus(`保存没成功：还有 ${n - ok} 个文件没写进硬盘`);
+              return;
+            }
+          }
+          disposed = true;
+          /* destroy 需要额外 ACL 权限；万一被拒就退回 close（disposed 已置位，
+           * 下一次 onCloseRequested 不再拦截）。再失败也只能 console——
+           * 绝不能把 rejection 漏出去，main.tsx 的全局兜底会把它盖成整页错误。 */
           try {
-            await saveAllRef.current();
-          } finally {
-            disposed = true;
             await win.destroy();
+          } catch {
+            try { await win.close(); } catch (err) { console.error('[Float] 关窗失败：', err); }
           }
         });
         return un;
@@ -624,9 +679,12 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
       }
     })();
 
-    const onBeforeUnload = (): void => {
-      // 浏览器兜底：同步触发保存（异步可能来不及，但至少不会静默丢弃）
-      if (dirtyRef.current.size > 0) void saveAllRef.current();
+    const onBeforeUnload = (e: BeforeUnloadEvent): void => {
+      if (dirtyRef.current.size === 0) return;
+      // 浏览器兜底：没有自绘对话框可用，交给浏览器原生的「离开此页面？」确认
+      e.preventDefault();
+      e.returnValue = '';
+      void saveAllRef.current();
     };
     window.addEventListener('beforeunload', onBeforeUnload);
     return () => window.removeEventListener('beforeunload', onBeforeUnload);
@@ -659,6 +717,8 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
   /* 回调走 ref：onDidChangeContent 闭包是模型级长命的，别让它拖住最新 props */
   const buffersChangeRef = useRef(onBuffersChange);
   buffersChangeRef.current = onBuffersChange;
+  const onEditRef = useRef(onEdit);
+  onEditRef.current = onEdit;
 
   const notifyActive = useCallback((p: string | null): void => {
     onActiveFile?.(p ? (p.split(/[\\/]/).pop() ?? '') : '');
@@ -696,8 +756,12 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
         void api.fsStat(path).then((st) => { if (st.exists) versionRef.current.set(path, st.mtimeMs); }).catch(() => {});
         m.onDidChangeContent(() => {
           setDirty((s) => new Set(s).add(path));
+          /* 一敲键，上一次「运行」的报错就作废：那是旧代码的诊断，
+           * 留着会让人把整段删了还看到「参数列表要闭合」。 */
+          onEditRef.current?.(path);
           if (timer) window.clearTimeout(timer);
           timer = window.setTimeout(() => {
+            if (m.isDisposed()) return;   // 文件已经关了，别再碰它
             validateModel(m); reportProblems(m, path);
             // 缓冲区内容变了：大纲 / 搜索索引跟着内存走，不等保存
             buffersChangeRef.current?.();
@@ -706,9 +770,8 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
           if (loadSettings().autoSave && /\.(co|cw|md|txt|in)$/i.test(path)) {
             if (saveTimer) window.clearTimeout(saveTimer);
             saveTimer = window.setTimeout(() => {
-              void saveOneRef.current(path).then((done) => {
-                if (done) setStatus('已自动保存');
-              });
+              // 静默写盘：成功不弹任何提示，失败由 saveOne 自己 setStatus 报错
+              void saveOneRef.current(path);
             }, 900);
           }
         });
@@ -783,7 +846,7 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
     const path = `${root}/${finalName}`;
     try {
       await api.fsWrite(path, /\.(co|cw)$/i.test(finalName)
-        ? '// 新建的 Copper 文件\n\nprint("你好，Copper")\n'
+        ? '/* 新建的 Copper 文件\n\nprint("你好，Copper")\n'
         : '');
       await openFile(path);
     } catch (e) {
@@ -807,12 +870,22 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
   const externalReload = useCallback(async (path: string): Promise<string> => {
     const model = modelsRef.current.get(path);
     if (!model) return 'not-open';
-    if (dirtyRef.current.has(path)) return 'dirty-kept';
     try {
+      /* 先比 mtime：磁盘上这一版就是我们上次读/写的那一版，说明所谓「外部修改」
+       * 其实是**自己刚保存**触发的轮询回声。不先排掉它，每次自动保存都会
+       * 被当成外部改动，控制台一遍遍刷「你本地改了还没存」。
+       * （versionRef 在保存成功和热灌后都会更新） */
+      const st = await api.fsStat(path);
+      if (!st.exists) return 'not-open';
+      if (versionRef.current.get(path) === st.mtimeMs) return 'same';
+      if (dirtyRef.current.has(path)) return 'dirty-kept';
       const text = await api.fsRead(path);
-      if (text === model.getValue()) { return 'same'; }
+      if (text === model.getValue()) {
+        versionRef.current.set(path, st.mtimeMs);
+        return 'same';
+      }
       model.setValue(text);
-      void api.fsStat(path).then((st) => { if (st.exists) versionRef.current.set(path, st.mtimeMs); }).catch(() => {});
+      versionRef.current.set(path, st.mtimeMs);
       return 'reloaded';
     } catch {
       return 'not-open';
@@ -909,7 +982,6 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
             onClick={() => { closeDiff(); void openFile(t); }}
             title={t}
           >
-            {dirty.has(t) && <span className="dirty-dot" />}
             {t.split(/[\\/]/).pop()}
             <span className="tab-x" onClick={(e) => { e.stopPropagation(); closeTab(t); }}>
               <IconClose size={11} />
@@ -954,9 +1026,11 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
           <button className="cbtn ghost" onClick={() => void resolveConflict('reload')}>放弃我的改动，重新加载</button>
         </div>
       )}
-      {(status || dirty.size > 0) && !conflict && (
-        <div className={`compile-status ${status.startsWith('保存失败') ? 'err' : 'ok'}`}>
-          {status || `未保存的更改：${dirty.size} 个文件（Ctrl+S 保存全部）`}
+      {/* 只在真有事（保存失败 / 打开失败 / 手动保存完成）时说一句；
+          平时改代码不再每敲一下都冒「未保存的更改」——关软件时会统一问。 */}
+      {status && !conflict && (
+        <div className={`compile-status ${status.startsWith('保存失败') || status.startsWith('保存没成功') ? 'err' : 'ok'}`}>
+          {status}
         </div>
       )}
     </div>

@@ -137,6 +137,34 @@ pub fn fs_write(path: String, contents: String) -> Result<(), String> {
 
 const LOCK_FRESH_MS: u64 = 12_000;
 
+/* 心跳之外再看一眼「对方进程还活着吗」。
+ * 只靠 12 秒心跳的话：上一个窗口一关，你 12 秒内再打开同一个工程就会被
+ * 告知「已有一个 Float IDE（进程 xxx）正在编辑」—— 而那个进程其实早没了。
+ * 进程已经不存在就直接接管，不用等心跳过期。
+ * 进程还活着、只是心跳超时（卡死/强杀）的情况，仍然按原逻辑接管。 */
+#[cfg(windows)]
+fn pid_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    if pid == 0 {
+        return false;
+    }
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return false;
+        }
+        CloseHandle(h);
+        true
+    }
+}
+
+#[cfg(not(windows))]
+fn pid_alive(_pid: u32) -> bool {
+    // 非 Windows 平台没有等价的无权限查询，保守处理：当作还活着，靠心跳超时
+    true
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -168,7 +196,14 @@ pub fn project_lock_acquire(dir: String, id: String) -> Result<LockInfo, String>
         std::fs::create_dir_all(p).map_err(|e| e.to_string())?;
     }
     if let Some(cur) = read_lock(&dir) {
-        if cur.id != id && now_ms().saturating_sub(cur.ts) < LOCK_FRESH_MS {
+        let now = now_ms();
+        /* 自己换了个 id（同进程重开工程）直接放过 */
+        let mine = cur.id == id || cur.pid == std::process::id();
+        /* ts 比现在还新很多 = 时钟回拨/文件被改坏，别把它当成"永远新鲜"锁死 */
+        let believable = cur.ts <= now + 60_000;
+        let fresh = believable && now.saturating_sub(cur.ts) < LOCK_FRESH_MS;
+        /* 只有「别人 + 心跳新鲜 + 进程真的还活着」才拒绝 */
+        if !mine && fresh && pid_alive(cur.pid) {
             return Err(format!("已有一个 Float IDE（进程 {}）正在编辑这个工程", cur.pid));
         }
     }

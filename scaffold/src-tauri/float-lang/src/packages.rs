@@ -256,11 +256,27 @@ fn copy_dir(src: &Path, dest: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
 
-    fn tmpdir(tag: &str) -> PathBuf {
+    /// 测试用临时目录：**离开作用域自动删**。
+    /// 以前只建不删，每跑一次 `cargo test` 就在 %TEMP% 留十个 float-pkg-test-*，
+    /// 累积起来是一堆看不见的垃圾。
+    struct TempDir(PathBuf);
+
+    impl std::ops::Deref for TempDir {
+        type Target = Path;
+        fn deref(&self) -> &Path { &self.0 }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn tmpdir(tag: &str) -> TempDir {
         let p = std::env::temp_dir().join(format!("float-pkg-test-{}-{}", tag, std::process::id()));
         let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(&p).unwrap();
-        p
+        TempDir(p)
     }
 
     fn make_pkg(root: &Path, name: &str, version: &str, body: &str) -> PathBuf {

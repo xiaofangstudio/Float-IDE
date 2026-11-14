@@ -9,6 +9,13 @@ pub const IMPORT_DEPTH: usize = 100;
 
 /// 缩进块嵌套上限。正常人写代码很少超过 30 层；给了 200 层余量，
 /// 真超了多半是生成的代码或者复制粘贴出了问题。
+///
+/// **前提：解析必须跑在大栈线程上。** 递归下降每层要吃掉不少栈，
+/// debug 构建（`tauri dev` 就是）在默认 1~2MB 栈里 50 层左右就会
+/// `has overflowed its stack` 直接 abort，连报错都来不及。
+/// 所以 `lang_run` / `examples/check` 都套了 64MB 栈的线程；
+/// 新加「解析用户代码」的入口时也必须这么做，或者确认调用方在线程里。
+/// 前端 src/lang/parse.ts 的 MAX_BLOCK_DEPTH 必须与它一致。
 pub const NEST: usize = 200;
 
 /// 单次运行最多缓存多少输出（字节）。死循环里不停 print 会把内存吃光，

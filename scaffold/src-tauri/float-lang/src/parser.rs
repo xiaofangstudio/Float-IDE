@@ -818,6 +818,10 @@ use crate::limits::NEST as MAX_NEST;
 /// 单条表达式最多嵌套多少层（括号 / 调用 / 列表都算）。正常人写不到 50 层，
 /// 给 64 层余量；真超了明确报错，而不是让递归把栈打穿（debug 构建栈帧很肥，
 /// 256 层实测就能溢出，128 层也是边缘，64 层才稳）。
+/// 表达式嵌套上限（括号 / 调用 / 列表都算），防栈溢出。
+/// **前提：解析跑在大栈线程上**——debug 构建在默认 1~2MB 栈里 50 层左右会
+/// 直接 abort（`lang_run` 与 `examples/check` 都已经套了 64MB 栈）。
+/// 前端 parse.ts 的 MAX_EXPR_DEPTH 与它保持一致。
 const MAX_EXPR_DEPTH: usize = 64;
 
 /// 入口：把源码解析成 Program

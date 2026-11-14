@@ -1,13 +1,14 @@
-/* CW Script 编译执行通道：AST → JavaScript 源码 → new Function。
+/* Copper 的 TS 兼容通道：AST → JavaScript 源码 → new Function。
  *
- * 为什么要有这一层：
- * - 树遍历解释器每执行一条语句都要走一次函数调用与状态机，比 CPython 慢；
- * - 把 AST 编译成 JS 后交给 V8，循环与算术接近原生速度，稳定快过 Python；
- * - 编译发生在按 F5 的一瞬间（毫秒级），不存在"编译要等很久"的问题。
+ * 注意：这已经不是主引擎了。真 IDE（Tauri）里 F5 走 Rust 内核
+ * （lang_run → float-lang 的字节码 VM），AOT 发布走 AST → Rust 源码 → 原生 exe。
+ * 这一层只服务两处：
+ * - 浏览器预览 / 非 Tauri 环境的回落运行；
+ * - 双引擎对拍时当参照实现（`tests/parity.sh` 用它比对 Rust 内核语义）。
  *
- * 与调试器的分工：
- * - 运行（F5）走编译通道，最快；
- * - 调试（F6，需要断点/单步）走解释器，保证每行都能停。
+ * 与调试器的分工（仅指这条兼容通道内部）：
+ * - run 走编译，比逐句解释快；
+ * - debug（断点/单步）走解释器，保证每行都能停。
  * 两条通道共用同一套值模型（values.ts），语义一致。
  */
 
@@ -18,6 +19,7 @@ import {
   cloneVal, deepEq, dict, fmtVal, isDict, isInstance, isList, toNum, toStr, truthy, typeName, ThrownValue,
   type Val, isPtr } from './values';
 import { callBuiltinMethod, MethodError } from './methods';
+import { isNamespace, isStdlibFn } from './stdlib';
 
 /* ───────────────────────────── 类型 ───────────────────────────── */
 
@@ -235,6 +237,13 @@ function defaultFor(type: TypeName | null): Val {
 
 export const O = {
   t: (v: Val): boolean => truthy(v),
+
+  /** `data.nothing()`：库名拼对了、函数名拼错。要报"库里没这个函数"，
+   *  而不是让 $.g() 先报"变量 data 没有定义"（那会让人以为是没 import）。 */
+  nsMissing(ns: string, fn: string): never {
+    throw new RuntimeError(
+      `「${ns}」是标准库命名空间，里面没有 ${fn} 这个函数——检查函数名拼写（帮助 → 标准库 里有全表）`, 0);
+  },
 
   num(v: Val, who = '运算'): number {
     const n = toNum(v);
@@ -1112,6 +1121,16 @@ ${genBlock(s.body, c2)}  }
       return `$.callFn(${JSON.stringify(name)}, [${args}])`;
     }
     if (e.callee.k === 'member') {
+      const obj = e.callee.obj;
+      /* 解析期分不清 `data` 是库名还是用户变量（str data = "a,b" 之后
+       * data.split(",") 是字符串方法）。这里按运行时有没有这个变量来分：
+       * 有 → 照常当成员调用；没有 → 库名 + 拼错的函数名，给准话。 */
+      if (obj.k === 'var' && isNamespace(obj.name) && !ctx.locals.has(obj.name)
+        && !isStdlibFn(`${obj.name}.${e.callee.name}`)) {
+        const ns = JSON.stringify(obj.name);
+        const fn = JSON.stringify(e.callee.name);
+        return `((${ns} in $.v) ? O.mcall(${genExpr(obj, ctx)}, ${fn}, [${args}], $) : O.nsMissing(${ns}, ${fn}))`;
+      }
       return `O.mcall(${genExpr(e.callee.obj, ctx)}, ${JSON.stringify(e.callee.name)}, [${args}], $)`;
     }
     throw new CompileError('这个表达式不能被调用');

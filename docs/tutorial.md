@@ -76,8 +76,7 @@ print("你好，Float！")
 ## 3. 语法骨架：一行一句，缩进成块
 
 ```text
-// 这是注释，整行不执行
-/* 注释：从 /* 写到行尾，不用闭合
+/* 这是注释：从 /* 写到行尾，不用闭合
 
 if (true)
     print("缩进 4 格，属于上面的 if")
@@ -118,8 +117,8 @@ print(ready)
 声明也可以省掉类型：
 
 ```text
-score = 100          // 直接赋值也能创建变量
-list nums = [1, 2]   // 列表字面量
+score = 100          /* 直接赋值也能创建变量
+list nums = [1, 2]   /* 列表字面量
 dict hero = {"hp": 100}
 ```
 
@@ -128,8 +127,8 @@ dict hero = {"hp": 100}
 ```text
 int a = 7
 int b = 5
-int sum = a + b * 2        // 17，先乘后加
-str tag = "Lv." + (a - 2)  // "Lv.5"
+int sum = a + b * 2        /* 17，先乘后加
+str tag = "Lv." + (a - 2)  /* "Lv.5"
 ```
 
 变量名允许中文：
@@ -150,28 +149,28 @@ print(血量)
 ### 算术
 
 ```text
-print(7 + 5)      // 12
-print(7 - 5)      // 2
-print(7 * 5)      // 35
-print(7 / 2)      // 3.5
-print(7 % 2)      // 1（取余）
-print(2 ** 10)    // 1024（乘方）
+print(7 + 5)      /* 12
+print(7 - 5)      /* 2
+print(7 * 5)      /* 35
+print(7 / 2)      /* 3.5
+print(7 % 2)      /* 1（取余）
+print(2 ** 10)    /* 1024（乘方）
 ```
 
 `+` 遇到字符串就是拼接：
 
 ```text
-print("第 " + 3 + " 关")   // 第 3 关
+print("第 " + 3 + " 关")   /* 第 3 关
 ```
 
 ### 比较与逻辑
 
 ```text
-print(5 > 3)              // true
-print(5 == 5)             // true
-print(5 != 4)             // true
-print(5 >= 5 && 2 < 3)    // true
-print(!true)              // false
+print(5 > 3)              /* true
+print(5 == 5)             /* true
+print(5 != 4)             /* true
+print(5 >= 5 && 2 < 3)    /* true
+print(!true)              /* false
 ```
 
 优先级从低到高：`||` → `&&` → `|` → `^` → `&` → `== !=` → `< > <= >=` → `+ -` → `* / %` → `**`。
@@ -185,7 +184,7 @@ print(!true)              // false
 ## 6. 输出与输入
 
 ```text
-print("分数：", 95, "分")   // 多个值用空格隔开
+print("分数：", 95, "分")   /* 多个值用空格隔开
 ```
 
 ```text
@@ -213,7 +212,7 @@ else
 三种写法都认：
 
 ```text
-if (x > 0) {           // 带花括号
+if (x > 0) {           /* 带花括号
     print("正")
 } elif (x == 0) {
     print("零")
@@ -221,7 +220,7 @@ if (x > 0) {           // 带花括号
     print("负")
 }
 
-if x > 0               // 不写括号也行
+if x > 0               /* 不写括号也行
     print("正")
 ```
 
@@ -234,17 +233,17 @@ if x > 0               // 不写括号也行
 ### 数次数：`range`
 
 ```text
-for i in range(5)        // 0 1 2 3 4
+for i in range(5)        /* 0 1 2 3 4
     print(i)
 
 int n = 3
-for i in range(n)        // 次数可以是变量、算式、函数调用
+for i in range(n)        /* 次数可以是变量、算式、函数调用
     print(i)
 
-for i in range(2, 5)     // 2 3 4（含头不含尾）
+for i in range(2, 5)     /* 2 3 4（含头不含尾）
     print(i)
 
-for i in range(10, 0, -2)  // 10 8 6 4 2（步长）
+for i in range(10, 0, -2)  /* 10 8 6 4 2（步长）
     print(i)
 ```
 
@@ -268,10 +267,10 @@ for i in range(2)
 含两端：
 
 ```text
-for i = 1 to 5        // 1 2 3 4 5
+for i = 1 to 5        /* 1 2 3 4 5
     print(i)
 
-for i = 10 to 1 step -3   // 10 7 4 1
+for i = 10 to 1 step -3   /* 10 7 4 1
     print(i)
 ```
 
@@ -286,10 +285,10 @@ for ch in "abc"
     print(ch)
 
 dict scores = {"小明": 90, "小红": 95}
-for who in scores          // 字典默认给键
+for who in scores          /* 字典默认给键
     print(who)
 
-for who, score in scores   // 双变量拿键和值
+for who, score in scores   /* 双变量拿键和值
     print(who + "：" + score)
 ```
 
@@ -317,7 +316,7 @@ forever
     count++
     print(count)
     if (count >= 5)
-        out          // 跳出循环
+        out          /* 跳出循环
 ```
 
 | 语句 | 作用 |
@@ -332,10 +331,10 @@ forever
 ### 等待
 
 ```text
-wait 0.5              // 等半秒
+wait 0.5              /* 等半秒
 wait(1)
 
-wait until (ready)    // 条件为假时一直重复块内语句
+wait until (ready)    /* 条件为假时一直重复块内语句
     ready = check()
 ```
 
@@ -358,7 +357,7 @@ print(greet("小明"))
 - 函数可以先调用后定义（顶层函数在运行前统一注册）
 
 ```text
-print(early())        // 先调用
+print(early())        /* 先调用
 
 function early()
     return "没问题"
@@ -372,7 +371,7 @@ function fact(n)
         return 1
     return n * fact(n - 1)
 
-print(fact(5))   // 120
+print(fact(5))   /* 120
 ```
 
 ### 默认值与参数的引用
@@ -383,8 +382,8 @@ print(fact(5))   // 120
 function area(w, h = w)
     return w * h
 
-print(area(5))      // 25
-print(area(3, 4))   // 12
+print(area(5))      /* 25
+print(area(3, 4))   /* 12
 ```
 
 ### 作用域
@@ -398,8 +397,8 @@ function shadow()
     int x = 100
     return x
 
-print(shadow())   // 100
-print(x)          // 1
+print(shadow())   /* 100
+print(x)          /* 1
 ```
 
 但要改全局变量，直接赋值即可：
@@ -411,7 +410,7 @@ function bump()
 
 bump()
 bump()
-print(counter)   // 2
+print(counter)   /* 2
 ```
 
 ---
@@ -420,22 +419,22 @@ print(counter)   // 2
 
 ```text
 list nums = [3, 1, 2]
-print(nums)          // [3, 1, 2]
-print(nums[0])       // 3
-print(nums[-1])      // 2（负数从末尾数）
+print(nums)          /* [3, 1, 2]
+print(nums[0])       /* 3
+print(nums[-1])      /* 2（负数从末尾数）
 
 nums[0] = 9
-print(nums)          // [9, 1, 2]
+print(nums)          /* [9, 1, 2]
 ```
 
 追加与增删：
 
 ```text
-add 4 to nums            // 末尾追加
-insert 0 to nums at 0    // 指定位置插入
-replace nums 0 with 7    // 改某个位置
-del nums 2               // 删某个位置
-print(len(nums))         // 长度
+add 4 to nums            /* 末尾追加
+insert 0 to nums at 0    /* 指定位置插入
+replace nums 0 with 7    /* 改某个位置
+del nums 2               /* 删某个位置
+print(len(nums))         /* 长度
 ```
 
 遍历、求和：
@@ -460,8 +459,8 @@ print(nums[0] + nums[1])
 
 ```text
 dict scores = {"小明": 90, "小红": 95}
-print(scores["小明"])    // 90
-print(scores.小明)       // 90（点号写法也行）
+print(scores["小明"])    /* 90
+print(scores.小明)       /* 90（点号写法也行）
 
 scores["小刚"] = 88
 scores.小刚 = 88
@@ -479,10 +478,10 @@ dict scores del "小明"
 常用函数：
 
 ```text
-print(dictallkey(scores))        // 全部键
-print(dictallval(scores))        // 全部值
-print(dictin(scores, "小红"))    // 键是否存在
-print(len(scores))               // 键的数量
+print(dictallkey(scores))        /* 全部键
+print(dictallval(scores))        /* 全部值
+print(dictin(scores, "小红"))    /* 键是否存在
+print(len(scores))               /* 键的数量
 ```
 
 遍历：
@@ -505,12 +504,12 @@ class Hero
     str name = ""
     int hp = 100
 
-    function init(name, hp)      // 构造方法
+    function init(name, hp)      /* 构造方法
         self.name = name
         self.hp = hp
 
     function hurt(damage)
-        hp -= damage              // 字段可以直接裸名读写
+        hp -= damage              /* 字段可以直接裸名读写
         if (hp < 0)
             hp = 0
         return hp
@@ -519,9 +518,9 @@ class Hero
         return self.name + " 剩余 " + hp
 
 Hero h = new Hero("阿方", 120)
-print(h.info())        // 阿方 剩余 120
+print(h.info())        /* 阿方 剩余 120
 h.hurt(30)
-print(h.hp)            // 90
+print(h.hp)            /* 90
 ```
 
 要点：
@@ -545,7 +544,7 @@ class Counter
         n += 1
 
     function incTwice()
-        inc()          // 不用写 self.inc()
+        inc()          /* 不用写 self.inc()
         inc()
         return n
 ```
@@ -566,14 +565,14 @@ class Dog extends Animal
     str breed = "土狗"
 
     function init(name, breed)
-        super(name)              // 调父类的 init
+        super(name)              /* 调父类的 init
         self.breed = breed
 
-    function speak()             // 覆盖父类方法
+    function speak()             /* 覆盖父类方法
         return name + "（" + breed + "）：汪！"
 
 Dog d = new Dog("大黄", "中华田园犬")
-print(d.speak())        // 大黄（中华田园犬）：汪！
+print(d.speak())        /* 大黄（中华田园犬）：汪！
 ```
 
 - 子类没写 `init` 时直接沿用父类的；
@@ -597,8 +596,8 @@ for p in team
 ```text
 int a = 7
 int b = 5
-add(a, b)              // 单独一行 → 结果写进 __last_calc
-print(__last_calc)     // 12
+add(a, b)              /* 单独一行 → 结果写进 __last_calc
+print(__last_calc)     /* 12
 ```
 
 | 变量 | 谁写进去的 |
@@ -614,8 +613,8 @@ print(__last_calc)     // 12
 新写法更推荐直接取值：
 
 ```text
-print(add(7, 5))            // 12
-print(len(nums))            // 直接当表达式用
+print(add(7, 5))            /* 12
+print(len(nums))            /* 直接当表达式用
 ```
 
 老写法照样能跑，不用改。
@@ -625,8 +624,8 @@ print(len(nums))            // 直接当表达式用
 ## 14. 模块：`import`
 
 ```text
-import "lib.co"      // 按文件（旧 .cw 也能认）
-import "tools"       // 按文件夹（找 tools/main.co）
+import "lib.co"      /* 按文件（旧 .cw 也能认）
+import "tools"       /* 按文件夹（找 tools/main.co）
 ```
 
 被导入文件里的函数、类、全局变量都会带进来。
@@ -642,7 +641,7 @@ function twice(x)
 
 ```text
 import "lib.co"
-print(twice(21))    // 42
+print(twice(21))    /* 42
 ```
 
 > 导入是"运行到这一行才执行"，循环导入只会执行一次。
@@ -666,23 +665,24 @@ print(twice(21))    // 42
 - 暂停时，右栏「变量」会列出当前所有变量（含对象字段），当前行有黄色箭头。
 - 调试默认停在第一条语句，之后按 F8 继续。
 
-> 为什么调试比运行慢？调试走的是解释器（每行都能停），运行走的是编译器（翻译成 JS 交给 V8）。两套引擎语义一致，结果相同。
+> 为什么调试比运行慢？调试走的是内置解释器（每行都能停），F5 运行走 Rust 内核的字节码 VM。两套引擎语义一致，结果相同。
 
 ---
 
 ## 16. 为什么它比 Python 快
 
-Float 不解释 AST——按 F5 时先把整棵树**编译成 JavaScript**，再交给 V8 跑。这一步只花零点几毫秒，所以体感是"按下就跑"，但跑起来是接近原生的速度。
+Float 不逐句解释 AST——按 F5 时，源码交给 **Rust 内核**（词法 → AST → 字节码 → VM）执行，不经过 JavaScript、不搭在 V8 上。编译只是把源码变成字节码，花不到一毫秒，所以体感仍是"按下就跑"。要发布成独立程序时，AOT 会把同一份 AST **翻译成 Rust 源码**，交给 cargo 编成原生 exe。
 
-实测（Windows / Node 22 / CPython 3.13，同一台机器，预热后取稳定值）：
+实测（Windows / CPython 3.13，同一台机器、交替跑、取稳定值）：
 
-| 用例 | Float（编译） | CPython 3.13 | 倍率 |
+| 用例 | Rust 内核 | CPython 3.13 | 倍率 |
 | --- | --- | --- | --- |
-| `fib(30)` 递归 | 21 ms | 114 ms | **快 5.4 倍** |
-| `for` 累加 500 万次 | 15 ms | 133 ms | **快 8.8 倍** |
-| 字符串拼接 5 万次 | 2.5 ms | 2.9 ms | 快 1.2 倍 |
+| `fib(30)` 递归 | ≈ 91 ms | 视机器状态浮动 | 约 **1.1～1.6 倍** |
+| `for` 累加 500 万次 | — | — | 约 **1.6 倍** |
+| 字符串拼接 5 万次 | — | — | 约 **3～3.8 倍** |
 
-复现：`npm run bench:lang` 与 `python tests/bench.py`。
+复现：`bash scaffold/tests/bench-compare.sh`（脚本会交替跑两边，避免降频导致的假倍数）。
+注意：笔记本会降频，先跑 Python 再跑 VM 得出的倍数能差出一倍，别用那种数字下结论。
 
 ---
 
@@ -733,7 +733,7 @@ print(half(10))
 ## 18. 完整例子：控制台小游戏
 
 ```text
-// ─ 怪物与勇者：一个能跑的小游戏 ─
+/* ─ 怪物与勇者：一个能跑的小游戏 ─
 
 class Fighter
     str name = ""
@@ -925,13 +925,13 @@ catch err
 **字符串**
 
 ```text
-print("  hello  ".trim().upper())     // HELLO
-print("a,b,c".split(","))             // ["a", "b", "c"]
-print("abc".replace("b", "B"))        // aBc
-print("hello".find("ll"))             // 2（找不到返回 -1）
-print("x".repeat(3))                  // xxx
-print("abc".starts_with("ab"))        // true
-print("42".to_int() + 1)              // 43
+print("  hello  ".trim().upper())     /* HELLO
+print("a,b,c".split(","))             /* ["a", "b", "c"]
+print("abc".replace("b", "B"))        /* aBc
+print("hello".find("ll"))             /* 2（找不到返回 -1）
+print("x".repeat(3))                  /* xxx
+print("abc".starts_with("ab"))        /* true
+print("42".to_int() + 1)              /* 43
 ```
 
 可用：`upper lower trim split replace find contains starts_with ends_with substr repeat chars to_int to_float len`
@@ -940,14 +940,14 @@ print("42".to_int() + 1)              // 43
 
 ```text
 list xs = [3, 1, 2]
-xs.push(4)              // 追加，返回新长度
-xs.sort()               // 原地排序
-print(xs.join("-"))     // 1-2-3-4
-print(xs.pop())         // 4（取出并删除末尾）
+xs.push(4)              /* 追加，返回新长度
+xs.sort()               /* 原地排序
+print(xs.join("-"))     /* 1-2-3-4
+print(xs.pop())         /* 4（取出并删除末尾）
 xs.reverse()
-print(xs.slice(0, 2))   // [3, 2]
-print(xs.contains(2))   // true
-print(xs.sum())         // 6
+print(xs.slice(0, 2))   /* [3, 2]
+print(xs.contains(2))   /* true
+print(xs.sum())         /* 6
 ```
 
 可用：`push pop insert remove index_of contains join sort reverse slice sum clear len`
@@ -956,12 +956,12 @@ print(xs.sum())         // 6
 
 ```text
 dict d = {"a": 1, "b": 2}
-print(d.keys())         // ["a", "b"]
-print(d.values())       // [1, 2]
-print(d.has("a"))       // true
-print(d.get("z", 0))    // 0（没这个键时给默认值）
+print(d.keys())         /* ["a", "b"]
+print(d.values())       /* [1, 2]
+print(d.has("a"))       /* true
+print(d.get("z", 0))    /* 0（没这个键时给默认值）
 d.remove("b")
-print(d.len())          // 1
+print(d.len())          /* 1
 ```
 
 可用：`keys values items has remove get set len`
@@ -998,8 +998,8 @@ function minmax(xs)
     return lo, hi
 
 int low, int high = minmax([5, 3, 9, 1])
-print(low)    // 1
-print(high)   // 9
+print(low)    /* 1
+print(high)   /* 9
 ```
 
 解构也可以不带类型：`low, high = minmax(data)`。
@@ -1014,10 +1014,10 @@ Copper 的指针把"地址"这个数字藏起来了：你拿不到裸地址，�
 
 ```cw
 int x = 10
-ptr p = &x        // & 取地址
-print(*p)         // 10
-*p = 42           // 写到那一格
-print(x)          // 42
+ptr p = &x        /* & 取地址
+print(*p)         /* 10
+*p = 42           /* 写到那一格
+print(x)          /* 42
 ```
 
 `&xs[i]` 指向列表里的那一格，改 `*p` 就等于改 `xs[i]`。指针可以加减：`p + 1` 往后挪一格，
@@ -1033,16 +1033,16 @@ fn bump(ptr p)
 
 int n = 41
 bump(&n)
-print(n)          // 42
+print(n)          /* 42
 ```
 
 ### alloc / free
 
 ```cw
-ptr p = alloc(3)  // 申请 3 格，自己 free
+ptr p = alloc(3)  /* 申请 3 格，自己 free
 p[0] = 7
 p[1] = p[0] * 2
-print(p[0], p[1], len(p))   // 7 14 3
+print(p[0], p[1], len(p))   /* 7 14 3
 free(p)
 ```
 
@@ -1057,10 +1057,10 @@ Rust 内核跑完会点名报错，IDE 里的两个引擎（F5/F6）不做这项
 int x = 7
 ptr p = &x
 ptr pp = &p
-print(**pp)     // 7
+print(**pp)     /* 7
 **pp = 9
-print(x)        // 9
-*pp = &y        // 改的是"p 现在指着谁"
+print(x)        /* 9
+*pp = &y        /* 改的是"p 现在指着谁"
 ```
 
 `**pp` 与 `*(*pp)` 是同一个 AST，写哪个都行；三层就是 `***p`。
@@ -1075,7 +1075,7 @@ int i = 0
 while i < 6
     pool[i] = i * i
     i += 1
-print(pool[0], pool[3], pool[5])   // 0 9 25
+print(pool[0], pool[3], pool[5])   /* 0 9 25
 free(pool)
 ```
 
@@ -1089,7 +1089,7 @@ fn bad()
     return &local
 
 ptr p = bad()
-print(*p)      // 报错：这个指针指向的变量已经离开作用域了（悬空指针）
+print(*p)      /* 报错：这个指针指向的变量已经离开作用域了（悬空指针）
 ```
 
 `alloc` 出来的内存不受作用域限制——函数里申请、外面 `free` 是正确用法。

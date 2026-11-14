@@ -48,3 +48,32 @@ print("  Hi  ".trim().lower().repeat(2))
 dict d = {"x": 1, "y": 2}
 for k, v in d
     print(k, v)
+### 表达式链：+ 不能被截断
+str name = "小明"
+int age = 18
+print("我叫" + name + "今年" + age + "岁")
+print("a" + "b" + "c" + "d" + "e" + "f")
+print(("a" + name) + ("b" + "c"))
+print("今年" + str(age) + "岁")
+list xs = ["a" + name, "b" + "c"]
+print(xs[0] + xs[1])
+print(age > 10 ? "成年" + name : "未成年" + name)
+print(str(len("a" + name + "b")))
+### 全角符号按半角处理（字符串内容不动）
+print（"你好"）
+print("a" ＋ "b")
+list xs = ["a"，"b"]
+print(xs[0] + xs[1])
+print(“引号也行”)
+int x ＝ 3
+print(x)
+if （3 ＞ 2）
+    print("ok")
+print("a＋b，c（d）")
+
+### 长链与结合性（平衡折叠不许改语义）
+print("a" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b" + "b")
+print(10 - 3 - 2)
+print(8 / 4 / 2)
+print(2 ** 3 ** 2)
+print(1 + 2 * 3 - 4 / 2)

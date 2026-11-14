@@ -51,13 +51,18 @@ const BUILTINS = builtinList();
 /** 档位：数字越小越靠前 */
 const TIER = {
   member: 0,
+  /** 当前作用域里的变量（含 for 循环变量）：永远排最前面。
+   *  以前 special 也是 1，于是打一个字母就冒出 ans / __last_* 一堆特殊变量，
+   *  把真正的 i、n 挤到后面，还容易被回车选中。 */
   local: 1,
   type: 2,
   keyword: 3,
   builtin: 4,
   instruction: 5,
-  special: 1,
-  plugin: 6,
+  /** 特殊变量（ans / __last_*）不常用，降到关键字和内建之后，别抢位 */
+  special: 6,
+  plugin: 7,
+  /** 模板片段永远垫底：它们是一整段骨架，绝不能被默认选中 */
   snippet: 9
 } as const;
 
@@ -220,6 +225,16 @@ export function buildCompletions(input: CompletionInput): Completion[] {
   }
 
   return out;
+}
+
+/** 模板片段（整段骨架）至少要打这么长的前缀才放进候选。
+ *  打 `i` / `if` 时列表里只有变量和关键字，回车绝不会变成一整段 if else。 */
+export const SNIPPET_MIN_WORD = 3;
+
+/** 按已输入的前缀筛掉模板片段。抽成纯函数是为了能被测试盯住：
+ *  以前这个判断散在 Monaco provider 里，改坏了没人发现。 */
+export function visibleCompletions(items: Completion[], word: string): Completion[] {
+  return word.length >= SNIPPET_MIN_WORD ? items : items.filter((it) => it.kind !== 'snippet');
 }
 
 /** 变量属于哪个"内建类型家族"，用来过滤内建方法 */

@@ -407,6 +407,12 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
     if (dirty) setIndexSize(idx.size);
   }, []);
 
+  /* 代码一改，上一次「运行」报的错就作废。不这么做的话：整段删掉以后，
+   * 问题面板还挂着旧运行的「参数列表要闭合」，看着像修了没生效。 */
+  const clearRunProblems = useCallback((): void => {
+    setRunProblems((prev) => (prev.length ? [] : prev));
+  }, []);
+
   /* 打开工程时先建一次索引（异步，不阻塞界面） */
   useEffect(() => {
     const idx = indexRef.current;
@@ -751,17 +757,17 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
           bus.current.tree?.refresh();
           void (async () => {
             let reloaded = 0;
-            let kept = 0;
             for (const rel of ev.payload ?? []) {
               const abs = projectDir.replace(/\\/g, '/') + '/' + String(rel).replace(/^\/+/, '');
               try {
                 const r = await bus.current.editor?.externalReload(abs);
                 if (r === 'reloaded') reloaded += 1;
-                else if (r === 'dirty-kept') kept += 1;
               } catch { /* 文件可能已经没了 */ }
             }
             if (reloaded > 0) pushLine({ kind: 'info', text: `检测到外部修改，已更新 ${reloaded} 个打开的文件` });
-            if (kept > 0) pushLine({ kind: 'info', text: `有 ${kept} 个文件你本地改了还没存——保留了你的版本，磁盘上的新内容没盖进来` });
+            /* 「你本地改了还没存，保留了你的版本」不再刷控制台：
+             * 这是正常状态（人家正在写），每次保存/外部触碰都刷一条只会变噪音。
+             * 真要让人知道时，编辑器底部状态栏和冲突条已经会说。 */
           })();
         });
         if (alive) un = off; else off();
@@ -1326,6 +1332,8 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
                 syncPanel();
               }}
               onBuffersChange={syncPanel}
+              /* 代码一改，上次运行的诊断全部作废：那些报错指向的已经不是当前代码了 */
+              onEdit={clearRunProblems}
             />
           </div>
         </div>

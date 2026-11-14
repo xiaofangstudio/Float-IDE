@@ -1,6 +1,6 @@
 import * as monaco from 'monaco-editor';
 import { INSTRUCTIONS, SPECIAL_VARS, KEYWORDS, TYPE_WORDS, SNIPPETS, BUILTIN_METHODS, LANG_ID } from './spec';
-import { buildCompletions, type CompletionKind } from './completions';
+import { buildCompletions, visibleCompletions, type CompletionKind } from './completions';
 import { contextAt } from './context';
 import { isTauriEnv } from '../core/tauri';
 
@@ -253,6 +253,10 @@ function registerCompletion(): void {
         plugins: { snippets: pluginSnippets, keywords: pluginKeywords }
       });
 
+      /* 模板片段是一整段骨架（`if else` / `for range`），误选一次就把整行换掉。
+       * 前缀太短时只给变量和关键字，规则见 completions.ts 的 visibleCompletions。 */
+      const candidates = visibleCompletions(items, word.word);
+
       const kinds: Record<CompletionKind, monaco.languages.CompletionItemKind> = {
         variable: monaco.languages.CompletionItemKind.Variable,
         function: monaco.languages.CompletionItemKind.Function,
@@ -266,14 +270,17 @@ function registerCompletion(): void {
         value: monaco.languages.CompletionItemKind.Value
       };
       const S = monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet;
-      const suggestions = items.map((it) => ({
+      const suggestions = candidates.map((it) => ({
         label: it.labelDetail ? { label: it.label, detail: ` ${it.labelDetail}`, description: '' } : it.label,
         kind: kinds[it.kind],
         insertText: it.insertText,
         detail: it.detail,
         documentation: { value: both(it.detail, it.doc) },
-        // filterText 必须给：不然 Monaco 会拿 insertText（模板片段那一坨）去匹配
-        filterText: it.label,
+        /* filterText 必须给：不然 Monaco 会拿 insertText（模板片段那一坨）去匹配。
+         * 模板 label 里带空格（`if else` / `for range`），直接拿 label 当过滤词，
+         * 用户刚打个 `if` 就会冒出整段模板，被回车选中就把整行换掉了。
+         * 去掉空格后只有打全 `ifelse` / `forrange` 才会出现；想用模板还能 Ctrl+Space 手动选。 */
+        filterText: it.kind === 'snippet' ? it.label.replace(/\s+/g, '') : it.label,
         sortText: it.sortText,
         range,
         // 只有模板片段才按 snippet 插入（带 ${1:xxx} 占位）

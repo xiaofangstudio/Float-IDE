@@ -53,11 +53,31 @@ const PREC: Record<string, number> = {
 
 const EOF: Token = { k: 'eof', v: '', line: 0, col: 0, endCol: 0 };
 
+/* 畸形输入的护栏（和 Rust 内核 parser.rs 的 MAX_EXPR_DEPTH 对齐）。
+ * 几千层括号 / 几千项加法会把 JS 栈打穿，抛出来的是 "Maximum call stack size exceeded"，
+ * 用户看不懂，编辑器也可能当场卡住。宁可明确说"太深了，拆开写"。 */
+/* 与 Rust parser.rs 的 MAX_EXPR_DEPTH 保持一致：同一份代码两边该不该报错必须一样。
+ * V8 的栈比 Rust debug 的默认栈宽松得多（实测 200 层才爆），64 层留着余量很安全。 */
+const MAX_EXPR_DEPTH = 64;
+/* 必须大于 MAX_EXPR_DEPTH：括号每下一层也会经过 parseUnary，
+ * 设小了会先报「一元运算符太多」，把真正的「括号嵌套太深」盖掉。 */
+const MAX_UNARY_DEPTH = 256;
+
+/* 长运算符链（与 Rust fold_chain 同一套规则）：
+ * 超过 BALANCE_OVER 且全是结合律运算符 → 平衡折叠，树深从 n 降到 log₂n，
+ * analyze / codegen 递归遍历不会爆栈；混杂运算符的长链没法平衡，超过 MAX_CHAIN 直接报错。 */
+const BALANCE_OVER = 16;
+const MAX_CHAIN = 2000;
+const ASSOCIATIVE = new Set(['+', '*', '&', '|', '^', '&&', '||']);
+
 const startOf = (e: Expr): Token => ({ k: 'ident', v: '', line: e.line, col: e.col, endCol: e.col });
 const endOf = (e: Expr): Token => ({ k: 'ident', v: '', line: e.endLine, col: e.endCol, endCol: e.endCol });
 
 class ExprParser {
   pos = 0;
+  /** 表达式递归深度（括号 / 调用 / 列表）；超限明确报错，别让栈溢出去糊脸 */
+  depth = 0;
+  unaryDepth = 0;
   constructor(public toks: Token[], public file: string) {}
 
   get cur(): Token { return this.toks[this.pos] ?? EOF; }
@@ -91,49 +111,111 @@ class ExprParser {
   }
 
   parseExpr(minPrec: number): Expr {
-    let left = this.parseUnary();
-    for (;;) {
-      const t = this.cur;
-      /* `a mod b`：mod 只在中缀位置当取余用。
-       * 这样 `mod(a, b)` 函数和汇编式 `mod a b` 都还是原来的意思，不会被抢。 */
-      const isModWord = t.k === 'ident' && t.v === 'mod';
-      if (!isModWord && (t.k !== 'op' || !(t.v in PREC))) break;
-      const opText = isModWord ? '%' : t.v;
-      const prec = PREC[opText];
-      if (prec < minPrec) break;
-      this.eat();
-      const right = opText === '**' ? this.parseExpr(prec) : this.parseExpr(prec + 1);
-      left = { k: 'bin', op: opText, a: left, b: right, ...this.span(startOf(left), endOf(right)) };
+    this.depth += 1;
+    if (this.depth > MAX_EXPR_DEPTH) {
+      this.depth -= 1;
+      throw new ParseError(
+        `表达式嵌套太深（超过 ${MAX_EXPR_DEPTH} 层）停下来了。拆成几个变量或几行会更清楚`,
+        this.cur,
+        'depth'
+      );
     }
-    // 三元：条件 ? 这个 : 那个（优先级最低、右结合；只在最外层认，
-    // 免得把字典里的冒号吃掉）
-    if (minPrec === 0 && this.at('?')) {
-      this.eat();
-      const a = this.parseExpr(0);
-      this.expect(':', '三元的冒号 :（写法是 条件 ? 这个 : 那个）');
-      const b = this.parseExpr(0);
-      left = { k: 'ternary', cond: left, a, b, ...this.span(startOf(left), endOf(b)) };
+    try {
+      let left = this.parseUnary();
+      const chain: { op: string; right: Expr }[] = [];
+      for (;;) {
+        const t = this.cur;
+        /* `a mod b`：mod 只在中缀位置当取余用。
+         * 这样 `mod(a, b)` 函数和汇编式 `mod a b` 都还是原来的意思，不会被抢。 */
+        const isModWord = t.k === 'ident' && t.v === 'mod';
+        if (!isModWord && (t.k !== 'op' || !(t.v in PREC))) break;
+        const opText = isModWord ? '%' : t.v;
+        const prec = PREC[opText];
+        if (prec < minPrec) break;
+        this.eat();
+        const right = opText === '**' ? this.parseExpr(prec) : this.parseExpr(prec + 1);
+        chain.push({ op: opText, right });
+      }
+      if (chain.length) left = this.foldChain(left, chain);
+      // 三元：条件 ? 这个 : 那个（优先级最低、右结合；只在最外层认，
+      // 免得把字典里的冒号吃掉）
+      if (minPrec === 0 && this.at('?')) {
+        this.eat();
+        const a = this.parseExpr(0);
+        this.expect(':', '三元的冒号 :（写法是 条件 ? 这个 : 那个）');
+        const b = this.parseExpr(0);
+        left = { k: 'ternary', cond: left, a, b, ...this.span(startOf(left), endOf(b)) };
+      }
+      return left;
+    } finally {
+      this.depth -= 1;
     }
-    return left;
+  }
+
+  /** 折叠左结合链。规则与 Rust `fold_chain` 完全一致：
+   *  - 普通长度：按左结合叠成左深树（保持原语义）
+   *  - 很长且全是同一个结合律运算符（+ * & | ^ && ||）：改成平衡树，
+   *    深度从 n 降到 log₂n，几万项拼接也不会把递归遍历的栈打穿
+   *  - 很长但混着 - / 这类非结合运算符：没法平衡化，明确报错而不是硬撑 */
+  private foldChain(left: Expr, chain: { op: string; right: Expr }[]): Expr {
+    const first = chain[0].op;
+    const sameOp = chain.every((c) => c.op === first);
+    const associative = sameOp && ASSOCIATIVE.has(first);
+    if (chain.length > MAX_CHAIN && !associative) {
+      throw new ParseError(
+        `这一行的算式太长（超过 ${MAX_CHAIN} 个运算符，而且混了加减乘除）停下来了。` +
+        `拆成几行，或者用列表 + join 拼`,
+        this.cur,
+        'chain'
+      );
+    }
+    const bin = (a: Expr, b: Expr, op: string): Expr =>
+      ({ k: 'bin', op, a, b, ...this.span(startOf(a), endOf(b)) });
+
+    if (chain.length > BALANCE_OVER && associative) {
+      const items = [left, ...chain.map((c) => c.right)];
+      const build = (lo: number, hi: number): Expr => {
+        if (lo === hi) return items[lo];
+        const mid = (lo + hi) >> 1;
+        return bin(build(lo, mid), build(mid + 1, hi), first);
+      };
+      return build(0, items.length - 1);
+    }
+    let acc = left;
+    for (const c of chain) acc = bin(acc, c.right, c.op);
+    return acc;
   }
 
   parseUnary(): Expr {
-    const t = this.cur;
-    /* `**pp`：词法上 ** 是幂运算符，但幂运算不可能出现在操作数位置，
-     * 所以前缀位上的 ** 就是"解两次引用"。这样 `**pp` 和 `*(*pp)` 是同一个 AST。 */
-    if (t.k === 'op' && t.v === '**') {
-      this.eat();
-      const a = this.parseUnary();
-      const inner: Expr = { k: 'un', op: '*', a, ...this.span(t, endOf(a)) };
-      return { k: 'un', op: '*', a: inner, ...this.span(t, endOf(a)) };
+    this.unaryDepth += 1;
+    if (this.unaryDepth > MAX_UNARY_DEPTH) {
+      this.unaryDepth -= 1;
+      throw new ParseError(
+        `连续的一元运算符太多了（超过 ${MAX_UNARY_DEPTH} 个）——这种写法几乎肯定是笔误`,
+        this.cur,
+        'unary'
+      );
     }
-    if (t.k === 'op' && (t.v === '-' || t.v === '+' || t.v === '!' || t.v === '~' || t.v === '&' || t.v === '*')) {
-      this.eat();
-      const a = this.parseUnary();
-      // &x 取地址、*p 解引用：复用 un 节点，不新增语法形状，AST 消费方全都不用改
-      return { k: 'un', op: t.v, a, ...this.span(t, endOf(a)) };
+    try {
+      const t = this.cur;
+      /* `**pp`：词法上 ** 是幂运算符，但幂运算不可能出现在操作数位置，
+       * 所以前缀位上的 ** 就是"解两次引用"。这样 `**pp` 和 `*(*pp)` 是同一个 AST。 */
+      if (t.k === 'op' && t.v === '**') {
+        this.eat();
+        const a = this.parseUnary();
+        const inner: Expr = { k: 'un', op: '*', a, ...this.span(t, endOf(a)) };
+        return { k: 'un', op: '*', a: inner, ...this.span(t, endOf(a)) };
+      }
+      if (t.k === 'op' && (t.v === '-' || t.v === '+' || t.v === '!' || t.v === '~' || t.v === '&' || t.v === '*')) {
+        this.eat();
+        const a = this.parseUnary();
+        // &x 取地址、*p 解引用：复用 un 节点，不新增语法形状，AST 消费方全都不用改
+        return { k: 'un', op: t.v, a, ...this.span(t, endOf(a)) };
+      }
+      return this.parsePostfix(this.parsePrimary());
+    } finally {
+      this.unaryDepth -= 1;
     }
-    return this.parsePostfix(this.parsePrimary());
   }
 
   /** 下一个 token 能不能当一个操作数 */
@@ -598,16 +680,35 @@ export function parseProgram(file: string, src: string): Program {
     return { k: 'var', name: '_', file, line: e.line, col: e.col, endLine: e.endLine, endCol: e.endCol };
   };
 
+  /* 缩进块嵌套上限，和 Rust limits.rs 的 NEST（200）严格对齐。
+   * 没有这道闸，几千层 if 会把栈打穿，抛出来的是看不懂的 RangeError。 */
+  let blockDepth = 0;
+  const MAX_BLOCK_DEPTH = 200;
+
   const parseBlock = (minIndent: number): Stmt[] => {
-    const body: Stmt[] = [];
-    while (i < lines.length) {
+    blockDepth += 1;
+    if (blockDepth > MAX_BLOCK_DEPTH) {
+      blockDepth -= 1;
       const ln = lines[i];
-      if (ln.skipped) { i++; continue; }
-      if (ln.indent < minIndent) break;
-      const stmt = parseStatement();
-      if (stmt) body.push(stmt);
+      throw new ParseError(
+        `块嵌套太深（超过 ${MAX_BLOCK_DEPTH} 层）停下来了。拆成几个函数，或者把判断反过来写`,
+        { k: 'eof', v: '', line: ln?.no ?? 1, col: 1, endCol: 1 },
+        'nest'
+      );
     }
-    return body;
+    try {
+      const body: Stmt[] = [];
+      while (i < lines.length) {
+        const ln = lines[i];
+        if (ln.skipped) { i++; continue; }
+        if (ln.indent < minIndent) break;
+        const stmt = parseStatement();
+        if (stmt) body.push(stmt);
+      }
+      return body;
+    } finally {
+      blockDepth -= 1;
+    }
   };
 
   const parseBodyOf = (indent: number): Stmt[] => {

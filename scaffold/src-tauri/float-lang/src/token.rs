@@ -83,6 +83,47 @@ pub struct LexError {
     pub col: u32,
 }
 
+/// 中文输入法打出来的全角符号 → 半角。**只用于代码区**，字符串内容不转换。
+/// 不归一化的话，用户写 `print（"a"）` 只会看到「无法识别的字符「（」」——
+/// 屏幕上两个括号几乎一模一样，根本猜不到是全角。
+/// 全角数字 / 全角字母不映射：那些更可能是真笔误，报出来比悄悄改掉好。
+pub fn halfwidth(c: char) -> char {
+    match c {
+        '＋' => '+',
+        '－' => '-',
+        '＊' => '*',
+        '／' => '/',
+        '％' => '%',
+        '＝' => '=',
+        '＜' => '<',
+        '＞' => '>',
+        '！' => '!',
+        '＆' => '&',
+        '｜' => '|',
+        '＾' => '^',
+        '～' | '〜' => '~',
+        '（' => '(',
+        '）' => ')',
+        '［' => '[',
+        '］' => ']',
+        '｛' => '{',
+        '｝' => '}',
+        '，' => ',',
+        '；' => ';',
+        '：' => ':',
+        '？' => '?',
+        '。' => '.',
+        '“' | '”' => '"',
+        '‘' | '’' => '\'',
+        _ => c,
+    }
+}
+
+/// 全角区 / 中文标点区：报错时用来给"换成半角"的提示
+fn is_fullwidth_range(c: char) -> bool {
+    matches!(c, '\u{FF00}'..='\u{FFEF}' | '\u{3000}'..='\u{303F}')
+}
+
 pub fn is_id_start(c: char) -> bool {
     c.is_ascii_alphabetic()
         || c == '_'
@@ -96,10 +137,12 @@ pub fn is_id_part(c: char) -> bool {
 
 /// 切一行（不含换行符）为 Token 序列。结尾一定补一个 Eof。
 /// 在字符数组的第 i 位比较一个模式串（不分配内存）
+/// 逐位比较，**比较前归一化**：`＝` 这类全角写法也能匹配 `=`。
+/// 仍然不复制剩余整行，复杂度只看运算符长度（1~3 字符）。
 fn starts_with_at(chars: &[char], i: usize, pat: &str) -> bool {
     let mut k = i;
     for c in pat.chars() {
-        if k >= chars.len() || chars[k] != c {
+        if k >= chars.len() || halfwidth(chars[k]) != c {
             return false;
         }
         k += 1;
@@ -127,7 +170,9 @@ pub fn tokenize_line(src: &str, line: u32, start_col: u32) -> Result<Vec<Token>,
     }
 
     while i < n {
-        let c = chars[i];
+        let raw_c = chars[i];
+        // 全角符号在这里归一成半角；字符串内容不受影响（下面字符串分支用原文）
+        let c = halfwidth(raw_c);
 
         if c == ' ' || c == '\t' || c == '\u{3000}' || c == '\r' {
             i += 1;
@@ -143,10 +188,10 @@ pub fn tokenize_line(src: &str, line: u32, start_col: u32) -> Result<Vec<Token>,
             let mut j = i + 1;
             let mut text = String::new();
             let mut depth = 0i32; // {…} 插值里允许出现引号
-            while j < n && !(chars[j] == quote && depth == 0) {
-                if chars[j] == '{' {
+            while j < n && !(halfwidth(chars[j]) == quote && depth == 0) {
+                if halfwidth(chars[j]) == '{' {
                     depth += 1;
-                } else if chars[j] == '}' && depth > 0 {
+                } else if halfwidth(chars[j]) == '}' && depth > 0 {
                     depth -= 1;
                 }
                 if chars[j] == '\\' && j + 1 < n {
@@ -303,8 +348,13 @@ pub fn tokenize_line(src: &str, line: u32, start_col: u32) -> Result<Vec<Token>,
             continue;
         }
 
+        let hint = if is_fullwidth_range(raw_c) {
+            "——这是全角/中文标点，代码里要写半角"
+        } else {
+            ""
+        };
         return Err(LexError {
-            message: format!("无法识别的字符「{}」", c),
+            message: format!("无法识别的字符「{}」{}", raw_c, hint),
             line,
             col: start_col + i as u32,
         });
@@ -340,23 +390,26 @@ pub fn code_part(line: &str) -> Result<(String, Option<String>), String> {
                 i += 2;
                 continue;
             }
-            if c == q {
+            if halfwidth(c) == q {
                 in_str = None;
             }
             i += 1;
             continue;
         }
-        if c == '"' || c == '\'' {
-            in_str = Some(c);
+        // 中文引号也要当成字符串边界，否则字符串里的斜杠星会被误当成注释开头。
+        // （注意：Rust 块注释可以嵌套，这段说明里不能再出现斜杠星。）
+        let n = halfwidth(c);
+        if n == '"' || n == '\'' {
+            in_str = Some(n);
             i += 1;
             continue;
         }
-        if c == '/' && i + 1 < chars.len() && chars[i + 1] == '*' {
+        if n == '/' && i + 1 < chars.len() && halfwidth(chars[i + 1]) == '*' {
             let head: String = chars[..i].iter().collect();
             let tail: String = chars[i + 2..].iter().collect();
             return Ok((head, Some(tail)));
         }
-        if c == '-' && i + 1 < chars.len() && chars[i + 1] == '-' {
+        if n == '-' && i + 1 < chars.len() && halfwidth(chars[i + 1]) == '-' {
             let left_ok = i == 0 || chars[i - 1].is_whitespace();
             let right = chars.get(i + 2).copied();
             let right_ok = match right {

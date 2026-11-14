@@ -7,6 +7,20 @@ use std::env;
 use std::fs;
 
 fn main() {
+    /* 词法 / 语法 / 语义全是递归下降，深嵌套脚本在默认 1MB 栈里会直接
+     * `has overflowed its stack`（调试构建尤其明显）。和 lang_run 一样
+     * 放到大栈线程上跑——检查工具也不该说崩就崩。 */
+    match std::thread::Builder::new()
+        .name("float-check".into())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(real_main)
+    {
+        Ok(h) => { let _ = h.join(); }
+        Err(e) => eprintln!("启动检查线程失败：{}", e),
+    }
+}
+
+fn real_main() {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.is_empty() {
         eprintln!("用法：check <脚本.cw>");
