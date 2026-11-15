@@ -42,13 +42,31 @@ MCP（Model Context Protocol）让外部 AI 客户端直接操作你的工程：
 | `read_file` | 读工程内文件 | Rust |
 | `write_file` | 原子写入（先写临时文件再改名） | Rust |
 | `search` | 全文搜索，返回文件 / 行号 / 该行内容 | Rust |
-| `run_script` | 用 Float 内核跑一段代码，返回输出与错误 | 界面（语言内核） |
-| `get_diagnostics` | 对 `.cw` 做语法与语义检查 | 界面（语言内核） |
-| `get_outline` | 返回文件的函数 / 类 / 变量大纲 | 界面（语言内核） |
+| `run_script` | `code` 跑一段孤立代码；`path` 跑整个工程主文件（含 import），返回输出、诊断、报错与行号 | 界面 → Rust 内核 |
+| `get_diagnostics` | 对 `.co/.cw` 做语法与语义检查，**会先摊平 import**，诊断带「（在 X 里）」的来源标注 | 界面 → Rust 内核 |
+| `get_outline` | 返回文件的函数 / 类 / 变量大纲 | 界面（TS AST） |
 
-**为什么有的在界面执行**：运行脚本、语法检查、大纲都要用 Float 的 AST 和解释器，那是 TypeScript 实现的，在 Rust 里没有第二份。所以这类请求会转给界面执行，再把结果送回来（20 秒超时，不会卡死）。
+**两条运行路径，别混**：
 
-好处是：**AI 跑出来的行为和你在 IDE 里按 F5 完全一致**，不是另写一套模拟。
+- `run_script` 只传 `code` = 用 TS 兼容引擎跑一段孤立代码，适合试小片段；
+- `run_script` 传 `path` = 和 **F5 完全一致**：Rust 内核编译执行，import 就地摊平、
+  未存盘的缓冲区一起带上、报错行号映射回原文件。改多文件工程要用这条。
+
+`get_diagnostics` 也走 Rust 内核的静态检查：先把所有 import 摊平成一份完整程序，
+再在整份程序上判断。所以「变量放在数据文件里、主文件里用」不会报「还没定义过」，
+全程序都找不到的名字才会报。请求由界面转给内核执行（20 秒超时，不会卡死）。
+
+改完工程让 AI 跑一遍（返回的是结构化 JSON，能直接定位到文件和行号）：
+
+```bash
+curl -s http://127.0.0.1:17871/mcp \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":9,"method":"tools/call",
+       "params":{"name":"run_script","arguments":{"path":"main.co"}}}'
+```
+
+返回里 `ok / output / reports / error / error_line / need_input` 一应俱全，
+`error_line` 是**原始文件**里的行号；配合 `get_diagnostics` 就能针对性改。
 
 ---
 

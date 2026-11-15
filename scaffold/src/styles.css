@@ -2275,20 +2275,22 @@ html, body, #root {
   backdrop-filter: blur(var(--frost, 8px)) saturate(1.05);
 }
 
-/* 偏好设置嵌进编辑器标签页时：仍是同一块 720×560，居中，不铺满整个编辑区。
-   用两三个类把优先级抬过 .doc-embed-inner 那套「全页铺满」的规则。 */
+/* 偏好设置嵌进编辑器标签页时：铺满整个编辑区，随代码区的分栏 / 缩放一起变。
+   以前写死 720×560 再居中，左右两条大空白像没做完；现在外壳吃掉全部空间，
+   左导航固定宽、右卡片区 flex:1 内部滚动，内容增减只改滚动高度。
+   注意 .set-pane 是块级流 + flex:1，section 显式块级，不会被
+   .ws :where(*) { min-height:0 } 压扁（这是以前踩过的坑）。 */
 .doc-embed.settings-host {
-  align-items: center; justify-content: center; padding: 12px;
+  align-items: stretch; justify-content: flex-start; padding: 0;
 }
 .doc-embed-inner.settings-shell.embedded {
-  flex: none;
-  width: min(720px, 100%);
-  height: min(560px, 100%);
+  flex: 1 1 auto;
+  width: 100%; height: 100%;
   max-width: none; max-height: none;
   background: var(--s2);
-  border: 1px solid var(--b2);
-  border-radius: 6px;
-  box-shadow: var(--shadow-sm);
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
 }
 .settings-shell.embedded > .dlg-head { padding: 0 20px; font-size: 14px; }
 .settings-shell.embedded > .dlg-foot { padding: 0 20px; }
@@ -2301,8 +2303,8 @@ html, body, #root {
   max-height: calc(100vh - 64px);
 }
 .doc-embed-inner.settings-shell.embedded.appearance-shell {
-  width: min(620px, 100%);
-  height: min(520px, 100%);
+  width: 100%; height: 100%;
+  border: none; border-radius: 0; box-shadow: none;
 }
 .appearance-shell > .dlg-body { flex: 1; min-height: 0; overflow-y: auto; }
 .appearance-shell .bg-preview { height: 176px; }

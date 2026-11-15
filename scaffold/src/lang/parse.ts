@@ -281,6 +281,29 @@ class ExprParser {
     }
     if (t.k === 'ident') {
       this.eat();
+      // f{项, 项, …}：逗号拼接字面量。不带引号的项当表达式，每项自动转显示文本，
+      // 不用手写 str()；字符串里的空格原样保留，项之间的空格由词法层忽略。
+      // 实现上包一层 str() 再用 + 折叠，AST 不加新节点，VM / AOT / 调试器自动支持。
+      if (t.v === 'f' && this.at('{')) {
+        this.eat();
+        const parts: Expr[] = [];
+        while (!this.at('}')) {
+          const item = this.parseExpr(0);
+          parts.push({
+            k: 'call',
+            callee: { k: 'var', name: 'str', ...this.span(t) },
+            args: [item],
+            ...this.span(t)
+          });
+          if (this.at(',')) { this.eat(); if (this.at('}')) break; continue; }
+          break;
+        }
+        const close = this.expect('}', 'f{…} 的右花括号 }');
+        if (!parts.length) return { k: 'str', v: '', ...this.span(t, close) };
+        return parts.reduce((acc, cur) => ({
+          k: 'bin', op: '+', a: acc, b: cur, ...this.span(t, close)
+        }) as Expr);
+      }
       if (t.v === 'true' || t.v === 'false') return { k: 'bool', v: t.v === 'true', ...this.span(t) };
       if (t.v === 'null') return { k: 'null', ...this.span(t) };
       if (t.v === 'nil' || t.v === 'none') {
@@ -478,6 +501,8 @@ type Line = {
   comment: string | null;
   isComment: boolean;
   skipped: boolean;
+  /** 这一行（含已并入的续行）里还有多少括号没闭合；>0 时继续吞下一行 */
+  openDepth?: number;
 };
 
 /* ─────────── alias / #define 文本替换（类似 C 的 #define，但更简单） ───────────
@@ -608,6 +633,44 @@ export function expandAliases(src: string): { text: string; errors: AliasError[]
   return { text: out.join('\n'), errors };
 }
 
+/** 数一行里没闭合的括号（字符串里的不算）。与 Rust 内核的 bracket_depth 同语义。 */
+function bracketDepth(code: string): number {
+  let d = 0;
+  let inStr: string | null = null;
+  let esc = false;
+  for (let i = 0; i < code.length; i++) {
+    const c = code[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === inStr) inStr = null;
+      continue;
+    }
+    if (c === '"' || c === "'") { inStr = c; continue; }
+    if (c === '(' || c === '[' || c === '{') d++;
+    else if (c === ')' || c === ']' || c === '}') d--;
+  }
+  return d;
+}
+
+/** 行尾的 { 是「块开始」还是「字典字面量开头」？
+ *  前面还在等一个值（= ( [ , : ? 或运算符、return 之类）→ 字典，必须留着；
+ *  前面已经是完整表达式（if x / for i in xs / fn f()）→ 块开始，删掉。 */
+function isBlockBrace(code: string): boolean {
+  const t = code.trimEnd();
+  if (!t.endsWith('{')) return false;
+  const before = t.slice(0, -1).trimEnd();
+  if (before === '') return true;
+  const last = before[before.length - 1];
+  if ('=([,:?+-*/%&|<>!'.includes(last)) return false;
+  // `f{…}` 是拼接字面量，不是块开始：f 必须是紧贴 { 的独立标识符
+  if (/(^|[^A-Za-z0-9_\u4e00-\u9fa5])f$/.test(before)) return false;
+  const parts = before.split(/\s+/);
+  const word = (parts[parts.length - 1] ?? '').toLowerCase();
+  if (['return', 'in', 'to', 'into', 'and', 'or', 'not'].includes(word)) return false;
+  return true;
+}
+
 function splitSource(src: string): Line[] {
   const out: Line[] = [];
   const text = src.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
@@ -616,13 +679,26 @@ function splitSource(src: string): Line[] {
     const indent = expanded.length - expanded.trimStart().length;
     const trimmed = expanded.trim();
     if (trimmed === '') return;
-    // 注释只有一种写法：`/*` 到行尾（不用闭合）。老写法 `--` 在 codePart 里报错。
+    // 注释只有一种写法：斜杠星 到行尾（不用闭合）。老写法 `--` 在 codePart 里报错。
     // `//` 不是注释，它是整除运算符。
     const { code, comment } = codePart(trimmed, idx + 1);
     const isComment = code.trim() === '';
-    // 行尾的 { 是"块开始"标记，不是字典字面量（字典字面量必然以 } 结尾）
-    const cleaned = isComment ? '' : code.trim().replace(/\{\s*$/, '').trim();
-    out.push({ no: idx + 1, indent, code: cleaned, raw: trimmed, comment, isComment, skipped: false });
+    const raw = code.trim();
+    const cleaned = isComment ? ''
+      : (isBlockBrace(raw) ? raw.replace(/\{\s*$/, '').trim() : raw);
+    // 多行字面量：上一行括号还没闭合，就把它接到上一行后面。
+    // 增量维护 openDepth，别每次重扫整段——几千行的配置表那样会变成 O(n²)。
+    const last = out[out.length - 1];
+    if (last && (last.openDepth ?? 0) > 0) {
+      last.openDepth = (last.openDepth ?? 0) + bracketDepth(cleaned);
+      last.code = (last.code + ' ' + cleaned).trim();
+      last.raw = (last.raw + ' ' + trimmed).trim();
+      return;
+    }
+    out.push({
+      no: idx + 1, indent, code: cleaned, raw: trimmed, comment, isComment,
+      skipped: false, openDepth: bracketDepth(cleaned)
+    });
   });
   return out;
 }

@@ -48,11 +48,14 @@ function collect(body: Stmt[]): { declared: Set<string>; refs: Ref[]; hasImport:
       switch (s.k) {
         case 'decl': declared.add(s.name); exprRefs(s.init); break;
         case 'assign':
-          targetRef(s.target);
+          // 赋值本身就等于新建这个名字，别把它当成「引用了没定义的东西」
+          if (s.target.k === 'var') declared.add(s.target.name);
+          else targetRef(s.target);
           exprRefs(s.value);
           break;
         case 'incdec':
-          targetRef(s.target);
+          if (s.target.k === 'var') declared.add(s.target.name);
+          else targetRef(s.target);
           break;
         case 'destructure': for (const n of s.names) declared.add(n.name); exprRefs(s.value); break;
         case 'funcDef':

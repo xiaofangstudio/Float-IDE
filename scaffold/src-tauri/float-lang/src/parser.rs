@@ -63,10 +63,16 @@ fn split_source(src: &str) -> (Vec<Line>, Option<(u32, String)>) {
         let cleaned = if is_comment {
             String::new()
         } else {
-            // 行尾的 { 是"块开始"，不是字典字面量
             let c = code.trim();
-            let c = c.strip_suffix('{').map(|s| s.trim_end()).unwrap_or(c);
-            c.trim().to_string()
+            // 行尾的 { 只在「块开始」时删掉（`if x {` / `fn f() {`）。
+            // `dict cfg = {` / `print({` / `"键": {` 这种是字典字面量开头，
+            // 必须留着：下面的 bracket_depth 会算出 1，续行合并自动生效。
+            // 以前无条件删，导致字典只能挤在一行里写完。
+            if is_block_brace(c) {
+                c.strip_suffix('{').map(|s| s.trim_end()).unwrap_or(c).trim().to_string()
+            } else {
+                c.trim().to_string()
+            }
         };
         let _ = comment;
         let line_depth = bracket_depth(&cleaned);
@@ -92,6 +98,41 @@ fn split_source(src: &str) -> (Vec<Line>, Option<(u32, String)>) {
         });
     }
     (out, lex_err)
+}
+
+/// 行尾的 `{` 是「块开始」还是「字典字面量开头」？
+/// 前面还在等一个值（= ( [ , : ? 或运算符、return 之类）→ 字典，要留着；
+/// 前面已经是一个完整表达式（if x / for i in xs / fn f()）→ 块开始，删掉。
+fn is_block_brace(code: &str) -> bool {
+    let t = code.trim_end();
+    if !t.ends_with('{') {
+        return false;
+    }
+    let before = t[..t.len() - 1].trim_end();
+    if before.is_empty() {
+        return true;
+    }
+    let last = before.chars().last().unwrap_or(' ');
+    if "=([,:?+-*/%&|<>!".contains(last) {
+        return false;
+    }
+    // `f{…}` 是拼接字面量，不是块开始：f 必须是紧贴 { 的独立标识符
+    if last == 'f' {
+        let mut it = before.chars();
+        it.next_back();
+        let prev = it.next_back();
+        let ident_part = |c: char| c.is_alphanumeric() || c == '_' || (c >= '\u{4e00}' && c <= '\u{9fa5}');
+        if prev.map(|c| !ident_part(c)).unwrap_or(true) {
+            return false;
+        }
+    }
+    if let Some(word) = before.split_whitespace().last() {
+        let w = word.to_ascii_lowercase();
+        if matches!(w.as_str(), "return" | "in" | "to" | "into" | "and" | "or" | "not") {
+            return false;
+        }
+    }
+    true
 }
 
 /// 数一行里"没闭合的括号"（字符串里的不算）
@@ -703,6 +744,42 @@ impl<'a> ExprParser<'a> {
             TokKind::Num => Ok(Expr::new(ExprKind::Num(t.num.unwrap_or(f64::NAN)), span)),
             TokKind::Str => Ok(self.string_expr(t.text.clone(), span)),
             TokKind::Ident | TokKind::Kw => {
+                // f{项, 项, …}：逗号拼接字面量。不带引号的项当表达式，每项自动转
+                // 显示文本（不用手写 str()）；字符串里的空格原样保留。
+                // 包一层 str() 再用 + 折叠，和 TS 侧同一套 AST 形状。
+                if t.text == "f" && self.at("{") {
+                    self.pos += 1;
+                    let mut parts: Vec<Expr> = Vec::new();
+                    if !self.at("}") {
+                        loop {
+                            let item = self.parse_expr(0)?;
+                            let callee = Expr::new(ExprKind::Var(Rc::from("str")), span.clone());
+                            parts.push(Expr::new(
+                                ExprKind::Call { callee: Box::new(callee), args: vec![item] },
+                                span.clone(),
+                            ));
+                            if self.at(",") {
+                                self.pos += 1;
+                                if self.at("}") { break; }
+                                continue;
+                            }
+                            break;
+                        }
+                    }
+                    self.expect("}", "f{…} 的右花括号 }")?;
+                    let mut it = parts.into_iter();
+                    let mut acc = match it.next() {
+                        Some(e) => e,
+                        None => return Ok(Expr::new(ExprKind::Str(Rc::from("")), span)),
+                    };
+                    for e in it {
+                        acc = Expr::new(
+                            ExprKind::Bin { op: Op::Add, a: Box::new(acc), b: Box::new(e) },
+                            span.clone(),
+                        );
+                    }
+                    return Ok(acc);
+                }
                 // 汇编式算术：`c = add a b`、`sub a b c`（空格分隔，能接任意多个数）。
                 // 带括号的 `add(a, b)` 仍然走普通函数调用，两种写法都认。
                 if let Some(op) = math_cmd_op(&t.text) {

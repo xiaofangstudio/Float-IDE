@@ -793,6 +793,27 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
             void (async () => {
               try {
                 if (tool === 'run_script') {
+                  const rel = String(args.path ?? '');
+                  if (rel) {
+                    /* 传了 path：跑工程里的主文件，和 F5 走同一条 Rust 内核链路。
+                     * import 会被摊平、未存盘的缓冲区一起带过去，报错带原始行号。
+                     * AI 改完多文件工程后可以直接跑一遍看真实报错。 */
+                    const abs = projectDir.replace(/\\/g, '/') + '/' + rel.replace(/^\/+/, '');
+                    const sources = await collectSources();
+                    const src = sources.get(abs) ?? await api.fsRead(abs);
+                    const r = await api.langRun(abs, src, [], Object.fromEntries(sources));
+                    reply({
+                      text: JSON.stringify({
+                        ok: !r.error,
+                        output: r.output,
+                        reports: r.reports,
+                        error: r.error,
+                        error_line: r.error_line,
+                        need_input: r.needInput
+                      }, null, 2)
+                    });
+                    return;
+                  }
                   const code = String(args.code ?? '');
                   const res = await runCodeQuiet(code);
                   reply({ text: res.error ? `错误：${res.error}` : res.out.join('\n') });
@@ -863,17 +884,17 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
                 }
                 const rel = String(args.path ?? '');
                 const abs = projectDir.replace(/\\/g, '/') + '/' + rel.replace(/^\/+/, '');
-                const text = await api.fsRead(abs);
-                const a = analyze(abs, text);
                 if (tool === 'get_diagnostics') {
-                  reply({
-                    text: JSON.stringify(a.diagnostics.map((d) => ({
-                      severity: d.severity, message: d.message,
-                      line: d.span.line, col: d.span.col
-                    })), null, 2)
-                  });
+                  /* 走 Rust 内核的静态检查：先把 import 摊平成一份完整程序，
+                   * 再在整份程序上做语义分析（定义在别的文件里的变量不会误报），
+                   * 行号会指回真正的文件，消息里还会带「（在 X 里）」。 */
+                  const text = await api.fsRead(abs);
+                  const ds = await api.langCheck(abs, text);
+                  reply({ text: JSON.stringify(ds, null, 2) });
                   return;
                 }
+                const text = await api.fsRead(abs);
+                const a = analyze(abs, text);
                 // get_outline
                 reply({
                   text: JSON.stringify({
@@ -892,7 +913,7 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
       } catch { /* 预览环境没有 Tauri 事件 */ }
     })();
     return () => { alive = false; un?.(); };
-  }, [projectDir, runCodeQuiet]);
+  }, [projectDir, runCodeQuiet, collectSources]);
 
   /* ─── 代码导航：跳转定义 / 重命名 / 快速开文件 ─── */
   const gotoDefinition = useCallback((): void => {

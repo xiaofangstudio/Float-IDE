@@ -395,13 +395,14 @@ fn tool_specs() -> Vec<(String, Value)> {
             "run_script".into(),
             json!({
                 "name": "run_script",
-                "description": "用 Float Script 内核运行一段代码并返回控制台输出与错误（编译执行）",
+                "description": "跑一段代码，或跑工程里的整个主文件。传 path 时和 F5 走同一条 Rust 内核链路：import 会摊平、未存盘的缓冲区一起带上，返回输出、诊断、报错与行号。AI 改完多文件工程后用它跑一遍看真实错误。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "code": { "type": "string", "description": "要运行的 Float Script 源码" }
+                        "code": { "type": "string", "description": "要运行的源码（与 path 二选一）" },
+                        "path": { "type": "string", "description": "工程内主文件的相对路径；传了就跑整个工程（含 import），不传就跑 code" }
                     },
-                    "required": ["code"]
+                    "required": []
                 }
             }),
         ),
@@ -409,7 +410,7 @@ fn tool_specs() -> Vec<(String, Value)> {
             "get_diagnostics".into(),
             json!({
                 "name": "get_diagnostics",
-                "description": "对一个 Copper 源文件（.co，旧 .cw 也认）做语法与语义检查，返回诊断列表（行号、列号、消息、严重级别）",
+                "description": "对一个 Copper 源文件（.co，旧 .cw 也认）做语法与语义检查：会先摊平它的 import，在整份程序上判断，定义在别的文件里的变量不会误报；返回诊断列表（行号、列号、消息、严重级别，含「（在 X 里）」的来源标注）",
                 "inputSchema": {
                     "type": "object",
                     "properties": { "path": { "type": "string" } },

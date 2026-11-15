@@ -16,6 +16,8 @@ export type Settings = {
   animations: boolean;
   /** 补全弹窗右侧的文档说明面板 */
   suggestDocs: boolean;
+  /** Beta：本地超小补全模型（纯本地统计，不上网）。默认关闭，关了就走老补全 */
+  smartComplete: boolean;
 };
 
 const KEY = 'float.settings';
@@ -30,7 +32,8 @@ export const DEFAULT_SETTINGS: Settings = {
   runMode: 'compile',
   compact: false,
   animations: true,
-  suggestDocs: true
+  suggestDocs: true,
+  smartComplete: false
 };
 
 export function loadSettings(): Settings {
@@ -47,7 +50,8 @@ export function loadSettings(): Settings {
       runMode: s.runMode === 'debug' ? 'debug' : 'compile',
       compact: typeof s.compact === 'boolean' ? s.compact : DEFAULT_SETTINGS.compact,
       animations: typeof s.animations === 'boolean' ? s.animations : DEFAULT_SETTINGS.animations,
-      suggestDocs: typeof s.suggestDocs === 'boolean' ? s.suggestDocs : DEFAULT_SETTINGS.suggestDocs
+      suggestDocs: typeof s.suggestDocs === 'boolean' ? s.suggestDocs : DEFAULT_SETTINGS.suggestDocs,
+      smartComplete: typeof s.smartComplete === 'boolean' ? s.smartComplete : DEFAULT_SETTINGS.smartComplete
     };
   } catch {
     return { ...DEFAULT_SETTINGS };

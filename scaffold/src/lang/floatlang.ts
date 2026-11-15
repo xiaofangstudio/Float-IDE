@@ -1,8 +1,44 @@
 import * as monaco from 'monaco-editor';
 import { INSTRUCTIONS, SPECIAL_VARS, KEYWORDS, TYPE_WORDS, SNIPPETS, BUILTIN_METHODS, LANG_ID } from './spec';
-import { buildCompletions, visibleCompletions, type CompletionKind } from './completions';
+import { buildCompletions, completionPosition, visibleCompletions, type CompletionKind } from './completions';
 import { contextAt } from './context';
 import { isTauriEnv } from '../core/tauri';
+import { loadSettings, SETTINGS_EVENT } from '../ui/settings';
+import { scopeVariables, smartRank, trainModel, type SmartModel } from './smartComplete';
+
+/* ── 本地超小补全模型（Beta）─────────────────────────────────────────
+ * 默认关闭。开启后只用工程里打开的 .co/.cw 训练一张内存里的计数表，
+ * 同一档内按上下文重排候选；关着时走老补全（老补全自己也做了上下文感知）。
+ * 语料签名（文件数 + 总长度）变了才重建，不会每敲一个键就重新训练。 */
+let smartModel: SmartModel | null = null;
+let smartSig = '';
+let smartEnabled = loadSettings().smartComplete;
+if (typeof window !== 'undefined') {
+  window.addEventListener(SETTINGS_EVENT, () => {
+    smartEnabled = loadSettings().smartComplete;
+    smartModel = null;
+    smartSig = '';
+  });
+}
+
+function currentSmartModel(): SmartModel {
+  const texts: string[] = [];
+  let len = 0;
+  for (const m of monaco.editor.getModels()) {
+    const name = decodeURIComponent(m.uri.path);
+    if (!/\.(co|cw)$/i.test(name)) continue;
+    const t = m.getValue();
+    const clipped = t.length > 120_000 ? t.slice(0, 120_000) : t;
+    texts.push(clipped);
+    len += clipped.length;
+  }
+  const sig = `${texts.length}:${len}`;
+  if (!smartModel || sig !== smartSig) {
+    smartModel = trainModel(texts);
+    smartSig = sig;
+  }
+  return smartModel;
+}
 
 /* 插件贡献的片段与关键词。插件系统启动后调用 setPluginContributions 注入，
  * 补全里和内置片段一视同仁 —— 这样 plugin.json 里声明的 snippets 是真的能用，不是摆设。 */
@@ -246,16 +282,26 @@ function registerCompletion(): void {
       const explicit = ctxKind === 1; // CompletionTriggerKind.Invoke
       if (!explicit && ctx.kind !== 'member' && word.word === '') return { suggestions: [] };
 
+      const fullText = model.getValue();
+      const allLines = fullText.split('\n');
+      const lineBefore = (allLines[position.lineNumber - 1] ?? '').slice(0, position.column - 1);
+      const scopeVars = scopeVariables(a, allLines, position.lineNumber);
+
       const items = buildCompletions({
         word: word.word,
         analysis: a,
         context: ctx,
+        position: completionPosition(lineBefore, word.word),
+        scopeVars,
         plugins: { snippets: pluginSnippets, keywords: pluginKeywords }
       });
 
       /* 模板片段是一整段骨架（`if else` / `for range`），误选一次就把整行换掉。
        * 前缀太短时只给变量和关键字，规则见 completions.ts 的 visibleCompletions。 */
-      const candidates = visibleCompletions(items, word.word);
+      let candidates = visibleCompletions(items, word.word);
+      if (smartEnabled) {
+        candidates = smartRank(currentSmartModel(), candidates, lineBefore, scopeVars, word.word);
+      }
 
       const kinds: Record<CompletionKind, monaco.languages.CompletionItemKind> = {
         variable: monaco.languages.CompletionItemKind.Variable,

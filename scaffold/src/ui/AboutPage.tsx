@@ -8,6 +8,9 @@ import { Logo } from './icons';
  * 和偏好设置共用 doc-embed 版式，作为文档标签页打开，不抢编辑器焦点。 */
 
 const VERSION = (pkg as { version?: string }).version ?? '1.6.0';
+/* Copper 语言版本（不是 IDE 版本）。改这里时同步改
+   src-tauri/float-lang/Cargo.toml 的 version，两个数字必须一致。 */
+const COPPER_VERSION = '1.0.0';
 
 const CHANGELOG: { v: string; items: string[] }[] = [
   {
@@ -131,7 +134,7 @@ export function AboutPage({ onClose }: { onClose: () => void }) {
               <div>
                 <h3>Copper</h3>
                 <div className="about-sub">原 CW Script · 源文件扩展名 .co</div>
-                <div className="about-sub">一门行式脚本语言，铜的流动性是它的名字来源</div>
+                <div className="about-sub">Copper {COPPER_VERSION} · 一门行式脚本语言，铜的流动性是它的名字来源</div>
               </div>
             </div>
             <p>

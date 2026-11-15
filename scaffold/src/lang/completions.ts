@@ -43,6 +43,10 @@ export type CompletionInput = {
   analysis: Analysis;
   /** 光标语义（context.ts 统一算的：成员 / 起名字 / 字符串 / 注释 / 代码） */
   context: CursorContext;
+  /** 当前作用域里正在用的变量（最近的循环变量排最前），由 smartComplete 算好 */
+  scopeVars?: string[];
+  /** 光标所在位置：语句开头 / 表达式中间。表达式里不给控制流关键字 */
+  position?: 'statement' | 'expression';
   plugins?: PluginContrib;
 };
 
@@ -51,6 +55,8 @@ const BUILTINS = builtinList();
 /** 档位：数字越小越靠前 */
 const TIER = {
   member: 0,
+  /** 当前作用域正在用的变量（尤其 for 循环变量）：压过其它一切 */
+  scope: 0,
   /** 当前作用域里的变量（含 for 循环变量）：永远排最前面。
    *  以前 special 也是 1，于是打一个字母就冒出 ans / __last_* 一堆特殊变量，
    *  把真正的 i、n 挤到后面，还容易被回车选中。 */
@@ -104,10 +110,34 @@ function methodsOf(a: Analysis, cls: string): { name: string; params: { name: st
   return out;
 }
 
+/** 控制流关键字：正在打一个词 / 在表达式里时不给，免得打 `s` 冒出个 `if` */
+const CONTROL_WORDS = new Set([
+  'if', 'elif', 'else', 'for', 'while', 'return', 'break', 'continue',
+  'import', 'class', 'try', 'catch', 'finally', 'throw', 'fn', 'function', 'func', 'new', 'super'
+]);
+
+/** 光标在语句开头还是表达式里。抽成纯函数是为了能单测。 */
+export function completionPosition(lineBefore: string, word: string): 'statement' | 'expression' {
+  if (word.length > 0) {
+    const before = lineBefore.slice(0, Math.max(0, lineBefore.length - word.length)).trimEnd();
+    return before ? 'expression' : 'statement';
+  }
+  const t = lineBefore.trimEnd();
+  if (!t) return 'statement';
+  if (/[=+\-*/%,(\[{\?:]$/.test(t)) return 'expression';
+  if (/\b(print|return|if|elif|while|for|in|and|or|not)\s/i.test(t)) return 'expression';
+  return 'statement';
+}
+
 export function buildCompletions(input: CompletionInput): Completion[] {
   const { analysis: a, word } = input;
   const out: Completion[] = [];
   const seen = new Set<string>();
+  const scope = new Set(input.scopeVars ?? []);
+  const expression = input.position === 'expression' || word.length > 0;
+  const lowWord = word.toLowerCase();
+  const keepControl = (k: string): boolean =>
+    !expression || (word.length > 0 && k.toLowerCase().startsWith(lowWord));
 
   const push = (
     label: string, kind: CompletionKind, tier: number,
@@ -164,15 +194,17 @@ export function buildCompletions(input: CompletionInput): Completion[] {
     return out;
   }
 
-  /* ── 本文件符号 ── */
+  /* ── 本文件符号 ──
+   * 当前作用域里正在用的变量（尤其 for 循环变量）单独降一档，
+   * 这样「for s in 成绩」下面打 s，第一个候选一定是 s，不会是 if 或某个内建函数。 */
   for (const v of a.vars) {
-    push(v.name, 'variable', TIER.local,
+    push(v.name, 'variable', scope.has(v.name) ? TIER.scope : TIER.local,
       v.cls ? v.cls : v.type,
       `变量 \`${v.name}\`${v.cls ? `，类型 ${v.cls}` : `，类型 ${v.type}`}（第 ${v.line} 行）`);
   }
   for (const f of a.funcs) {
     if (f.owner) continue; // 方法不在这里列，走 `对象.`
-    push(f.name, 'function', TIER.local,
+    push(f.name, 'function', scope.has(f.name) ? TIER.scope : TIER.local,
       `${f.name}(${paramsOf(f.params)})${f.retType ? ` → ${f.retType}` : ''}`,
       `函数 \`${f.name}(${paramsOf(f.params)})\`${f.retType ? ` → ${f.retType}` : ''}（第 ${f.line} 行）`,
       `(${paramsOf(f.params)})`);
@@ -191,6 +223,7 @@ export function buildCompletions(input: CompletionInput): Completion[] {
     push(t, 'type', TIER.type, '类型', `类型 \`${t}\``);
   }
   for (const k of KEYWORDS) {
+    if (!keepControl(k)) continue;
     push(k, 'keyword', TIER.keyword, '关键字', `关键字 \`${k}\``);
   }
 
@@ -199,8 +232,8 @@ export function buildCompletions(input: CompletionInput): Completion[] {
     push(b.name, 'function', TIER.builtin, b.sig, b.doc, b.sig.slice(b.name.length) || '()');
   }
 
-  /* ── 老式指令（写文件 / 调试 这类） ── */
-  for (const ins of INSTRUCTIONS) {
+  /* ── 老式指令（写文件 / 调试 这类）：只在语句位置给 ── */
+  if (!expression) for (const ins of INSTRUCTIONS) {
     const first = ins.name.split(' ')[0];
     if (!first) continue;
     push(first, 'keyword', TIER.instruction, ins.args,

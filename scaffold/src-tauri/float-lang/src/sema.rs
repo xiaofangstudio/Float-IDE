@@ -66,6 +66,10 @@ struct Checker {
     globals: Scope,
     locals: Vec<Scope>,
     funcs: HashMap<Rc<str>, FnSig>,
+    /// 分析途中遇到的「当时还没定义」的读取。变量可能定义在后面，
+    /// 也可能定义在 import 摊平进来的另一个文件里，不能当场就判它拼错。
+    /// 扫完整段程序后用 globals 的最终名字全集复查一遍。
+    pending: Vec<(Rc<str>, u32, u32)>,
 }
 
 const SPECIALS: [&str; 4] = ["ans", "__last_ans", "__last_read", "__last_cmp"];
@@ -77,6 +81,7 @@ pub fn analyze(prog: &Program) -> Vec<Diag> {
         globals: Scope::default(),
         locals: Vec::new(),
         funcs: HashMap::new(),
+        pending: Vec::new(),
     };
     // 先把所有函数签名收进来，函数可以互相调用（包括先用后定义）
     for st in &prog.body {
@@ -92,6 +97,17 @@ pub fn analyze(prog: &Program) -> Vec<Diag> {
     let body = prog.body.clone();
     for st in &body {
         c.stmt(st);
+    }
+    /* 复查「当时没定义」的读取：import 会把别的文件就地摊平到同一个 Program 里，
+     * 数据文件里的列表/变量可能排在使用点之后。等整段扫完，globals 里已经是
+     * 全程序（含所有被引入文件）的名字全集，这时还找不到的才是真拼错。 */
+    let pending = std::mem::take(&mut c.pending);
+    for (name, line, col) in pending {
+        if c.globals.vars.contains_key(&name) {
+            c.mark_used(&name);
+        } else {
+            c.warn(format!("「{}」还没定义过，读出来会是 null", name), line, col);
+        }
     }
     // 全局里没被用过的
     c.report_unused(&c.globals.clone());
@@ -358,7 +374,7 @@ impl Checker {
         match t {
             Target::Var(name) => {
                 if !self.is_defined(name) {
-                    self.warn(format!("「{}」还没定义过，读出来会是 null", name), 0, 1);
+                    self.pending.push((Rc::clone(name), 0, 1));
                 } else {
                     self.mark_used(name);
                 }
@@ -379,11 +395,7 @@ impl Checker {
                 if self.is_defined(name) {
                     self.mark_used(name);
                 } else {
-                    self.warn(
-                        format!("「{}」还没定义过，读出来会是 null", name),
-                        e.span.line,
-                        e.span.col,
-                    );
+                    self.pending.push((Rc::clone(name), e.span.line, e.span.col));
                 }
             }
             ExprKind::SelfRef => {}
@@ -473,6 +485,21 @@ mod tests {
     fn 先声明后使用不报() {
         let ds = diags("int x = 1\nprint(x)\n");
         assert!(!has(&ds, Severity::Warning, "x"), "{:?}", ds);
+    }
+
+    #[test]
+    fn 定义在后面或别的文件也不误报() {
+        // import 摊平之后，数据文件里的赋值很可能排在使用点之后。
+        // 以前会报「还没定义过」，现在要等整段程序扫完再判。
+        let ds = diags("print(总数)\nlist 总数 = [1, 2]\n");
+        assert!(!has(&ds, Severity::Warning, "总数"), "{:?}", ds);
+        assert!(!has(&ds, Severity::Hint, "总数"), "{:?}", ds);
+    }
+
+    #[test]
+    fn 全程序都找不到的名字仍然报() {
+        let ds = diags("print(总数X)\nlist 总数 = [1, 2]\n");
+        assert!(has(&ds, Severity::Warning, "总数X"), "{:?}", ds);
     }
 
     #[test]

@@ -2,8 +2,9 @@
  * 这几个都是用户明确点名的毛病，任何时候回退都要在这里炸出来。 */
 
 import { analyze } from '../src/lang/analyze';
-import { buildCompletions, visibleCompletions, type Completion } from '../src/lang/completions';
+import { buildCompletions, completionPosition, visibleCompletions, type Completion } from '../src/lang/completions';
 import { contextAt } from '../src/lang/context';
+import { scopeVariables, smartRank, trainModel } from '../src/lang/smartComplete';
 
 let pass = 0;
 let fail = 0;
@@ -200,6 +201,35 @@ function labels(list: Completion[]): string[] {
   ok('打 i 时没有模板片段', visibleCompletions(all, 'i').every((c) => c.kind !== 'snippet'));
   ok('打 if 时没有模板片段', visibleCompletions(all, 'if').every((c) => c.kind !== 'snippet'));
   ok('打 ife 时模板才出现', visibleCompletions(all, 'ife').some((c) => c.kind === 'snippet'));
+}
+
+/* ── 8. 上下文感知：for 循环体里打变量，不许冒出 if ── */
+{
+  const src = 'list 成绩 = [1, 2]\nfor s in 成绩\n    s';
+  const a = analyze('t.co', src);
+  const ctx = contextAt(src, 3, 6, a);
+  const lines = src.split('\n');
+  const scopeVars = scopeVariables(a, lines, 3);
+  ok('最近的 for 变量被认出来', scopeVars[0] === 's');
+  const lineBefore = '    s';
+  const items = buildCompletions({
+    word: 's', analysis: a, context: ctx,
+    position: completionPosition(lineBefore, 's'), scopeVars
+  });
+  const sorted = [...items].sort((x, y) => x.sortText.localeCompare(y.sortText));
+  eq('循环变量排第一', sorted[0]?.label, 's');
+  ok('打 s 时不冒 if', !items.some((c) => c.label === 'if'));
+  const withI = buildCompletions({
+    word: 'i', analysis: a, context: ctx,
+    position: completionPosition('    i', 'i'), scopeVars
+  });
+  ok('打 i 时 if 仍在（前缀命中）', withI.some((c) => c.label === 'if'));
+
+  /* Beta 小模型：只在同档内重排，不许把关键字顶到变量前面 */
+  const model = trainModel([src]);
+  ok('模型吃到语料', model.trainedLines > 0);
+  const ranked = smartRank(model, items, lineBefore, scopeVars, 's');
+  eq('模型重排后循环变量仍是第一', ranked[0]?.label, 's');
 }
 
 console.log(`\n通过 ${pass} 项，失败 ${fail} 项`);

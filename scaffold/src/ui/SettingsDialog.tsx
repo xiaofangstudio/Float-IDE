@@ -147,6 +147,13 @@ export function SettingsDialog({ onClose, onAppearance, onAbout, embedded }: { o
                 <button className={`switch ${s.suggestDocs ? 'on' : ''}`} onClick={() => set('suggestDocs', !s.suggestDocs)}><span /></button>
               </Row>
               <Hint>补全时在右侧显示这个函数的说明与用法。关掉只留候选列表。</Hint>
+              <Row label="智能补全（Beta）">
+                <button className={`switch ${s.smartComplete ? 'on' : ''}`} onClick={() => set('smartComplete', !s.smartComplete)}><span /></button>
+              </Row>
+              <Hint>
+                本地超小模型：只用工程里的 Copper 代码做统计，结合当前作用域变量给候选排序，
+                不联网、不上传、模型只在内存里。默认关闭；关着时用老补全。
+              </Hint>
             </Section>
 
             <Section id="files" title="文件与运行" note="保存与引擎">

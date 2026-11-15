@@ -22,8 +22,8 @@ const TOOL_DOC: { name: string; desc: string }[] = [
   { name: 'read_file', desc: '读工程内文件' },
   { name: 'write_file', desc: '原子写入工程文件' },
   { name: 'search', desc: '全文搜索，返回文件/行号/该行内容' },
-  { name: 'run_script', desc: '用 Float 内核跑一段代码，返回输出与错误' },
-  { name: 'get_diagnostics', desc: '对 Copper 源文件（.co/.cw）做语法与语义检查' },
+  { name: 'run_script', desc: '跑一段代码；传 path 就跑整个工程主文件（含 import），返回输出与带行号的报错' },
+  { name: 'get_diagnostics', desc: '对 Copper 源文件做语法与语义检查（会摊平 import，跨文件不误报）' },
   { name: 'get_outline', desc: '返回文件的符号大纲' }
 ];
 
