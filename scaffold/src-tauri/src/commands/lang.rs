@@ -4,6 +4,12 @@
 //! 这样至少**执行**这件事只有一套实现，不是两套各跑各的。
 
 use serde::Serialize;
+use std::sync::mpsc::Sender;
+use tauri::{AppHandle, Emitter};
+
+/// 正在等待输入的运行：run_id → 答案通道。
+/// F5 的 VM 在一条独立线程里阻塞等答案；界面通过 lang_input 把回答送回来。
+static INPUT_TX: std::sync::Mutex<Option<(String, Sender<String>)>> = std::sync::Mutex::new(None);
 
 #[derive(Serialize)]
 pub struct LangDiag {
@@ -89,6 +95,7 @@ fn fail(msg: String, line: u32) -> LangRunResult {
 /// 这样"库文件改了还没存盘"也能按新内容跑。
 #[tauri::command]
 pub fn lang_run(
+    app: AppHandle,
     file: String,
     source: String,
     inputs: Vec<String>,
@@ -96,20 +103,47 @@ pub fn lang_run(
 ) -> LangRunResult {
     let base = base_dir(&file);
     ensure_fetch_installed();
-    /* 交互式跑：脚本里的 ask 没有现成答案时先停下，把提问交给界面，
-     * 界面拿到回答补进 inputs 再重跑一次（确定性脚本，重跑结果一致）。
+    /* 阻塞式交互：VM 在独立线程里一次跑完，ask 缺答案时同步等界面送回来，
+     * 不再「补一条输入从头重跑」——random / 写文件 / 时间这类副作用只发生一次。
      *
      * 整段放到一条大栈线程上跑：词法/语法/编译都是递归下降，几百层缩进的脚本
      * 在默认栈（1~2MB）里可能直接爆栈把整个 IDE 带走。64MB 够几千层用了。
      * 注意：结果里有 Rc（脚本的值），不能跨线程搬，所以组装成纯数据的
      * LangRunResult 也在线程里做完，只把字符串/数字带回来。 */
     let extra = extra.unwrap_or_default();
+    let run_id = format!("run-{}", std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos()).unwrap_or(0));
+    let rid_for_thread = run_id.clone();
     let handle = std::thread::Builder::new()
         .name("float-run".into())
         .stack_size(64 * 1024 * 1024)
         .spawn(move || {
-            let r = float_lang::api::run_interactive(&file, &source, base.as_deref(), inputs, extra);
-            finish(r)
+            let (tx, rx) = std::sync::mpsc::channel::<String>();
+            // 界面靠 run_id 把答案送回这条线程
+            if let Ok(mut g) = INPUT_TX.lock() {
+                *g = Some((rid_for_thread.clone(), tx));
+            }
+            let rid_cb = rid_for_thread.clone();
+            let input_cb = Box::new(move |prompt: &str| {
+                // 通知界面弹出输入行，然后阻塞等 lang_input 把答案送回来
+                let _ = app.emit("float-input-request", serde_json::json!({
+                    "runId": rid_cb, "prompt": prompt,
+                }));
+                match rx.recv() {
+                    Ok(a) => a,
+                    Err(_) => String::new(), // 界面关了：给空串让脚本继续往下走完
+                }
+            });
+            let outcome = float_lang::api::run_blocking(
+                &file, &source, base.as_deref(), inputs, extra, input_cb,
+            );
+            if let Ok(mut g) = INPUT_TX.lock() {
+                if g.as_ref().map(|(id, _)| id == &rid_for_thread).unwrap_or(false) {
+                    *g = None;
+                }
+            }
+            finish_blocking(outcome)
         });
     match handle {
         Ok(h) => match h.join() {
@@ -120,30 +154,23 @@ pub fn lang_run(
     }
 }
 
-/// 把内核结果整理成给前端的纯数据（这一步在线程里做，避免 Rc 跨线程）
-fn finish(r: float_lang::api::InteractiveRun) -> LangRunResult {
-    if let Some(e) = r.error {
-        return LangRunResult {
-            output: r.output,
-            reports: Vec::new(),
-            error: Some(e.message.clone()),
-            error_line: e.span.line,
-            steps: 0,
-            need_input: None,
-        };
+/// F5 的输入回填：界面把答案送回正在阻塞等待的那次运行。
+#[tauri::command]
+pub fn lang_input(run_id: String, answer: String) -> bool {
+    let g = match INPUT_TX.lock() {
+        Ok(g) => g,
+        Err(_) => return false,
+    };
+    match g.as_ref() {
+        Some((id, tx)) if id == &run_id => tx.send(answer).is_ok(),
+        _ => false,
     }
-    if let Some(prompt) = r.need_input {
-        return LangRunResult {
-            output: r.output,
-            reports: Vec::new(),
-            error: None,
-            error_line: 0,
-            steps: 0,
-            need_input: Some(prompt),
-        };
-    }
-    match r.outcome {
-        Some(o) => LangRunResult {
+}
+
+/// 把阻塞式运行的结果整理成给前端的纯数据
+fn finish_blocking(r: Result<float_lang::RunOutcome, float_lang::FloatError>) -> LangRunResult {
+    match r {
+        Ok(o) => LangRunResult {
             output: o.output,
             reports: o.reports,
             error: None,
@@ -151,7 +178,14 @@ fn finish(r: float_lang::api::InteractiveRun) -> LangRunResult {
             steps: o.steps,
             need_input: None,
         },
-        None => fail("运行结束但没有结果".into(), 0),
+        Err(e) => LangRunResult {
+            output: String::new(),
+            reports: Vec::new(),
+            error: Some(e.message.clone()),
+            error_line: e.span.line,
+            steps: 0,
+            need_input: None,
+        },
     }
 }
 

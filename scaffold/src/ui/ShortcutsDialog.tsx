@@ -23,6 +23,9 @@ const GROUPS: { title: string; rows: [string, string][] }[] = [
       ['Ctrl + G', '跳到指定行'],
       ['Ctrl + /', '注释或取消注释当前行'],
       ['Ctrl + Space', '手动唤出补全（补全项只插名字，不会自动加括号）'],
+      ['↑ / ↓', '在补全列表里逐项选择'],
+      ['Page Up / Page Down', '在补全列表里整页翻动选择'],
+      ['Enter', '选中当前补全项（只在补全列表打开时）'],
       ['Ctrl + Shift + P', '命令面板'],
       ['Ctrl + = / Ctrl + -', '放大 / 缩小字号'],
       ['Ctrl + 0', '字号恢复默认']

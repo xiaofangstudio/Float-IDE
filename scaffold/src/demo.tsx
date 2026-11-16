@@ -493,6 +493,21 @@ async function selftest(): Promise<void> {
       ok('候选项有类型图标', qa('.suggest-widget .suggest-icon').length > 0);
       const dl = q('.suggest-widget .details-label');
       ok('有右侧类型标注', !!dl, (dl?.textContent ?? '').slice(0, 24));
+
+      /* PageUp / PageDown 选补全项：Monaco 0.52 内置把这两个键绑到
+       * selectNextPageSuggestion / selectPrevPageSuggestion（源码 keybinding 已确认）。
+       * 这里验证这两个命令在补全打开时确实注册、可调用且不报错——
+       * 全局键盘处理器不会拦 PageUp/PageDown，所以键盘事件能走到 Monaco 的绑定。 */
+      let pageOk = false;
+      try {
+        bus.editor.runAction('selectNextPageSuggestion');
+        await sleep(120);
+        bus.editor.runAction('selectPrevPageSuggestion');
+        await sleep(120);
+        pageOk = !!q('.suggest-widget');
+      } catch { pageOk = false; }
+      ok('补全翻页命令可用（PageUp/PageDown）', pageOk,
+        'selectNextPageSuggestion / selectPrevPageSuggestion 调用后列表仍在');
       ok('有底部操作提示条', !!q('.suggest-widget .suggest-status-bar'));
       // 展开箭头：Monaco 只在「候选项带 documentation」时才给它绑 onclick，
       // 所以 onclick 存在 == 文档面板是真的能展开的。

@@ -14,8 +14,18 @@ use crate::ast::*;
 use crate::TypeName;
 use crate::error::{FloatError, Span};
 use crate::value::{UserFn, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+
+/// 闭包上值的来源：造闭包时从当前帧的哪个格子取 Rc<RefCell> 引用。
+/// 定义在最前面，Scope / Chunk 都要用。
+#[derive(Clone, Debug)]
+pub enum UpSrc {
+    /// 当前帧的逃逸局部变量 base+slot（已装箱成 cell）
+    Local(u16),
+    /// 当前帧的第 i 个上值（跨层传递捕获）
+    Upval(u16),
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Op {
@@ -30,6 +40,23 @@ pub enum Op {
     SetLocal(u16),
     GetGlobal(u16),
     SetGlobal(u16),
+
+    /* ── 闭包上值：cell 是 Rc<RefCell<Value>>，跨栈帧共享同一个变量 ── */
+    /// 先建一个空 cell（值是 null）放到 frame.cells[slot]。
+    /// 声明处先建 cell 再算初值，这样递归闭包能在造自己时就捕到自己的格子。
+    CellNew(u16),
+    /// 逃逸参数在函数入口的装箱：把 base+slot 的普通值移进 cell 存到 frame.cells[slot]
+    BoxParam(u16),
+    /// 读 frame.cells[slot] 里的值
+    GetBox(u16),
+    /// 写 frame.cells[slot]
+    SetBox(u16),
+    /// 读 frame.upvals[i]（捕获的外上值）里的值
+    GetUpval(u16),
+    /// 写 frame.upvals[i]
+    SetUpval(u16),
+    /// 造闭包：常量表 fidx 处的 UserFn + upval_sources[srcs] 描述的 cell 引用 → Value::Closure
+    MakeClosure { fidx: u32, srcs: u32 },
 
     Add,
     Sub,
@@ -99,6 +126,8 @@ pub enum Op {
     BuildList(u16),
     BuildDict(u16),
     Index,
+    /// 切片 xs[a:b]：栈上是 [obj, from, to]（缺的一边是 Nil）
+    Slice,
     /// 取局部变量的地址（&x），槽位相对当前帧
     AddrLocal(u16),
     /// 取全局变量的地址（&x）
@@ -160,6 +189,13 @@ pub struct Chunk {
     pub line_file: Vec<u16>,
     /// 每一行在它自己那个文件里的行号
     pub line_local: Vec<u32>,
+    /// 顶层函数提升表：(全局槽号, 常量表里的 Value::Func 下标)。
+    /// 运行开始前 VM 按它把函数先放进全局槽——这样「先调用后定义」才成立，
+    /// 和 TS 引擎的函数提升语义一致。
+    pub hoists: Vec<(u16, u32)>,
+    /// 闭包的 upvalue 来源表：MakeClosure.srcs 指向这里的一项。
+    /// 每项按本函数捕获顺序，说明每个上值从当前帧的哪个格子取引用。
+    pub upval_sources: Vec<Vec<UpSrc>>,
 }
 
 impl Chunk {
@@ -177,8 +213,15 @@ impl Chunk {
 
 #[derive(Clone, Copy)]
 enum Slot {
+    /// 普通局部变量：栈槽直读直写，热路径零开销
     Local(u16),
+    /// 逃逸的局部变量：值存在 cell 里（GetBox / SetBox）
+    Cell(u16),
     Global(u16),
+    /// 捕获的外层变量：读 frame 的 upval（GetUpval / SetUpval）
+    Upval(u16),
+    /// lazy 参数：槽里是零参 thunk 闭包，读的时候 Call(0) 求值（by-name）
+    Lazy(u16),
 }
 
 struct Scope {
@@ -218,6 +261,246 @@ struct LoopCtx {
     continues: Vec<usize>,
 }
 
+/* ───────────────────── 闭包自由变量分析 ─────────────────────
+ * 字节码是"边走边发"的：等编译到 `int base = 100` 时，还不知道后面的
+ * 内层函数会不会捕获它，没法当场决定要不要装箱。所以编译前先跑一遍
+ * 纯分析，把每个函数「要捕获哪些名字」「哪些局部变量会被内层捕获」算好。
+ *
+ * 算法是经典的词法作用域解析：维护一层层 scope，遇到变量引用就从里往外找；
+ * 找到外层函数（不是全局）的局部变量时，把它记进中间每一层的 free（逐层转发），
+ * 并把目标层那个局部变量标成 celled（要装箱）。名字即可当作身份——本语言的
+ * 局部变量作用域是"每函数一张平表"，同一个函数里不允许同名重声明。
+ */
+#[derive(Clone, Debug, Default)]
+struct FnInfo {
+    /// 本函数要捕获的自由变量，顺序 = upvalue 下标
+    free: Vec<Rc<str>>,
+    /// 本函数的局部变量里被内层捕获的名字（要装箱成 cell）
+    celled: Vec<Rc<str>>,
+}
+
+#[derive(Default)]
+struct AScope {
+    names: Vec<Rc<str>>,
+    info: FnInfo,
+}
+
+#[derive(Default)]
+struct Analyzer {
+    scopes: Vec<AScope>,
+    /// (行, 列, 函数名) → 该函数的捕获信息
+    infos: HashMap<(u32, u32, Rc<str>), FnInfo>,
+    /// 具名函数的 lazy 参数位图，用来识别调用处的 thunk 实参
+    lazy_sigs: HashMap<Rc<str>, Vec<bool>>,
+}
+
+/// 预扫描整段程序，收集每个具名函数哪些参数是 lazy。
+/// 调用点靠它把实参编成零参闭包——必须提前全量收集，因为「先调用后定义」是允许的。
+fn collect_lazy_sigs(prog: &Program) -> HashMap<Rc<str>, Vec<bool>> {
+    fn walk(body: &[Stmt], map: &mut HashMap<Rc<str>, Vec<bool>>) {
+        for st in body {
+            match &st.kind {
+                StmtKind::FuncDef { name, params, body, .. } => {
+                    map.insert(Rc::clone(name), params.iter().map(|p| p.lazy).collect());
+                    walk(body, map);
+                }
+                StmtKind::Group(xs) => walk(xs, map),
+                StmtKind::If { branches, else_body } => {
+                    for (_, b) in branches { walk(b, map); }
+                    if let Some(b) = else_body { walk(b, map); }
+                }
+                StmtKind::While { body, .. } | StmtKind::WaitUntil { body, .. }
+                | StmtKind::Repeat { body, .. } => walk(body, map),
+                StmtKind::ForRange { body, .. } | StmtKind::ForIn { body, .. } => walk(body, map),
+                StmtKind::Try { body, catch_body, finally, .. } => {
+                    walk(body, map);
+                    if let Some(b) = catch_body { walk(b, map); }
+                    if let Some(b) = finally { walk(b, map); }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut map = HashMap::new();
+    walk(&prog.body, &mut map);
+    map
+}
+
+impl Analyzer {
+    fn new() -> Analyzer {
+        let mut a = Analyzer::default();
+        a.scopes.push(AScope::default());
+        a
+    }
+
+    fn declare(&mut self, name: &Rc<str>) {
+        let sc = self.scopes.last_mut().unwrap();
+        if !sc.names.iter().any(|n| n == name) {
+            sc.names.push(Rc::clone(name));
+        }
+    }
+
+    /// 解析一次变量引用；只处理"引用了外层函数的局部变量"这一种情况。
+    fn use_name(&mut self, name: &Rc<str>) {
+        let cur = self.scopes.len() - 1;
+        let mut target = None;
+        for i in (0..=cur).rev() {
+            if self.scopes[i].names.iter().any(|n| n == name) {
+                target = Some(i);
+                break;
+            }
+        }
+        let target = match target {
+            // 0 = 全局；cur = 当前函数自己的局部变量；都不用捕获
+            Some(i) if i > 0 && i < cur => i,
+            _ => return,
+        };
+        // 中间每一层都要转发这个上值
+        for j in target + 1..=cur {
+            let info = &mut self.scopes[j].info;
+            if !info.free.iter().any(|n| n == name) {
+                info.free.push(Rc::clone(name));
+            }
+        }
+        let info = &mut self.scopes[target].info;
+        if !info.celled.iter().any(|n| n == name) {
+            info.celled.push(Rc::clone(name));
+        }
+    }
+
+    fn block(&mut self, body: &[Stmt]) {
+        for st in body {
+            self.stmt(st);
+        }
+    }
+
+    fn target(&mut self, t: &Target) {
+        match t {
+            Target::Var(n) => self.use_name(n),
+            Target::Member(o, _) => self.expr(o),
+            Target::Idx(o, i) => { self.expr(o); self.expr(i); }
+            Target::Deref(p) => self.expr(p),
+        }
+    }
+
+    fn expr(&mut self, e: &Expr) {
+        match &e.kind {
+            ExprKind::Var(n) => self.use_name(n),
+            ExprKind::SelfRef => self.use_name(&Rc::from("self")),
+            ExprKind::Num(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Null => {}
+            ExprKind::List(xs) => for x in xs { self.expr(x); },
+            ExprKind::Dict(xs) => for (k, v) in xs { self.expr(k); self.expr(v); },
+            ExprKind::Un { a, .. } => self.expr(a),
+            ExprKind::Bin { a, b, .. } => { self.expr(a); self.expr(b); }
+            ExprKind::Ternary { cond, a, b } => { self.expr(cond); self.expr(a); self.expr(b); }
+            ExprKind::Lambda { params, body } => {
+                // lambda 自成一个函数作用域：参数是它的局部，body 里的自由变量向上捕获
+                self.scopes.push(AScope::default());
+                for p in params {
+                    self.declare(&p.name);
+                    if let Some(d) = &p.default { self.expr(d); }
+                }
+                self.expr(body);
+                let sc = self.scopes.pop().unwrap();
+                self.infos.insert((e.span.line, e.span.col, Rc::from("(lambda)")), sc.info);
+            }
+            ExprKind::Idx { obj, index } => { self.expr(obj); self.expr(index); }
+            ExprKind::Slice { obj, from, to } => {
+                self.expr(obj);
+                if let Some(x) = from { self.expr(x); }
+                if let Some(x) = to { self.expr(x); }
+            }
+            ExprKind::Member { obj, .. } => self.expr(obj),
+            ExprKind::Call { callee, args } => {
+                self.expr(callee);
+                let mask = match &callee.kind {
+                    ExprKind::Var(n) => self.lazy_sigs.get(n.as_ref()).cloned(),
+                    _ => None,
+                };
+                for (i, a) in args.iter().enumerate() {
+                    if mask.as_ref().map(|m| m.get(i).copied().unwrap_or(false)).unwrap_or(false) {
+                        // lazy 实参会被编成零参 thunk，它自成一个捕获作用域
+                        self.scopes.push(AScope::default());
+                        self.expr(a);
+                        let sc = self.scopes.pop().unwrap();
+                        let key = (a.span.line, a.span.col, Rc::from(format!("(thunk_{}_{})", a.span.line, i)));
+                        self.infos.insert(key, sc.info);
+                    } else {
+                        self.expr(a);
+                    }
+                }
+            }
+            ExprKind::New { args, .. } => for a in args { self.expr(a); },
+        }
+    }
+
+    fn stmt(&mut self, s: &Stmt) {
+        match &s.kind {
+            StmtKind::Group(xs) => self.block(xs),
+            StmtKind::Nop | StmtKind::Break | StmtKind::Continue | StmtKind::Stop
+            | StmtKind::TimeRead | StmtKind::TimeReset | StmtKind::Unsupported { .. } => {}
+            StmtKind::Decl { name, init, .. } => {
+                self.declare(name);
+                if let Some(e) = init { self.expr(e); }
+            }
+            StmtKind::Assign { target, value, .. } => { self.target(target); self.expr(value); }
+            StmtKind::IncDec { target, .. } => self.target(target),
+            StmtKind::ExprStmt(e) | StmtKind::IfOut(e) | StmtKind::Throw(e) => self.expr(e),
+            StmtKind::Print(xs) | StmtKind::Report(xs) | StmtKind::Debug { args: xs, .. } => {
+                for x in xs { self.expr(x); }
+            }
+            StmtKind::Ask(e) => if let Some(e) = e { self.expr(e); },
+            StmtKind::If { branches, else_body } => {
+                for (c, b) in branches {
+                    if let Some(c) = c { self.expr(c); }
+                    self.block(b);
+                }
+                if let Some(b) = else_body { self.block(b); }
+            }
+            StmtKind::While { cond, body } | StmtKind::WaitUntil { cond, body } => {
+                self.expr(cond); self.block(body);
+            }
+            StmtKind::Repeat { count, body } => { self.expr(count); self.block(body); }
+            StmtKind::ForRange { from, to, step, body, var, .. } => {
+                if let Some(e) = from { self.expr(e); }
+                self.expr(to);
+                if let Some(e) = step { self.expr(e); }
+                self.declare(var);
+                self.block(body);
+            }
+            StmtKind::ForIn { var, value_name, iter, body } => {
+                self.expr(iter);
+                self.declare(var);
+                if let Some(v) = value_name { self.declare(v); }
+                self.block(body);
+            }
+            StmtKind::Destructure { names, value } => {
+                self.expr(value);
+                for n in names { self.declare(n); }
+            }
+            StmtKind::Return(v) => if let Some(e) = v { self.expr(e); },
+            StmtKind::FuncDef { name, params, body, .. } => {
+                // 先在本层声明函数名：内层递归要能解析到它
+                self.declare(name);
+                self.scopes.push(AScope::default());
+                for p in params {
+                    self.declare(&p.name);
+                    if let Some(d) = &p.default { self.expr(d); }
+                }
+                self.block(body);
+                let sc = self.scopes.pop().unwrap();
+                self.infos.insert((s.span.line, s.span.col, Rc::clone(name)), sc.info);
+            }
+            StmtKind::Try { body, catch_name, catch_body, finally } => {
+                self.block(body);
+                if let Some(n) = catch_name { self.declare(n); }
+                if let Some(b) = catch_body { self.block(b); }
+                if let Some(b) = finally { self.block(b); }
+            }
+        }
+    }
+}
+
 pub struct Compiler {
     code: Vec<Op>,
     lines: Vec<u32>,
@@ -240,6 +523,18 @@ pub struct Compiler {
     funcs: Vec<Rc<UserFn>>,
     fn_names: Vec<Rc<str>>,
     temp_seq: usize,
+    /// 顶层函数提升：(全局槽号, Value::Func 的常量下标)。见 Chunk.hoists。
+    hoists: Vec<(u16, u32)>,
+    /// 每个 MakeClosure 的 upvalue 来源描述
+    upval_sources: Vec<Vec<UpSrc>>,
+    /// 闭包分析结果，key = (行, 列, 函数名)
+    infos: HashMap<(u32, u32, Rc<str>), FnInfo>,
+    /// 与 scopes 平行的捕获信息：active[0] 是顶层（空），active[i] 对应 scopes[i]
+    active: Vec<FnInfo>,
+    /// 与 scopes 平行：当前函数哪些局部槽是 lazy 参数（读时要求值 thunk）
+    lazy_slots: Vec<HashSet<u16>>,
+    /// 具名函数的 lazy 参数位图
+    lazy_sigs: HashMap<Rc<str>, Vec<bool>>,
 }
 
 impl Compiler {
@@ -261,7 +556,33 @@ impl Compiler {
             funcs: Vec::new(),
             fn_names: Vec::new(),
             temp_seq: 0,
+            hoists: Vec::new(),
+            upval_sources: Vec::new(),
+            infos: HashMap::new(),
+            active: vec![FnInfo::default()],
+            lazy_slots: vec![HashSet::new()],
+            lazy_sigs: HashMap::new(),
         }
+    }
+
+    /// 当前函数是否把某个名字装箱了
+    fn is_celled(&self, name: &str) -> bool {
+        self.active
+            .last()
+            .map(|f| f.celled.iter().any(|n| &**n == name))
+            .unwrap_or(false)
+    }
+
+    /// 当前函数的某个局部槽是不是 lazy 参数
+    fn is_lazy_slot(&self, slot: u16) -> bool {
+        self.lazy_slots.last().map(|s| s.contains(&slot)).unwrap_or(false)
+    }
+
+    /// 当前函数的自由变量下标
+    fn upval_index(&self, name: &str) -> Option<u16> {
+        self.active.last().and_then(|f| {
+            f.free.iter().position(|n| &**n == name).map(|i| i as u16)
+        })
     }
 
     fn err(&mut self, msg: impl Into<String>, span: &Span) {
@@ -327,7 +648,14 @@ impl Compiler {
     fn lookup(&self, name: &str) -> Option<Slot> {
         if self.in_function() {
             if let Some(s) = self.scopes.last().and_then(|sc| sc.find(name)) {
-                return Some(Slot::Local(s));
+                if self.is_lazy_slot(s) {
+                    return Some(Slot::Lazy(s));
+                }
+                return Some(if self.is_celled(name) { Slot::Cell(s) } else { Slot::Local(s) });
+            }
+            // 自由变量优先于同名全局：分析器按词法链解析，这里必须同序
+            if let Some(i) = self.upval_index(name) {
+                return Some(Slot::Upval(i));
             }
             if let Some(s) = self.scopes[0].find(name) {
                 return Some(Slot::Global(s));
@@ -340,7 +668,13 @@ impl Compiler {
     fn resolve(&mut self, name: &Rc<str>) -> Slot {
         if self.in_function() {
             if let Some(s) = self.scopes.last().and_then(|s| s.find(name)) {
-                return Slot::Local(s);
+                if self.is_lazy_slot(s) {
+                    return Slot::Lazy(s);
+                }
+                return if self.is_celled(name) { Slot::Cell(s) } else { Slot::Local(s) };
+            }
+            if let Some(i) = self.upval_index(name) {
+                return Slot::Upval(i);
             }
             if let Some(s) = self.scopes[0].find(name) {
                 return Slot::Global(s);
@@ -416,6 +750,24 @@ impl Compiler {
         }
     }
 
+    /// 声明一个变量；被内层函数捕获的局部变量当场建 cell。
+    fn declare_var(&mut self, name: &Rc<str>) -> Slot {
+        let raw = self.declare_local(name);
+        let slot = match raw {
+            Slot::Local(i) => self.boxed_slot(name, i),
+            other => other,
+        };
+        if let Slot::Cell(i) = slot {
+            self.emit(Op::CellNew(i));
+        }
+        slot
+    }
+
+    /// declare_local 的结果按捕获信息升级成 Cell（不额外发指令，给参数入口用）
+    fn boxed_slot(&self, name: &Rc<str>, s: u16) -> Slot {
+        if self.is_celled(name) { Slot::Cell(s) } else { Slot::Local(s) }
+    }
+
     /// ans / __last_ans 这类运行时会写、脚本里直接读的"特殊变量"。
     /// 它们一定在全局作用域，函数里也能看到。
     fn store_special(&mut self, name: &str) {
@@ -431,6 +783,12 @@ impl Compiler {
     }
 
     pub fn compile_program(&mut self, prog: &Program) -> Chunk {
+        // 先跑一遍闭包分析：编译到局部变量时才知道它会不会被内层捕获
+        let mut analyzer = Analyzer::new();
+        analyzer.lazy_sigs = collect_lazy_sigs(prog);
+        analyzer.block(&prog.body);
+        self.lazy_sigs = analyzer.lazy_sigs.clone();
+        self.infos = analyzer.infos;
         for s in &prog.body {
             self.stmt(s);
         }
@@ -455,6 +813,8 @@ impl Compiler {
             files: vec![Rc::clone(&self.file)],
             line_file: Vec::new(),
             line_local: Vec::new(),
+            hoists: std::mem::take(&mut self.hoists),
+            upval_sources: std::mem::take(&mut self.upval_sources),
         }
     }
 
@@ -473,7 +833,7 @@ impl Compiler {
             StmtKind::Nop => {}
             StmtKind::Decl { name, ty, init } => {
                 self.check_decl_type(name, ty, init.as_ref(), &s.span);
-                let slot = self.declare_local(name);
+                let slot = self.declare_var(name);
                 if matches!(ty, TypeName::Int | TypeName::Float | TypeName::Str | TypeName::Bool | TypeName::List | TypeName::Dict) {
                     self.scopes.last_mut().unwrap().types.insert(Rc::clone(name), *ty);
                 }
@@ -510,19 +870,30 @@ impl Compiler {
                     // 省掉"读变量→算→写变量"三条指令来回倒栈
                     if let (Target::Var(name), Some(cbop)) = (target, compound_bop(op.to_op().unwrap())) {
                         let slot = self.resolve(name);
-                        let (is_global, dst) = slot_parts(slot);
+                        let (is_global, dst) = match slot_parts(slot) {
+                            Some(x) => x,
+                            None => {
+                                // 捕获变量没有融合指令：走下面的读-算-写通用路径
+                                self.load(slot);
+                                self.expr(value);
+                                self.emit(bop);
+                                self.store(slot);
+                                return;
+                            }
+                        };
                         let flags = is_global as u8;
 
                         if let ExprKind::Var(src_name) = &value.kind {
                             if let Some(sslot) = self.lookup(src_name) {
-                                let (sg, si) = slot_parts(sslot);
-                                self.emit(Op::CompoundVar {
-                                    bop: cbop,
-                                    dst,
-                                    src: si,
-                                    flags: flags | ((sg as u8) << 1),
-                                });
-                                return;
+                                if let Some((sg, si)) = slot_parts(sslot) {
+                                    self.emit(Op::CompoundVar {
+                                        bop: cbop,
+                                        dst,
+                                        src: si,
+                                        flags: flags | ((sg as u8) << 1),
+                                    });
+                                    return;
+                                }
                             }
                         }
                         if let Some(v) = literal_of(value) {
@@ -553,8 +924,18 @@ impl Compiler {
             StmtKind::IncDec { target, delta, .. } => {
                 if let Target::Var(name) = target {
                     let slot = self.resolve(name);
-                    let (is_global, idx) = slot_parts(slot);
-                    self.emit(Op::IncVar { slot: idx, flags: is_global as u8, delta: *delta as i8 });
+                    match slot_parts(slot) {
+                        Some((is_global, idx)) => {
+                            self.emit(Op::IncVar { slot: idx, flags: is_global as u8, delta: *delta as i8 });
+                        }
+                        None => {
+                            // 捕获变量：读 → ±1 → 写，没有融合指令
+                            self.load(slot);
+                            self.emit_const(Value::Int(1));
+                            self.emit(if *delta > 0 { Op::Add } else { Op::Sub });
+                            self.store(slot);
+                        }
+                    }
                 } else {
                     let bop = if *delta > 0 { Op::Add } else { Op::Sub };
                     let temp = self.new_temp();
@@ -722,8 +1103,15 @@ impl Compiler {
                 }
             }
             StmtKind::ForRange { var, from, to, step, inclusive, body } => {
-                let slot = self.declare_local(var);
-                let (is_global, var_idx) = slot_parts(slot);
+                let slot = self.declare_var(var);
+                // 捕获的循环变量：RangeInit/RangeNext 照旧写栈槽，
+                // 每圈开头再把它同步进 cell 让内层闭包看到最新值
+                let (is_global, var_idx, sync_cell) = match slot {
+                    Slot::Local(i) => (false, i, None),
+                    Slot::Cell(i) => (false, i, Some(i)),
+                    Slot::Global(i) => (true, i, None),
+                    Slot::Upval(_) | Slot::Lazy(_) => unreachable!(),
+                };
 
                 // 栈上依次压：起点、终点、步长，RangeInit 一次收走
                 match from {
@@ -745,6 +1133,10 @@ impl Compiler {
                 // 首圈也要过这道检查，所以 RangeInit 不直接跳进循环体。
                 let start = self.here();
                 let next = self.emit(Op::RangeNext { fail: 0 });
+                if let Some(i) = sync_cell {
+                    self.emit(Op::GetLocal(i));
+                    self.emit(Op::SetBox(i));
+                }
 
                 self.ranges += 1;
                 self.loops.push(LoopCtx {
@@ -775,8 +1167,8 @@ impl Compiler {
                 }
             }
             StmtKind::ForIn { var, value_name, iter, body } => {
-                let slot = self.declare_local(var);
-                let vslot = value_name.as_ref().map(|n| self.declare_local(n));
+                let slot = self.declare_var(var);
+                let vslot = value_name.as_ref().map(|n| self.declare_var(n));
                 // for k, v in dict 需要回头拿 v：先留一份原集合
                 let src = if vslot.is_some() { Some(self.new_temp()) } else { None };
                 self.expr(iter);
@@ -847,7 +1239,7 @@ impl Compiler {
                 if has_catch {
                     match catch_name {
                         Some(name) => {
-                            let slot = self.declare_local(name);
+                            let slot = self.declare_var(name);
                             self.store(slot);
                         }
                         None => {
@@ -938,9 +1330,10 @@ impl Compiler {
                 if let Some(e) = v {
                     if let ExprKind::Var(name) = &e.kind {
                         if let Some(slot) = self.lookup(name) {
-                            let (is_global, idx) = slot_parts(slot);
-                            self.emit(Op::ReturnLocal { slot: idx, flags: is_global as u8 });
-                            return;
+                            if let Some((is_global, idx)) = slot_parts(slot) {
+                                self.emit(Op::ReturnLocal { slot: idx, flags: is_global as u8 });
+                                return;
+                            }
                         }
                     }
                 }
@@ -961,7 +1354,7 @@ impl Compiler {
                 self.expr(value);
                 self.store(temp);
                 for (i, n) in names.iter().enumerate() {
-                    let slot = self.declare_local(n);
+                    let slot = self.declare_var(n);
                     self.load(temp);
                     self.emit_const(Value::Int(i as i64));
                     self.emit(Op::Index);
@@ -990,24 +1383,49 @@ impl Compiler {
         self.finallies = saved;
     }
 
-    fn func_def(&mut self, name: &Rc<str>, params: &[Param], body: &[Stmt], span: &Span) {
+    /// 编译一个函数体，产出 (函数原型, 常量下标, 捕获信息)。
+    /// func_def 和内联 lambda 共用；函数体代码落在当前 code 里，前面一条 Jump 跳过。
+    /// 调用方负责把函数值压栈（Const 或 MakeClosure）。
+    fn emit_fn(
+        &mut self,
+        name: &Rc<str>,
+        params: &[Param],
+        body: &[Stmt],
+        span: &Span,
+    ) -> (Rc<UserFn>, u32, FnInfo) {
+        let info = self
+            .infos
+            .get(&(span.line, span.col, Rc::clone(name)))
+            .cloned()
+            .unwrap_or_default();
+
         // 入口地址先占一个 Jump，跳过函数体
         let skip = self.emit(Op::Jump(0));
         let entry = self.here();
 
         self.scopes.push(Scope::new());
+        self.active.push(info.clone());
+        let mut lazy_set = HashSet::new();
         for p in params {
-            let _ = self.scopes.last_mut().unwrap().declare(&p.name);
+            let s = self.scopes.last_mut().unwrap().declare(&p.name);
+            if p.lazy {
+                lazy_set.insert(s);
+            }
+            // 逃逸参数入口装箱：默认值可能在它前面引用，所以必须在默认值之前
+            if info.celled.iter().any(|n| n.as_ref() == p.name.as_ref()) {
+                self.emit(Op::BoxParam(s));
+            }
         }
+        self.lazy_slots.push(lazy_set);
         // 默认值在**调用时**算，而不是编译期算常量：
         // 这样 `fn area(w, h = w)` 这种"默认值引用前面参数"才成立。
         for (k, p) in params.iter().enumerate() {
             if let Some(d) = &p.default {
                 let j = self.emit(Op::JumpIfArgc { n: (k + 1) as u8, target: 0 });
                 self.expr(d);
-                let slot = self.scopes.last().and_then(|sc| sc.find(&p.name));
-                if let Some(slot) = slot {
-                    self.emit(Op::SetLocal(slot));
+                if let Some(s) = self.scopes.last().and_then(|sc| sc.find(&p.name)) {
+                    let dst = self.boxed_slot(&p.name, s);
+                    self.store(dst);
                 }
                 self.patch(j);
             }
@@ -1017,10 +1435,18 @@ impl Compiler {
         }
         self.emit(Op::Nil);
         self.emit(Op::Return);
-        let nlocals = self.scopes.last().unwrap().next;
-        self.scopes.pop();
+        let scope = self.scopes.pop().unwrap();
+        self.active.pop();
+        self.lazy_slots.pop();
+        let nlocals = scope.next;
         self.patch(skip);
 
+        // 把"被捕获的局部变量名"换成它们的实际槽号
+        let celled = info
+            .celled
+            .iter()
+            .filter_map(|n| scope.vars.get(n).map(|s| (*s, Rc::clone(n))))
+            .collect();
         let id = self.fn_names.len() as u16;
         self.fn_names.push(Rc::clone(name));
         let f = Rc::new(UserFn {
@@ -1032,29 +1458,314 @@ impl Compiler {
             entry,
             nlocals: nlocals as usize,
             defaults: params.iter().map(|p| const_eval(p.default.as_ref())).collect(),
+            nupvals: info.free.len(),
+            celled,
         });
         self.funcs.push(Rc::clone(&f));
 
-        // 函数名作为常量存进去，赋值给同名变量
-        let slot = self.declare_local(name);
-        self.emit_const(Value::Func(f));
+        // 函数原型放常量表
+        let cidx = self.konst(Value::Func(f.clone()));
+        (f, cidx, info)
+    }
+
+    /// 在当前位置压入一个函数值：无上值直接压原型，有上值则造闭包。
+    fn emit_fn_value(&mut self, cidx: u32, info: &FnInfo, span: &Span) {
+        if info.free.is_empty() {
+            self.emit(Op::Const(cidx));
+        } else {
+            let mut srcs = Vec::with_capacity(info.free.len());
+            for n in &info.free {
+                let src = match self.lookup(n) {
+                    Some(Slot::Cell(i)) => UpSrc::Local(i),
+                    Some(Slot::Upval(i)) => UpSrc::Upval(i),
+                    // 分析器保证自由变量能在外层函数链上找到；到这里还没找到
+                    // 说明分析和代码生成不一致，退化成 null 格子，绝不崩 VM
+                    _ => {
+                        self.err(
+                            format!("闭包变量「{}」解析失败（编译内部错误）", n),
+                            span,
+                        );
+                        UpSrc::Local(0)
+                    }
+                };
+                srcs.push(src);
+            }
+            let sidx = self.upval_sources.len() as u32;
+            self.upval_sources.push(srcs);
+            self.emit(Op::MakeClosure { fidx: cidx, srcs: sidx });
+        }
+    }
+
+    /// 调一个函数值：栈上先压 callee，再依次压参数。
+    fn emit_call_slot(&mut self, fun: Slot, args: &[Slot]) {
+        self.load(fun);
+        for a in args {
+            self.load(*a);
+        }
+        self.emit(Op::Call(args.len() as u8));
+    }
+
+    /// 对 src 列表的每一项跑一次 body，body 拿到的是"当前项"的槽。
+    /// 纯字节码循环，不占编译器的 break/continue 栈（HOF 体内没有用户 break）。
+    fn emit_iter_body(&mut self, src: Slot, body: impl FnOnce(&mut Compiler, Slot)) {
+        self.load(src);
+        self.emit(Op::IterInit);
+        let start = self.here();
+        let next = self.emit(Op::IterNext(0));
+        let item = self.new_temp();
+        self.store(item);
+        body(self, item);
+        let back = self.emit(Op::Jump(0));
+        self.patch_to(back, start);
+        let end = self.here();
+        self.patch_to(next, end);
+        self.emit(Op::IterEnd);
+    }
+
+    /// 把 `data.map/filter/…` 展开成内联循环字节码。回调是普通函数值，走现成的 Call 指令。
+    /// 返回 false 表示参数个数不对，让调用方走普通路径报错。
+    fn emit_hof(&mut self, name: &str, args: &[Expr]) -> bool {
+        let arity = if name == "data.reduce" { 3 } else { 2 };
+        if args.len() != arity {
+            return false;
+        }
+        // 源列表 + 回调函数都先算一次，放进临时槽
+        let src = self.new_temp();
+        self.expr(&args[0]);
+        self.store(src);
+        let fun = self.new_temp();
+        self.expr(&args[1]);
+        self.store(fun);
+        let push_idx = self.intern(&Rc::from("push"));
+
+        match name {
+            "data.map" => {
+                let out = self.new_temp();
+                self.emit(Op::BuildList(0));
+                self.store(out);
+                self.emit_iter_body(src, |c, item| {
+                    c.emit_call_slot(fun, &[item]);
+                    let res = c.new_temp();
+                    c.store(res);
+                    c.load(out);
+                    c.load(res);
+                    c.emit(Op::CallMethod(push_idx, 1));
+                    c.emit(Op::Pop);
+                });
+                self.load(out);
+            }
+            "data.filter" => {
+                let out = self.new_temp();
+                self.emit(Op::BuildList(0));
+                self.store(out);
+                self.emit_iter_body(src, |c, item| {
+                    c.emit_call_slot(fun, &[item]);
+                    let jf = c.emit(Op::JumpIfFalse(0));
+                    c.load(out);
+                    c.load(item);
+                    c.emit(Op::CallMethod(push_idx, 1));
+                    c.emit(Op::Pop);
+                    c.patch(jf);
+                });
+                self.load(out);
+            }
+            "data.reduce" => {
+                let acc = self.new_temp();
+                self.expr(&args[2]);
+                self.store(acc);
+                self.emit_iter_body(src, |c, item| {
+                    c.emit_call_slot(fun, &[acc, item]);
+                    c.store(acc);
+                });
+                self.load(acc);
+            }
+            "data.any" | "data.all" => {
+                let want = name == "data.any";
+                let res = self.new_temp();
+                self.emit(if want { Op::False } else { Op::True });
+                self.store(res);
+                self.emit_iter_body(src, |c, item| {
+                    // 已经有结果就不再调回调（保留短路语义）
+                    c.load(res);
+                    let skip = c.emit(if want { Op::JumpIfTrueKeep(0) } else { Op::JumpIfFalseKeep(0) });
+                    c.emit(Op::Pop);
+                    c.emit_call_slot(fun, &[item]);
+                    c.store(res);
+                    c.patch(skip);
+                });
+                self.load(res);
+            }
+            "data.find" => {
+                let found = self.new_temp();
+                let res = self.new_temp();
+                self.emit(Op::False);
+                self.store(found);
+                self.emit(Op::Nil);
+                self.store(res);
+                self.emit_iter_body(src, |c, item| {
+                    // 找到了就跳过这一圈（注意 Keep 版本不弹栈，跳过去后要 Pop）
+                    c.load(found);
+                    let skip = c.emit(Op::JumpIfTrueKeep(0));
+                    c.emit(Op::Pop);
+                    c.emit_call_slot(fun, &[item]);
+                    let yes = c.emit(Op::JumpIfFalse(0));
+                    c.load(item);
+                    c.store(res);
+                    c.emit(Op::True);
+                    c.store(found);
+                    c.patch(yes);
+                    let end = c.emit(Op::Jump(0));
+                    c.patch_to(skip, c.here());
+                    c.emit(Op::Pop);
+                    c.patch(end);
+                });
+                self.load(res);
+            }
+            "data.find_index" => {
+                let idx = self.new_temp();
+                let found = self.new_temp();
+                self.emit_const(Value::Int(-1));
+                self.store(idx);
+                self.emit(Op::False);
+                self.store(found);
+                let counter = self.new_temp();
+                self.emit_const(Value::Int(0));
+                self.store(counter);
+                self.emit_iter_body(src, |c, item| {
+                    c.load(found);
+                    let skip = c.emit(Op::JumpIfTrueKeep(0));
+                    c.emit(Op::Pop);
+                    c.emit_call_slot(fun, &[item]);
+                    let yes = c.emit(Op::JumpIfFalse(0));
+                    c.load(counter);
+                    c.store(idx);
+                    c.emit(Op::True);
+                    c.store(found);
+                    c.patch(yes);
+                    // 每圈计数器 +1
+                    c.load(counter);
+                    c.emit_const(Value::Int(1));
+                    c.emit(Op::Add);
+                    c.store(counter);
+                    let end = c.emit(Op::Jump(0));
+                    c.patch_to(skip, c.here());
+                    c.emit(Op::Pop);
+                    c.patch(end);
+                });
+                self.load(idx);
+            }
+            "data.groupby" | "data.index_by" => {
+                let out = self.new_temp();
+                self.emit(Op::BuildDict(0));
+                self.store(out);
+                let by_group = name == "data.groupby";
+                self.emit_iter_body(src, |c, item| {
+                    c.emit_call_slot(fun, &[item]);
+                    let key = c.new_temp();
+                    c.store(key);
+                    if by_group {
+                        // 老 key 存在就往里 push，否则建一个新列表
+                        c.load(out);
+                        c.load(key);
+                        c.emit(Op::Index);
+                        let bucket = c.new_temp();
+                        c.store(bucket);
+                        c.load(bucket);
+                        let old = c.emit(Op::JumpIfFalse(0)); // null → 走新建分支
+                        // 已有桶：bucket.push(item)
+                        c.load(bucket);
+                        c.load(item);
+                        c.emit(Op::CallMethod(push_idx, 1));
+                        c.emit(Op::Pop);
+                        let done = c.emit(Op::Jump(0));
+                        c.patch(old);
+                        // 新桶：[item]，写回 out[key]
+                        c.load(item);
+                        c.emit(Op::BuildList(1));
+                        let nl = c.new_temp();
+                        c.store(nl);
+                        c.load(out);
+                        c.load(key);
+                        c.load(nl);
+                        c.emit(Op::IndexSet);
+                        c.patch(done);
+                    } else {
+                        c.load(out);
+                        c.load(key);
+                        c.load(item);
+                        c.emit(Op::IndexSet);
+                    }
+                });
+                self.load(out);
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// 编译实参列表。lazy 位置的实参包成零参 thunk（闭包），调用方立刻求值由被调函数决定。
+    fn emit_args(&mut self, args: &[Expr], callee: &Expr) {
+        let mask = match &callee.kind {
+            ExprKind::Var(n) => self.lazy_sigs.get(n.as_ref()).cloned(),
+            _ => None,
+        };
+        for (i, a) in args.iter().enumerate() {
+            if mask.as_ref().map(|m| m.get(i).copied().unwrap_or(false)).unwrap_or(false) {
+                let thunk_name: Rc<str> = Rc::from(format!("(thunk_{}_{})", a.span.line, i).as_str());
+                let ret = Stmt::new(StmtKind::Return(Some(a.clone())), a.span.clone());
+                let (_f, cidx, info) = self.emit_fn(&thunk_name, &[], &[ret], &a.span);
+                self.emit_fn_value(cidx, &info, &a.span);
+            } else {
+                self.expr(a);
+            }
+        }
+    }
+
+    fn func_def(&mut self, name: &Rc<str>, params: &[Param], body: &[Stmt], span: &Span) {
+        // 先在本层声明函数名：内层递归要能解析到它（分析器同序）
+        let slot = self.declare_var(name);
+        let (_f, cidx, info) = self.emit_fn(name, params, body, span);
+        self.emit_fn_value(cidx, &info, span);
         self.store(slot);
-        let _ = span;
+        // 顶层函数记入提升表：VM 启动时先放进全局槽，「先调用后定义」才不报错
+        // （注意存的是常量下标，不是指令下标）
+        if let Slot::Global(gs) = slot {
+            self.hoists.push((gs, cidx));
+        }
     }
 
     /* ───────────────────────── 变量读写 ───────────────────────── */
 
     fn store(&mut self, slot: Slot) {
+        if let Slot::Lazy(_) = slot {
+            // 赋值上来就报错；发一条 Pop 保持栈平衡
+            let msg = "lazy 参数不能赋值（它是按名求值的表达式，每次读取重新计算）";
+            self.err(msg, &Span::point(&self.file, self.line, 1));
+            self.emit(Op::Pop);
+            return;
+        }
         self.emit(match slot {
             Slot::Local(i) => Op::SetLocal(i),
+            Slot::Cell(i) => Op::SetBox(i),
             Slot::Global(i) => Op::SetGlobal(i),
+            Slot::Upval(i) => Op::SetUpval(i),
+            Slot::Lazy(_) => unreachable!(),
         });
     }
 
     fn load(&mut self, slot: Slot) {
+        if let Slot::Lazy(i) = slot {
+            // by-name：槽里是零参 thunk，读一次调一次
+            self.emit(Op::GetLocal(i));
+            self.emit(Op::Call(0));
+            return;
+        }
         self.emit(match slot {
             Slot::Local(i) => Op::GetLocal(i),
+            Slot::Cell(i) => Op::GetBox(i),
             Slot::Global(i) => Op::GetGlobal(i),
+            Slot::Upval(i) => Op::GetUpval(i),
+            Slot::Lazy(_) => unreachable!(),
         });
     }
 
@@ -1133,7 +1844,10 @@ impl Compiler {
             Some(s) => s,
             None => return false,
         };
-        let (ag, ai) = slot_parts(slot);
+        let (ag, ai) = match slot_parts(slot) {
+            Some(x) => x,
+            None => return false,
+        };
 
         // 变量 op 常量
         if let Some(kv) = literal_of(b) {
@@ -1144,7 +1858,10 @@ impl Compiler {
         // 变量 op 变量
         if let ExprKind::Var(bn) = &b.kind {
             if let Some(bs) = self.lookup(bn) {
-                let (bg, bi) = slot_parts(bs);
+                let (bg, bi) = match slot_parts(bs) {
+                    Some(x) => x,
+                    None => return false,
+                };
                 self.emit(Op::BinLocalLocal {
                     op: code,
                     a: ai,
@@ -1229,6 +1946,13 @@ impl Compiler {
                             Slot::Global(i) => {
                                 self.emit(Op::AddrGlobal(i));
                             }
+                            Slot::Cell(_) | Slot::Upval(_) | Slot::Lazy(_) => {
+                                self.err(
+                                    format!("变量「{}」被闭包捕获或是 lazy 参数，不能对它取地址", name),
+                                    &e.span,
+                                );
+                                self.emit(Op::Nil);
+                            }
                         },
                         ExprKind::Idx { obj, index } => {
                             self.expr(obj);
@@ -1265,6 +1989,13 @@ impl Compiler {
                 self.expr(b);
                 let end = self.here();
                 self.patch_to(jend, end);
+            }
+            // 内联函数 fn(x) return 表达式：编成一个匿名函数 + 闭包值
+            ExprKind::Lambda { params, body } => {
+                let lname: Rc<str> = Rc::from("(lambda)");
+                let ret = Stmt::new(StmtKind::Return(Some((**body).clone())), e.span.clone());
+                let (_f, cidx, info) = self.emit_fn(&lname, params, &[ret], &e.span);
+                self.emit_fn_value(cidx, &info, &e.span);
             }
             ExprKind::Bin { op, a, b } => {
                 match op {
@@ -1325,18 +2056,35 @@ impl Compiler {
                 self.expr(index);
                 self.emit(Op::Index);
             }
+            ExprKind::Slice { obj, from, to } => {
+                self.expr(obj);
+                match from {
+                    Some(f) => self.expr(f),
+                    None => { self.emit(Op::Nil); }
+                }
+                match to {
+                    Some(t) => self.expr(t),
+                    None => { self.emit(Op::Nil); }
+                }
+                self.emit(Op::Slice);
+            }
             ExprKind::Member { obj, name } => {
                 self.expr(obj);
                 let idx = self.intern(name);
                 self.emit(Op::Member(idx));
             }
             ExprKind::Call { callee, args } => {
+                // 带回调的 data.* 高阶函数：编成内联循环字节码，
+                // 回调就是普通函数值（lambda / fn 别名 / function 名），走现成的 Call 指令。
+                if let ExprKind::Var(name) = &callee.kind {
+                    if is_hof(name) && self.emit_hof(name, args) {
+                        return;
+                    }
+                }
                 // obj.method(args) 走 CallMethod，其余走 Call
                 if let ExprKind::Member { obj, name } = &callee.kind {
                     self.expr(obj);
-                    for a in args {
-                        self.expr(a);
-                    }
+                    self.emit_args(args, callee);
                     let idx = self.intern(name);
                     self.emit(Op::CallMethod(idx, args.len() as u8));
                 } else {
@@ -1358,9 +2106,7 @@ impl Compiler {
                     // f(args)：f 是全局变量时走 CallGlobal（省一条 GetGlobal，参数也不用挪位）
                     if let ExprKind::Var(name) = &callee.kind {
                         if let Some(Slot::Global(idx)) = self.lookup(name) {
-                            for a in args {
-                                self.expr(a);
-                            }
+                            self.emit_args(args, callee);
                             if args.len() <= 255 {
                                 self.emit(Op::CallGlobal { slot: idx, nargs: args.len() as u8 });
                                 return;
@@ -1368,9 +2114,7 @@ impl Compiler {
                         }
                     }
                     self.expr(callee);
-                    for a in args {
-                        self.expr(a);
-                    }
+                    self.emit_args(args, callee);
                     self.emit(Op::Call(args.len() as u8));
                 }
             }
@@ -1500,11 +2244,13 @@ fn binop_code(op: AOp) -> Option<u8> {
     })
 }
 
-/// 槽位 → (是不是全局, 槽号)，给融合指令编码用
-fn slot_parts(s: Slot) -> (bool, u16) {
+/// 槽位 → (是不是全局, 槽号)，给融合指令编码用。
+/// Cell / Upval 没有融合指令，返回 None 让调用方回落通用路径。
+fn slot_parts(s: Slot) -> Option<(bool, u16)> {
     match s {
-        Slot::Local(i) => (false, i),
-        Slot::Global(i) => (true, i),
+        Slot::Local(i) => Some((false, i)),
+        Slot::Global(i) => Some((true, i)),
+        _ => None,
     }
 }
 
@@ -1539,6 +2285,15 @@ fn literal_of(e: &Expr) -> Option<Value> {
         }),
         _ => None,
     }
+}
+
+/// 带回调、需要展开成内联循环的 data.* 高阶函数
+fn is_hof(n: &str) -> bool {
+    matches!(
+        n,
+        "data.map" | "data.filter" | "data.reduce" | "data.groupby" | "data.index_by"
+            | "data.any" | "data.all" | "data.find" | "data.find_index"
+    )
 }
 
 fn binop_to_op(op: AOp) -> Op {

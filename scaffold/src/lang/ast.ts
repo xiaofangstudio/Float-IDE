@@ -34,7 +34,11 @@ export type Expr =
   | ({ k: 'idx'; obj: Expr; index: Expr } & Span)
   | ({ k: 'member'; obj: Expr; name: string } & Span)
   | ({ k: 'call'; callee: Expr; args: Expr[] } & Span)
-  | ({ k: 'new'; cls: string; args: Expr[] } & Span);
+  | ({ k: 'new'; cls: string; args: Expr[] } & Span)
+  /** 内联函数：fn(x) return 表达式 —— 函数当值用，能捕获定义处的变量（闭包） */
+  | ({ k: 'lambda'; params: Param[]; body: Expr } & Span)
+  /** 切片：xs[1:3] / s[:2] / xs[2:]，含头不含尾；负数从末尾数 */
+  | ({ k: 'slice'; obj: Expr; from: Expr | null; to: Expr | null } & Span);
 
 /* ───────────────────────────── 语句 ───────────────────────────── */
 

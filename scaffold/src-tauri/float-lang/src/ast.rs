@@ -36,7 +36,12 @@ pub enum ExprKind {
     Bin { op: Op, a: Box<Expr>, b: Box<Expr> },
     /// 三元：`条件 ? 这个 : 那个`（只有被选中的那一支会求值）
     Ternary { cond: Box<Expr>, a: Box<Expr>, b: Box<Expr> },
+    /// 内联函数：`fn(x) return 表达式` / `lambda(x) return 表达式`。
+    /// 捕获定义处的局部变量（闭包），函数值用——能当参数传给高阶函数。
+    Lambda { params: Vec<Param>, body: Box<Expr> },
     Idx { obj: Box<Expr>, index: Box<Expr> },
+    /// 切片：xs[1:3] / s[:2] / xs[2:]——含头不含尾，负数从末尾数，越界截断
+    Slice { obj: Box<Expr>, from: Option<Box<Expr>>, to: Option<Box<Expr>> },
     Member { obj: Box<Expr>, name: Rc<str> },
     Call { callee: Box<Expr>, args: Vec<Expr> },
     New { class: Rc<str>, args: Vec<Expr> },
@@ -168,6 +173,9 @@ pub struct Param {
     pub name: Rc<str>,
     pub ty: Option<TypeName>,
     pub default: Option<Expr>,
+    /// 延迟参数（by-name）：调用时实参编译成零参闭包，函数体每次读它都重新求值。
+    /// 用来写 AND2/OR2 这类需要短路的辅助函数。
+    pub lazy: bool,
     pub line: u32,
     pub col: u32,
 }

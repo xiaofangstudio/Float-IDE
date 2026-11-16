@@ -19,6 +19,10 @@ use std::rc::Rc;
 
 pub type ListRef = Rc<RefCell<Vec<Value>>>;
 
+/// 上值格子（cell）：闭包捕获的局部变量。Rc<RefCell> 让内外层共享同一个变量，
+/// 内层改了外层能看到、外层函数返回后格子仍活着——这是真闭包的引用语义核心。
+pub type Cell = Rc<RefCell<Value>>;
+
 /// 手动分配的内存块。
 ///
 /// 外面套 Rc 是故意的：忘了 `free` 也不会漏——没人引用时自动回收；
@@ -83,6 +87,29 @@ pub struct UserFn {
     pub nlocals: usize,
     /// 参数的默认值（没有默认值就是 Null）
     pub defaults: Vec<Value>,
+    /// 这个函数引用了几个外层局部变量（上值）。0 = 普通函数走栈槽，不分配上值区。
+    pub nupvals: usize,
+    /// 本函数的局部变量里，哪几个槽要"装箱"成 cell 供内层闭包捕获。
+    /// 键 = 局部槽号，值 = 该变量的名字（报错/调试用）。空 = 没有变量逃逸。
+    pub celled: Vec<(u16, Rc<str>)>,
+}
+
+impl UserFn {
+    /// 老构造入口（没有捕获信息）：测试 / AOT 里手工造函数用。
+    pub fn plain(
+        name: Rc<str>, id: u16, params: Vec<Param>, body: Rc<Vec<Stmt>>,
+        file: Rc<str>, entry: usize, nlocals: usize, defaults: Vec<Value>,
+    ) -> UserFn {
+        UserFn { name, id, params, body, file, entry, nlocals, defaults, nupvals: 0, celled: Vec::new() }
+    }
+}
+
+/// 闭包 = 函数原型 + 捕获到的上值格子。和普通函数一样能调用、传递、打印。
+#[derive(Debug)]
+pub struct Closure {
+    pub func: Rc<UserFn>,
+    /// 捕获的外层变量格子，顺序与 UserFn 的 upval 引用表一致
+    pub upvals: Vec<Cell>,
 }
 
 /// 有序字典：HashMap 负责查，Vec 负责保序。
@@ -153,6 +180,8 @@ pub enum Value {
     /// 指针（手动分配的格子）
     Ptr(PtrRef),
     Func(Rc<UserFn>),
+    /// 闭包：函数 + 捕获的上值
+    Closure(Rc<Closure>),
     /// 内建函数，直接用名字索引
     Native(&'static str),
 }
@@ -229,7 +258,7 @@ impl Value {
             // 带 __cls 的字典就是类的实例（class 降级方案的约定）
             Value::Dict(d) => if d.borrow().get("__cls").is_some() { "class" } else { "dict" },
             Value::Ptr(_) => "ptr",
-            Value::Func(_) | Value::Native(_) => "function",
+            Value::Func(_) | Value::Closure(_) | Value::Native(_) => "function",
         }
     }
 
@@ -243,7 +272,7 @@ impl Value {
             Value::List(l) => !l.borrow().is_empty(),
             Value::Dict(d) => !d.borrow().is_empty(),
             Value::Ptr(p) => !p.borrow().freed,
-            Value::Func(_) | Value::Native(_) => true,
+            Value::Func(_) | Value::Closure(_) | Value::Native(_) => true,
         }
     }
 
@@ -289,7 +318,8 @@ impl Value {
             Value::Int(i) => i.to_string(),
             Value::Float(f) => fmt_float(*f),
             Value::Str(s) => s.to_string(),
-            Value::Func(f) => format!("<function {}>", f.name),
+            Value::Func(f) => format!("<函数 {}>", f.name),
+            Value::Closure(c) => format!("<函数 {}>", c.func.name),
             Value::Native(n) => format!("<native {}>", n),
             Value::List(l) => {
                 let id = Rc::as_ptr(l) as *const u8 as usize;
@@ -383,6 +413,7 @@ impl Value {
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::Func(a), Value::Func(b)) => Rc::ptr_eq(a, b),
+            (Value::Closure(a), Value::Closure(b)) => Rc::ptr_eq(a, b),
             (Value::Native(a), Value::Native(b)) => a == b,
             // 指针按"是不是同一块"比，不看内容
             (Value::Ptr(a), Value::Ptr(b)) => {

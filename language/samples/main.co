@@ -883,14 +883,15 @@ fn describe(bool full)
             wnames = wnames + wi + "  "
         say("🐈 附近有野猫：" + wnames + "（输 野猫 靠近）")
 
-/* 布尔辅助：CW 的 and/or 只取左值，用函数实现正确语义
-fn bool AND2(bool x, bool y)
+/* 布尔辅助：lazy 参数让第二个参数用到时才求值，实现真短路
+/* 字典缺键现在返回 null，短路主要是为了避免多余副作用 / 越界访问
+fn bool AND2(bool x, lazy bool y)
     if x
         if y
             return true
     return false
 
-fn bool OR2(bool x, bool y)
+fn bool OR2(bool x, lazy bool y)
     if x
         return true
     if y

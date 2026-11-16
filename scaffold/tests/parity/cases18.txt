@@ -1,0 +1,26 @@
+### 内联 lambda 基本用法
+fn f = fn(x) return x * 2
+print(f(5))
+
+### lambda 捕获外层变量
+int base = 10
+fn add = fn(x) return x + base
+print(add(3))
+
+### lambda 当参数传递
+function apply(g, v)
+    return g(v)
+print(apply(fn(s) return s + 1, 41))
+
+### lambda 带默认值
+fn g = fn(x, y = 3) return x + y
+print(g(2))
+print(g(2, 10))
+
+### lambda 捕获可变量
+function mk()
+    int n = 0
+    return fn() return (n += 1)
+fn c = mk()
+print(c())
+print(c())

@@ -1,0 +1,46 @@
+### 字典缺键：d["zzz"] 给 null，不崩
+dict d = {"a": 1}
+print(d["zzz"])
+print(d["zzz"] == null)
+
+### 字典缺键：成员写法也给 null
+dict d = {"a": 1}
+print(d.zzz)
+print(d.zzz == null)
+
+### 字典缺键：键在但值是 null，结果一样是 null（不误判）
+dict d = {"a": null}
+print(d["a"] == null)
+
+### 字典缺键：dict d read 键 也给 null
+dict d = {"a": 1}
+dict d read "zzz"
+print(__last_read == null)
+
+### 字典有键：照常取值
+dict d = {"a": 1, "b": "二"}
+print(d["a"], d.b, d["b"])
+
+### data.get：缺键给默认值，不给就是 null
+import data
+dict d = {"a": 1}
+print(data.get(d, "zzz", "默认"))
+print(data.get(d, "zzz"))
+
+### data.require：有键就正常返回
+import data
+dict d = {"a": 1}
+print(data.require(d, "a"))
+
+### data.require：缺键当场报错
+import data
+dict d = {"a": 1}
+print(data.require(d, "zzz"))
+
+### 列表越界仍然报错（不跟着字典放宽）
+list xs = [1, 2]
+print(xs[9])
+
+### 链式：中间取到 null 再取值要报错，不能静默
+dict d = {"a": null}
+print(d["a"]["b"])

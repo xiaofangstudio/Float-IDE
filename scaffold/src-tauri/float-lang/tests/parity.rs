@@ -281,12 +281,8 @@ fn 两个减号不影响自减() {
     assert_eq!(out("int i = 3\ni--\nprint(i)"), "2\n");
     assert_eq!(out("int i = 0\ni--\nprint(i)"), "-1\n");
     assert_eq!(out("int i = 3\ni -= 1\nprint(i)"), "2\n");
-    // 行首写 `--i`（不是合法语法）：必须明确报错，不能被当成注释静默跳过
-    let e = match run_text("int i = 3\n--i\nprint(i)") {
-        Err(e) => e.message,
-        Ok(_) => panic!("--i 不合法，应该报错而不是当注释"),
-    };
-    assert!(e.contains("--"), "{}", e);
+    // 前缀自减是合法语法（与 TS 引擎一致），-- 是运算符不是注释
+    assert_eq!(out("int i = 3\n--i\nprint(i)"), "2\n");
 }
 
 #[test]

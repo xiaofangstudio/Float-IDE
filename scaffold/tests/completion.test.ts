@@ -230,6 +230,40 @@ function labels(list: Completion[]): string[] {
   ok('模型吃到语料', model.trainedLines > 0);
   const ranked = smartRank(model, items, lineBefore, scopeVars, 's');
   eq('模型重排后循环变量仍是第一', ranked[0]?.label, 's');
+
+  /* 新语法已喂给小模型：空工程（不传任何源码）也能从 SEED 学到这些搭配 */
+  const seed = trainModel([]);
+  ok('SEED 教了 f{} 拼接', (seed.next.get('\u001ff')?.get('{') ?? 0) > 0);
+  ok('SEED 教了 for 双变量', (seed.next.get('for\u001fi')?.get(',') ?? 0) > 0);
+  ok('SEED 教了 data.require', (seed.next.get('data\u001f.')?.get('require') ?? 0) > 0);
+  ok('SEED 教了函数当值', (seed.next.get('\u001ffn')?.get('g') ?? 0) > 0);
+  /* 闭包 / lambda / lazy / HOF 已落地，一并喂给模型 */
+  ok('SEED 教了 lambda', (seed.next.get('\u001ffn')?.get('(') ?? 0) > 0);
+  ok('SEED 教了 lazy 参数', (seed.next.get('\u001flazy')?.get('bool') ?? 0) > 0);
+  ok('SEED 教了 AND2', (seed.next.get('bool\u001fAND2')?.get('(') ?? 0) > 0);
+  const dataDot = seed.next.get('data\u001f.');
+  ok('SEED 教了 data.map/filter', (dataDot?.get('map') ?? 0) > 0 && (dataDot?.get('filter') ?? 0) > 0);
+
+  /* 方岛物语烘焙表：空工程也学到真实游戏代码的搭配 */
+  ok('烘焙表让 for 大概率跟 i', (seed.next.get('\u001ffor')?.get('i') ?? 0) > 0);
+  ok('烘焙表教了 for i in range', (seed.next.get('i\u001fin')?.get('range') ?? 0) > 0);
+  ok('烘焙表教了 print 后跟括号', (seed.next.get('\u001fprint')?.get('(') ?? 0) > 0);
+  ok('SEED 教了默认函数 sqrt/str/len 搭配',
+    (seed.next.get('\u001fsqrt')?.get('(') ?? 0) > 0
+    && (seed.next.get('\u001fstr')?.get('(') ?? 0) > 0
+    && (seed.next.get('\u001flen')?.get('(') ?? 0) > 0);
+
+  /* 类型感知：模型分得清变量和列表 */
+  const typed = trainModel(['list 背包 = [1, 2]\ndict 存档 = {}\nint 血量 = 100\n']);
+  eq('list 变量记为 list 类型', typed.varTypes.get('背包'), 'list');
+  eq('dict 变量记为 dict 类型', typed.varTypes.get('存档'), 'dict');
+  eq('int 变量记为 int 类型', typed.varTypes.get('血量'), 'int');
+  /* 列表上下文里，模型应把变量名归一成 <list> 再查表（列表后常见 . / [） */
+  ok('类型视角查到 <list> 后跟点或下标',
+    (typed.next.get('<list>\u001f.')?.size ?? 0) > 0 || (typed.next.get('\u001f<list>')?.get('.') ?? 0) > 0);
+  /* 排序不越档：类型加权后局部变量仍压在最前 */
+  const typedRanked = smartRank(typed, items, 'print(背包)', [], '');
+  ok('类型加权不改档位铁律', typedRanked.every((c, i) => i === 0 || Number(c.sortText[0]) >= Number(typedRanked[0].sortText[0])));
 }
 
 console.log(`\n通过 ${pass} 项，失败 ${fail} 项`);

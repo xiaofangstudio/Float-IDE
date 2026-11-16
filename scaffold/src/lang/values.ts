@@ -21,6 +21,21 @@ export type ClassDef = {
 
 export type DictVal = { kind: 'dict'; map: Map<string, Val> };
 
+/** 函数值：函数是一等公民，可以赋值给变量、当参数传、存进列表。
+ *  fn 是定义（命名函数或内联 lambda），env 是定义时的环境（闭包捕获用，顶层函数为 null）。 */
+export type FnVal = {
+  kind: 'fnval';
+  name: string;
+  /** 定义体。编译通道里顶层函数是占位值（fn: null），只用于传参/打印；
+   *  真要调用时由 callFnVal 拦截，解释器通道里总是有定义。 */
+  fn: FuncDef | null;
+  env: unknown;
+  self: Instance | null;
+};
+
+export const isFn = (v: Val): v is FnVal =>
+  typeof v === 'object' && v !== null && (v as FnVal).kind === 'fnval';
+
 /** 指针：指向一段可以按格子寻址的内存。
  *
  *  - `alloc(n)`：buf 是自己的一块（owner=true），要手动 free
@@ -61,7 +76,7 @@ export type Instance = {
   fields: Map<string, Val>;
 };
 
-export type Val = number | string | boolean | null | Val[] | DictVal | Instance | CInstLike | PtrVal;
+export type Val = number | string | boolean | null | Val[] | DictVal | Instance | CInstLike | PtrVal | FnVal;
 
 /** 编译通道的实例（结构判定，避免与 codegen.ts 循环依赖） */
 export type CInstLike = {
@@ -141,6 +156,7 @@ export function fmtVal(v: Val, seen: Set<object> = new Set(), depth = 0): string
     const addr = `0x${(v.base + v.idx * 8).toString(16).toUpperCase().padStart(12, '0')}`;
     return v.freed ? `${addr}（已释放）` : addr;
   }
+  if (isFn(v)) return `<函数 ${v.name}>`;
   const isBox = Array.isArray(v) || isDict(v) || isInstance(v) || isCInstLike(v);
   if (isBox) {
     const boxed = v as unknown as object;
@@ -182,6 +198,7 @@ export function truthy(v: Val): boolean {
   if (typeof v === 'string') return v !== '';
   if (Array.isArray(v)) return v.length > 0;
   if (isDict(v)) return v.map.size > 0;
+  if (isFn(v)) return true;
   if (isPtr(v)) return !v.freed;
   return true;
 }

@@ -202,6 +202,23 @@ impl<'a> ExprParser<'a> {
         self.cur().map(|t| t.text == text).unwrap_or(false)
     }
 
+    /// 当前 token 是裸标识符（含关键字形的 Ident）时给出它的文本。
+    /// 数字、字符串、标点都不算。
+    fn cur_ident(&self) -> Option<String> {
+        match self.cur() {
+            Some(t) if matches!(t.kind, TokKind::Ident | TokKind::Kw) => Some(t.text.to_string()),
+            _ => None,
+        }
+    }
+
+    /// 下一个 token 是不是给定文本（不消费）。
+    fn peek_is(&self, text: &str) -> bool {
+        self.toks
+            .get(self.pos + 1)
+            .map(|t| t.text == text)
+            .unwrap_or(false)
+    }
+
     fn bump(&mut self) -> Option<&'a Token> {
         let t = self.toks.get(self.pos);
         if t.is_some() {
@@ -492,11 +509,30 @@ impl<'a> ExprParser<'a> {
             }
             if t.is_punc("[") {
                 self.pos += 1;
-                let index = self.parse_expr(0)?;
+                // 切片：xs[1:3] / s[:2] / xs[2:]——含头不含尾，负数从末尾数
+                let mut from: Option<Box<Expr>> = None;
+                let mut to: Option<Box<Expr>> = None;
+                let mut is_slice = false;
+                if !self.at(":") && !self.at("]") {
+                    from = Some(Box::new(self.parse_expr(0)?));
+                }
+                if self.at(":") {
+                    is_slice = true;
+                    self.pos += 1;
+                    if !self.at("]") {
+                        to = Some(Box::new(self.parse_expr(0)?));
+                    }
+                } else if from.is_none() {
+                    return Err(FloatError::new("下标里要有一个值", e.span.clone()));
+                }
                 let end = self.cur().map(|x| x.end_col).unwrap_or(t.end_col);
                 self.expect("]", "下标要闭合")?;
                 let span = Span::new(self.file, e.span.line, e.span.col, end);
-                e = Expr::new(ExprKind::Idx { obj: Box::new(e), index: Box::new(index) }, span);
+                e = if is_slice {
+                    Expr::new(ExprKind::Slice { obj: Box::new(e), from, to }, span)
+                } else {
+                    Expr::new(ExprKind::Idx { obj: Box::new(e), index: from.unwrap() }, span)
+                };
                 continue;
             }
             if t.is_punc(".") {
@@ -801,6 +837,9 @@ impl<'a> ExprParser<'a> {
                     ));
                 }
                 match t.text.as_str() {
+                    // 内联函数：fn(x) return 表达式。必须是 fn( 紧连着，
+                    // 否则 `fn g = double` 这种函数别名由语句层处理，别在这抢。
+                    "fn" | "lambda" if self.at("(") => self.parse_lambda(span),
                     "true" => Ok(Expr::new(ExprKind::Bool(true), span)),
                     "false" => Ok(Expr::new(ExprKind::Bool(false), span)),
                     "null" => Ok(Expr::new(ExprKind::Null, span)),
@@ -846,8 +885,15 @@ impl<'a> ExprParser<'a> {
                         return Ok(Expr::new(ExprKind::Dict(entries), span));
                     }
                     loop {
-                        let k = self.parse_expr(0)?;
-                        self.expect(":", "字面量字典要写成 {\"键\": 值}")?;
+                        // 裸标识符键 = 字符串键（跟 d.k 成员访问、TS 引擎同一套语义）。
+                        // 要表达式键就加括号：{(k): 1}，或者先建好再用 d[k] = …
+                        let k = match (self.cur_ident(), self.peek_is(":")) {
+                            (Some(name), true) => {
+                                self.pos += 1;
+                                Expr::new(ExprKind::Str(Rc::from(name.as_str())), span.clone())
+                            }
+                            _ => self.parse_expr(0)?,
+                        };                        self.expect(":", "字面量字典要写成 {\"键\": 值}")?;
                         let v = self.parse_expr(0)?;
                         entries.push((k, v));
                         if self.at(",") {
@@ -874,6 +920,55 @@ impl<'a> ExprParser<'a> {
                 span,
             )),
         }
+    }
+
+    /// 内联函数：fn(参数, …) return 表达式。
+    /// 调用时 `fn` / `lambda` 已经被 parse_primary 吃掉，当前停在 `(`.
+    fn parse_lambda(&mut self, span: Span) -> EResult<Expr> {
+        self.expect("(", "内联函数要写成 fn(参数) return 表达式")?;
+        let mut params: Vec<Param> = Vec::new();
+        if !self.at(")") {
+            loop {
+                // lazy 参数：调用处不立即求值，函数体每次读取时重新算（by-name）
+                let mut pt_lazy = false;
+                if self.at("lazy") {
+                    self.pos += 1;
+                    pt_lazy = true;
+                }
+                let pt = self.bump().cloned().ok_or_else(|| self.err("内联函数的参数要是名字"))?;
+                if !pt.is_ident() {
+                    return Err(FloatError::new("内联函数的参数要是名字", self.span_of(&pt)));
+                }
+                let mut default = None;
+                if self.at("=") {
+                    self.pos += 1;
+                    default = Some(self.parse_expr(0)?);
+                }
+                params.push(Param {
+                    name: Rc::from(pt.text.as_str()),
+                    ty: None,
+                    default,
+                    lazy: pt_lazy,
+                    line: pt.line,
+                    col: pt.col,
+                });
+                if self.at(",") {
+                    self.pos += 1;
+                    if self.at(")") { break; }
+                    continue;
+                }
+                break;
+            }
+        }
+        self.expect(")", "内联函数参数列表要闭合")?;
+        if !self.at("return") {
+            return Err(self.err("内联函数要写成 fn(参数) return 表达式——比如 fn(s) return s > 2"));
+        }
+        self.pos += 1; // return
+        let body = self.parse_expr(0)?;
+        let end = body.span.clone();
+        let full = Span::new(self.file, span.line, span.col, end.end_col);
+        Ok(Expr::new(ExprKind::Lambda { params, body: Box::new(body) }, full))
     }
 }
 
@@ -1019,7 +1114,7 @@ impl Parser {
                                 k += 1;
                             }
                         }
-                        params.push(Param { name: pname, ty: None, default, line: bl.no as u32, col: 1 });
+                        params.push(Param { name: pname, ty: None, default, lazy: false, line: bl.no as u32, col: 1 });
                     }
                 }
                 // 方法体
@@ -1100,7 +1195,7 @@ impl Parser {
             }
         }
         let mut out: Vec<Stmt> = Vec::new();
-        let mk_param = |n: Rc<str>| Param { name: n, ty: None, default: None, line: span.line as u32, col: 1 };
+        let mk_param = |n: Rc<str>| Param { name: n, ty: None, default: None, lazy: false, line: span.line as u32, col: 1 };
 
         for (mname, params, body) in &methods {
             let mut ps: Vec<Param> = vec![mk_param(Rc::from("self"))];
@@ -1929,6 +2024,27 @@ impl Parser {
             }
 
             if FUNC_WORDS.contains(&word) && (word != "f" || toks.get(1).map(|t| t.is_ident()).unwrap_or(false)) {
+                // fn 别名：fn g = double → g = double（函数当值）
+                if toks.get(1).map(|t| t.is_ident()).unwrap_or(false)
+                    && toks.get(2).map(|t| t.text.as_str()) == Some("=")
+                {
+                    let mut vp = ExprParser::new(&toks[2..], &self.file);
+                    vp.pos += 1; // 跳过 =
+                    let value = vp.parse_expr(0)?;
+                    if !vp.at_end() {
+                        return Err(FloatError::new("赋值号右边多了内容", self.line_span(ln)));
+                    }
+                    self.pos += 1;
+                    let name = Rc::from(toks[1].text.as_str());
+                    return Ok(Some(Stmt::new(
+                        StmtKind::Assign {
+                            target: Target::Var(name),
+                            op: AssignOp::Set,
+                            value,
+                        },
+                        self.line_span(ln),
+                    )));
+                }
                 return Ok(Some(self.parse_func_def(ln, &toks)?));
             }
         }
@@ -2015,6 +2131,26 @@ impl Parser {
             self.pos += 1;
             return Ok(Some(Stmt::new(
                 StmtKind::Decl { ty: TypeName::Var, name: Rc::from(toks[1].text.as_str()), init: Some(init) },
+                self.line_span(ln),
+            )));
+        }
+
+        // 前缀自增自减：++i / --i（后缀 i++ 在下面表达式语句里处理）
+        if toks.len() >= 2
+            && toks[0].kind == TokKind::Op
+            && (toks[0].text == "++" || toks[0].text == "--")
+            && (toks[1].is_ident() || toks[1].kind == TokKind::Kw)
+        {
+            let delta = if toks[0].text == "++" { 1 } else { -1 };
+            let mut tp = ExprParser::new(&toks[1..], &self.file);
+            let target_e = tp.parse_expr(0)?;
+            if !tp.at_end() {
+                return Err(FloatError::new("自增自减后面不能再有内容", self.line_span(ln)));
+            }
+            self.pos += 1;
+            let target = self.to_target(target_e)?;
+            return Ok(Some(Stmt::new(
+                StmtKind::IncDec { target, delta, prefix: true },
                 self.line_span(ln),
             )));
         }
@@ -2378,6 +2514,12 @@ impl Parser {
             ep.pos += 1;
             if !ep.at(")") {
                 loop {
+                    // lazy 参数：`function f(x, lazy y)` —— y 在函数体里读一次算一次
+                    let mut lazy = false;
+                    if ep.at("lazy") {
+                        ep.pos += 1;
+                        lazy = true;
+                    }
                     // 参数可带类型：function f(int a, str b = "x")
                     let mut ty: Option<TypeName> = None;
                     if let Some(t) = ep.cur() {
@@ -2399,6 +2541,7 @@ impl Parser {
                         name: Rc::from(nt.text.as_str()),
                         ty,
                         default,
+                        lazy,
                         line: nt.line,
                         col: nt.col,
                     });

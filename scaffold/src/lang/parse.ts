@@ -279,6 +279,10 @@ class ExprParser {
       this.eat();
       return { k: 'var', name: 'super', ...this.span(t) };
     }
+    // 内联函数：fn(参数) return 表达式 —— 函数当值用，捕获定义处的变量
+    if ((t.k === 'kw' && t.v === 'fn') || (t.k === 'ident' && t.v === 'lambda')) {
+      if (this.peek(1).v === '(') return this.parseLambda();
+    }
     if (t.k === 'ident') {
       this.eat();
       // f{项, 项, …}：逗号拼接字面量。不带引号的项当表达式，每项自动转显示文本，
@@ -426,6 +430,38 @@ class ExprParser {
     return args;
   }
 
+  /** 内联函数：fn(参数, …) return 表达式。
+   *  函数当值用：能赋给变量、当参数传给 data.filter 这类高阶函数，
+   *  捕获定义处的变量（闭包）。表达式形式只有一个 return，要复杂逻辑就写 function。 */
+  parseLambda(): Expr {
+    const start = this.cur;
+    this.eat(); // fn / lambda
+    this.expect('(', '内联函数要写成 fn(参数) return 表达式');
+    const params: Param[] = [];
+    if (!this.at(')')) {
+      for (;;) {
+        const pt = this.cur;
+        if (pt.k !== 'ident' && !(pt.k === 'kw' && FUNC_WORDS.has(pt.v))) {
+          throw new ParseError('内联函数的参数要是名字', pt, 'lambda');
+        }
+        this.eat();
+        let def: Expr | null = null;
+        if (this.at('=')) { this.eat(); def = this.parseExpr(0); }
+        params.push({ name: pt.v, type: null, def, line: pt.line, col: pt.col });
+        if (this.at(',')) { this.eat(); if (this.at(')')) break; continue; }
+        break;
+      }
+    }
+    this.expect(')', '内联函数参数列表要闭合');
+    if (!this.at('return')) {
+      throw new ParseError('内联函数要写成 fn(参数) return 表达式——比如 fn(s) return s["分"] >= 80', this.cur, 'lambda');
+    }
+    this.eat();
+    const body = this.parseExpr(0);
+    const end = endOf(body);
+    return { k: 'lambda', params, body, ...this.span(start, end) };
+  }
+
   parsePostfix(base: Expr): Expr {
     let e = base;
     for (;;) {
@@ -450,9 +486,22 @@ class ExprParser {
       }
       if (this.at('[')) {
         this.eat();
-        const index = this.parseExpr(0);
+        // 切片：xs[1:3] / s[:2] / xs[2:]——含头不含尾，负数从末尾数
+        let from: Expr | null = null;
+        let to: Expr | null = null;
+        let isSlice = false;
+        if (!this.at(':') && !this.at(']')) from = this.parseExpr(0);
+        if (this.at(':')) {
+          isSlice = true;
+          this.eat();
+          if (!this.at(']')) to = this.parseExpr(0);
+        } else if (!from) {
+          throw new ParseError('下标里要有一个值', this.cur, 'idx');
+        }
         const close = this.expect(']', '下标结束 ]');
-        e = { k: 'idx', obj: e, index, ...this.span(startOf(e), close) };
+        e = isSlice
+          ? { k: 'slice', obj: e, from, to, ...this.span(startOf(e), close) }
+          : { k: 'idx', obj: e, index: from as Expr, ...this.span(startOf(e), close) };
         continue;
       }
       if (this.at('(')) {
@@ -787,11 +836,12 @@ export function parseProgram(file: string, src: string): Program {
     }
   };
 
-  const parseBodyOf = (indent: number): Stmt[] => {
+  const parseBodyOf = (indent: number, allowEmpty = false): Stmt[] => {
     const body = parseBlock(indent + 1);
-    if (body.length === 0) {
+    if (body.length === 0 && !allowEmpty) {
       /* 块是空的：最可能是缩进没跟上。这里直接指出"哪一行少缩进了、差几个空格"，
-       * 而不是让它掉到外层、过几行再冒出个"这条语句看不懂"。 */
+       * 而不是让它掉到外层、过几行再冒出个"这条语句看不懂"。
+       * 函数体允许为空（什么都不做 = 返回 null），allowEmpty=true 时不报。 */
       const nxt = lines[i];
       if (nxt && nxt.indent <= indent && nxt.code) {
         diag(
@@ -1031,6 +1081,20 @@ export function parseProgram(file: string, src: string): Program {
           break;
       }
 
+      // fn 别名：fn g = double → g = double（函数当值，跟普通赋值同一条路）
+      if (FUNC_WORDS.has(word) && toks[1]?.k === 'ident' && toks[2]?.v === '=') {
+        const p = parserFor(toks.slice(3)); // 跳过 fn 名字 =，从右值开始
+        const value = p.parseExpr(0);
+        if (!p.atEnd()) throw new ParseError('赋值号右边多了内容', p.cur, 'assign');
+        i++;
+        return {
+          k: 'assign',
+          target: { k: 'var', name: toks[1].v, file, line: toks[1].line, col: toks[1].col, endLine: toks[1].line, endCol: toks[1].endCol },
+          op: '=',
+          value,
+          ...stmtSpan(ln)
+        };
+      }
       if (FUNC_WORDS.has(word) && (word !== 'f' || toks[1]?.k === 'ident')) return parseFuncDef(ln, toks);
     }
 
@@ -1083,6 +1147,16 @@ export function parseProgram(file: string, src: string): Program {
       if (!p.atEnd()) throw new ParseError('声明语句右边多了内容', p.cur, 'decl');
       i++;
       return { k: 'decl', type: 'var', name: toks[1].v, nameCol: toks[1].col, init, ...stmtSpan(ln) };
+    }
+
+    /* 前缀自增自减：++i / --i（后缀 i++ 在下面表达式语句里处理） */
+    if (first.k === 'op' && (first.v === '++' || first.v === '--') && toks.length >= 2 && (toks[1].k === 'ident' || toks[1].k === 'kw')) {
+      const delta = (first.v === '++' ? 1 : -1) as 1 | -1;
+      const p = parserFor(toks.slice(1));
+      const target = p.parseExpr(0);
+      if (!p.atEnd()) throw new ParseError('自增自减后面不能再有内容', p.cur, 'incdec');
+      i++;
+      return { k: 'incdec', target: toTarget(target), delta, prefix: true, ...stmtSpan(ln) };
     }
 
     /* 赋值 / 自增自减 / 表达式语句 */
@@ -1456,7 +1530,7 @@ export function parseProgram(file: string, src: string): Program {
       params = parseParams(toks.slice(cursor + 1, close));
     }
 
-    return { k: 'funcDef', name: nameTok.v, nameCol: nameTok.col, params, retType, body: parseBodyOf(ln.indent), ...stmtSpan(ln) };
+    return { k: 'funcDef', name: nameTok.v, nameCol: nameTok.col, params, retType, body: parseBodyOf(ln.indent, true), ...stmtSpan(ln) };
   };
 
   const findClose = (toks: Token[], openIdx: number): number => {

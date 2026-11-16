@@ -1,0 +1,61 @@
+### 真实闭包：内层捕获外层局部变量
+function make()
+    int base = 100
+    function addb(x)
+        return x + base
+    return addb(5)
+print(make())
+
+### 闭包变量共享：计数器
+function counter()
+    int n = 0
+    function inc()
+        n += 1
+        return n
+    return inc
+fn c = counter()
+print(c())
+print(c())
+print(c())
+
+### 跨两层捕获
+function outer()
+    int x = 10
+    function mid()
+        function inner()
+            return x + 1
+        return inner()
+    return mid()
+print(outer())
+
+### 改外层变量后内层看到新值
+function f()
+    int v = 1
+    function get()
+        return v
+    v = 42
+    return get()
+print(f())
+
+### 闭包当参数传递
+function apply(fn)
+    return fn(3)
+function maker()
+    int k = 7
+    function add(x)
+        return x + k
+    return add
+print(apply(maker()))
+
+### 两个闭包各自独立状态
+function mk()
+    int i = 0
+    function nxt()
+        i += 1
+        return i
+    return nxt
+fn a = mk()
+fn b = mk()
+print(a())
+print(a())
+print(b())

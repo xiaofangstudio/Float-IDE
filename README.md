@@ -51,7 +51,9 @@ print(json.pretty(数据))
 旧名字（`readfile` / `now` / `fetch` / `sorted` …）全部保留，和 `os.readfile` 这类新名字是同一份实现。
 文件与网络要桌面版（F5/F6 都行），浏览器预览里会明确说"桌面版功能"。
 
-注意：[标准库文档](docs/标准库规划.md) 同时也是设计稿，其中 `data.map` / `filter` / `reduce` / `groupby` / `index_by` / `any` / `all` / `find` / `find_index` 这 9 个带回调的函数标着【规划】，**当前没有实现**（连同内联 `fn(s) return …` 语法），照抄会报「没有这个函数」。
+九个回调式高阶函数已全部落地：`data.map` / `filter` / `reduce` / `groupby` / `index_by` / `any` / `all` / `find` / `find_index`，配套的内联函数 `fn(x) return …` 与闭包也能用。`any` / `all` 短路，回调可以传内联函数，也可以传已定义的函数名。
+
+字典取值默认宽松：`scores["没这个人"]` 和 `scores.没这个人` 都给 `null`，不会崩；要强制存在用 `data.require`，要默认值用 `data.get`。
 
 ---
 
@@ -565,6 +567,10 @@ int low, int high = minmax([])
 | 循环 | `for i in range(n)`（n 可为表达式）、`range(a,b,step)`、`for x in 列表/字符串/字典`、`for k, v in 字典`、`for i = 1 to 10 step 2`、`while`、`repeat`、`forever` |
 | 跳转 | `break` / `out`、`balo` / `continue`、`if out(条件)`、`stop` |
 | 函数 | 多参数、默认值（可引用前面的参数）、`return`、递归、先用后定义；函数内局部变量不污染全局 |
+| 内联与闭包 | `fn(x) return x + base` 匿名函数；内层函数记住创建时的环境，多个闭包各自独立；支持多行内联体 |
+| 惰性参数 | `lazy bool y`：按需求值、未用到就不算，`AND2` / `OR2` 靠它实现真正短路 |
+| 高阶函数 | `data.map` / `filter` / `reduce` / `groupby` / `index_by` / `any` / `all` / `find` / `find_index`，回调可传 `fn(…)` 或函数名 |
+| 字典宽松取值 | 缺键取下标或成员都给 `null`；`data.require` 强制存在、`data.get` 带默认值 |
 | 类 | 字段默认值、`init` 构造、方法互调、`self`、继承与 `super(…)`、对象进列表后逐项调方法 |
 | 内建函数 | 数学 / 比较 / 逻辑 / 字符串 / 集合 / 类型转换 / 文件共 100 余个，可在任意表达式里调用 |
 | CW 兼容 | 独立成行的 `add(a, b)` 之类仍写 `__last_calc`；`__last_*`、`ans`、`ask`、`import` 行为不变 |
@@ -581,6 +587,7 @@ int low, int high = minmax([])
 | 实时诊断 | 输入即解析，语法错误立刻打红波浪线，悬停看原因 |
 | 悬停文档 | 指令 / 内建函数 / 关键字 / 函数 / 类 / 字段 / 特殊变量，悬停即出说明 |
 | 多标签页 | 未保存打点，Ctrl+S 保存全部 |
+| 补全键盘 | `↑` / `↓` 逐项、`PageUp` / `PageDown` 整页、`Enter` 选中（仅在补全列表打开时） |
 | 大纲面板 | AST 驱动：组标记、类、字段、方法、函数、顶层变量，按层级缩进，点击跳行 |
 | diff 视图 | Git 面板点文件即看左右分屏差异 |
 
@@ -733,6 +740,17 @@ F5 交给 Rust 内核跑字节码 VM（快），F6 用内置解释器逐行跑�
 ---
 
 ## 近期更新
+
+### 未发布（2026-11-16）
+
+- **内联函数与闭包**：`fn(x) return x + base` 匿名函数、多行内联体、闭包各自持有独立环境。
+- **`lazy` 惰性参数**：按需求值，`AND2` / `OR2` 由此实现真短路（第二个参数不满足前置条件就不求值）。
+- **九个回调式高阶函数全部实现**：`data.map` / `filter` / `reduce` / `groupby` / `index_by` / `any` / `all` / `find` / `find_index`；`any` / `all` 短路。
+- **字典宽松取值**：缺键取下标 / 成员统一给 `null`，不再崩；新增 `data.require`（缺键报错）与 `data.get`（带默认值）。
+- **`ask` 真正阻塞**：Rust 内核新增 `lang_input` 通道，等待输入时不再空转，答案精确送回对应那次运行。
+- **补全列表键盘操作**：`↑` / `↓` 逐项、`PageUp` / `PageDown` 整页、`Enter` 选中，快捷键说明同步。
+- **移除旧网页版入口**：删掉 `web.tsx` / `web.html` 及 web 适配层，浏览器侧只保留开发用的 `/demo.html` 预览床。
+- **测试扩充**：新增 `hof` / `lazy` / `blocking_input` 三组 Rust 用例，对拍用例补到 cases18；前端 8 组共 729 项断言全过。
 
 ### 未发布（2026-11-15）
 

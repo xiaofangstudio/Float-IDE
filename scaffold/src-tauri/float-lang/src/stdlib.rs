@@ -76,7 +76,8 @@ pub const NAMESPACES: &[(&str, &[&str])] = &[
         &[
             "sort", "sort_by", "max", "min", "sum", "avg", "median", "stdev", "count", "freq",
             "unique", "flatten", "chunk", "zip", "enumerate", "reverse", "slice", "is_empty",
-            "keys", "values", "entries", "merge", "pick", "omit", "get", "tally",
+            "keys", "values", "entries", "merge", "pick", "omit", "get", "require", "tally",
+            "map", "filter", "reduce", "groupby", "index_by", "any", "all", "find", "find_index",
         ],
     ),
     ("json", &["parse", "stringify", "pretty", "valid", "try_parse"]),
@@ -613,6 +614,14 @@ fn data(f: &str, args: &[Value]) -> R<Value> {
             let d = dict_of(&args[0], "data.get")?;
             let k = s_of(&args[1]);
             Ok(d.get(&k).unwrap_or_else(|| args.get(2).cloned().unwrap_or(Value::Null)))
+        }
+        // 严格版：缺键当场报错，不返回 null。处理外部数据拿不准字段在不在时用这个。
+        "require" => {
+            need(args, 2, "data.require")?;
+            let d = dict_of(&args[0], "data.require")?;
+            let k = s_of(&args[1]);
+            d.get(&k).ok_or_else(|| format!(
+                "字典里没有键「{}」── 不确定它在不在就用 data.get(d, 键, 默认值)", k))
         }
         other => Err(format!("data 里没有这个函数：data.{}", other)),
     }

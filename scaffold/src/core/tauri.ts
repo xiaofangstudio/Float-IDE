@@ -75,6 +75,9 @@ export const api = {
       /** 有值 = 脚本停在某个 ask 上等人回答 */
       needInput: string | null;
     }>('lang_run', { file, source, inputs, extra }),
+  /** 把 ask 的答案送回正在阻塞等待的那次运行 */
+  langInput: (runId: string, answer: string) =>
+    invoke<boolean>('lang_input', { runId, answer }),
   /** 当前进程占用内存（字节）：状态栏右下角那个"多少 MB" */
   sysinfoMem: () => invoke<number>('sysinfo_mem'),
   langCheck: (file: string, source: string) =>

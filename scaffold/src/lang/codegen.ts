@@ -98,6 +98,14 @@ export class CompiledRuntime {
     return this.v[name];
   }
 
+  /** 读一个可能是函数的名字：没被同名变量盖住时，给函数值（函数当值用） */
+  gfval(name: string): Val {
+    const v = this.v[name];
+    if (v !== undefined) return v;
+    if (this.f[name]) return { kind: 'fnval', name, fn: null, env: null, self: null };
+    throw new RuntimeError(`变量「${name}」没有定义（先声明或赋值）`, this.ln);
+  }
+
   tick(): void {
     if (++this.steps > 20_000_000) {
       throw new RuntimeError('执行步数超过 2000 万，脚本可能陷入死循环（用 out / break / stop 结束）', this.ln);
@@ -139,9 +147,17 @@ export class CompiledRuntime {
   stop(): never { throw new StopSignal(); }
 
   callFn(name: string, args: Val[]): Val {
-    const fn = this.f[name];
-    if (!fn) throw new RuntimeError(`函数「${name}」没有定义`, this.ln);
-    return fn(this, null, ...args);
+    // 变量里存着函数值（g = double 之后再调 g(…)）：先解出真正要调的顶层函数
+    const fv = this.v[name];
+    const targetName = (fv && typeof fv === 'object' && (fv as { kind?: string }).kind === 'fnval')
+      ? (fv as { name: string }).name
+      : name;
+    const fn = this.f[targetName];
+    if (!fn) throw new RuntimeError(`函数「${targetName}」没有定义`, this.ln);
+    // 编译出来的顶层函数签名是 function($, 参数...)，没有 self 位（方法才有），
+    // 这里不能再塞 null，否则第一个参数会被 null 顶掉。
+    // CompiledFn 的类型里带了 self 位（方法用），顶层函数运行时没有，故此处按真实签名收窄。
+    return (fn as unknown as (rt: CompiledRuntime, ...a: Val[]) => Val)(this, ...args);
   }
 
   /** catch 拿到的值：throw 抛什么就是什么；运行时错误给一张中英双键的字典 */
@@ -401,15 +417,16 @@ export const O = {
       return obj[real];
     }
     if (isDict(obj)) {
+      /* 缺键给 null，和 Rust VM 一致；要严格就用 data.require */
       const k = toStr(idx);
-      if (!obj.map.has(k)) throw new RuntimeError(`字典里没有键「${k}」`, 0);
-      return obj.map.get(k) as Val;
+      return obj.map.has(k) ? (obj.map.get(k) as Val) : null;
     }
     if (isCInst(obj)) {
       const k = toStr(idx);
       if (k in obj.f) return obj.f[k];
       throw new RuntimeError(`${obj.cls.name} 没有字段「${k}」`, 0);
     }
+    if (obj === null) throw new RuntimeError('上一级取到 null（可能是键不存在），先确认字段在不在；要严格就用 data.require(d, 键)', 0);
     throw new RuntimeError(`这个值不能用下标访问：${fmtVal(obj)}`, 0);
   },
 
@@ -419,14 +436,15 @@ export const O = {
       throw new RuntimeError(`${obj.cls.name} 没有字段「${name}」`, 0);
     }
     if (isDict(obj)) {
-      if (!obj.map.has(name)) throw new RuntimeError(`字典里没有键「${name}」`, 0);
-      return obj.map.get(name) as Val;
+      /* 和 d["键"] 一致：缺键给 null；要严格就用 data.require */
+      return obj.map.has(name) ? (obj.map.get(name) as Val) : null;
     }
     if (name === 'length' && (isList(obj) || typeof obj === 'string')) return obj.length;
     if (isInstance(obj)) {
       if (obj.fields.has(name)) return obj.fields.get(name) as Val;
       throw new RuntimeError(`${obj.cls.name} 没有字段「${name}」`, 0);
     }
+    if (obj === null) throw new RuntimeError('上一级取到 null（可能是键不存在），先确认字段在不在；要严格就用 data.require(d, 键)', 0);
     throw new RuntimeError(`这个值没有成员「${name}」：${fmtVal(obj)}`, 0);
   },
 
@@ -539,8 +557,7 @@ export const O = {
   dictRead(target: Val, key: Val): Val {
     if (!isDict(target)) throw new RuntimeError(`「${fmtVal(target)}」不是字典`, 0);
     const k = toStr(key);
-    if (!target.map.has(k)) throw new RuntimeError(`字典里没有键「${k}」`, 0);
-    return target.map.get(k) as Val;
+    return target.map.has(k) ? (target.map.get(k) as Val) : null;
   },
 
   dictDelete(target: Val, key: Val): void {
@@ -617,11 +634,13 @@ export function compileProgram(program: Program): CompiledUnit | null {
   const classInfo = new Map<string, { fields: Set<string>; methods: Map<string, { params: Param[]; body: Stmt[] }>; base: string | null }>();
 
   /* 预扫描：函数名、类结构（供先用后定义与裸字段访问） */
-  const scan = (body: Stmt[], inClass = false): void => {
+  const scan = (body: Stmt[], inClass = false, inFunc = false): void => {
     for (const s of body) {
       if (s.k === 'funcDef') {
+        // 嵌套函数要闭包捕获，编译通道是平的函数表，交回解释器
+        if (inFunc) throw new CompileError('有嵌套函数，交回解释模式');
         if (!inClass) fnNames.add(s.name);
-        scan(s.body, inClass);
+        scan(s.body, inClass, true);
       } else if (s.k === 'classDef') {
         const fields = new Set<string>();
         for (const f of s.fields) fields.add(f.name);
@@ -630,7 +649,7 @@ export function compileProgram(program: Program): CompiledUnit | null {
           if (m.k === 'funcDef') methods.set(m.name, { params: m.params, body: m.body });
         }
         classInfo.set(s.name, { fields, methods, base: s.base });
-        scan(s.methods, true);
+        scan(s.methods, true, true);
       } else if (s.k === 'import') {
         throw new CompileError('有 import，交回解释模式');
       } else if (s.k === 'unknown') {
@@ -1018,6 +1037,10 @@ ${genBlock(s.body, c2)}  }
   function readVar(name: string, ctx: Ctx): string {
     if (ctx.locals.has(name)) return name;
     if (ctx.fields.has(name)) return `O.mem($.self, ${JSON.stringify(name)})`;
+    // 函数名当值读（g = double、print(f)）：编译期已知是顶层函数就走 fnval
+    if (fnNames.has(name) && !getBuiltin(name) && !classInfo.has(name)) {
+      return `$.gfval(${JSON.stringify(name)})`;
+    }
     return `$.g(${JSON.stringify(name)})`;
   }
 
@@ -1092,6 +1115,8 @@ ${genBlock(s.body, c2)}  }
         }
       }
       case 'idx': return `O.get(${genExpr(e.obj, ctx)}, ${genExpr(e.index, ctx)})`;
+      case 'slice': throw new CompileError('有切片，交回解释模式');
+      case 'lambda': throw new CompileError('有内联函数，交回解释模式');
       case 'member': return `O.mem(${genExpr(e.obj, ctx)}, ${JSON.stringify(e.name)})`;
       case 'call': return genCall(e, ctx);
       case 'new': {

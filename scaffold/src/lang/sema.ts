@@ -32,6 +32,12 @@ function collect(body: Stmt[]): { declared: Set<string>; refs: Ref[]; hasImport:
         for (const a of e.args) exprRefs(a);
         break;
       case 'new': for (const a of e.args) exprRefs(a); break;
+      case 'lambda':
+        // lambda 的参数在函数体里就是名字，先当声明过（和 funcDef 同一策略）
+        for (const p of e.params) declared.add(p.name);
+        exprRefs(e.body);
+        break;
+      case 'slice': exprRefs(e.obj); exprRefs(e.from); exprRefs(e.to); break;
       default: break;
     }
   };

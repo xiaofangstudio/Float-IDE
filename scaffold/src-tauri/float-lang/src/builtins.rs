@@ -245,7 +245,7 @@ pub fn call_builtin(name: &str, args: &[Value]) -> R<Value> {
             need(args, 2, "mod")?;
             let y = num(&args[1], "mod")?;
             if y == 0.0 {
-                return Err("取余的除数为 0".into());
+                return Err("取模的除数不能为 0".into());
             }
             Ok(Value::Float(num(&args[0], "mod")? % y))
         }

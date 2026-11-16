@@ -19,10 +19,10 @@ import { callBuiltinMethod, MethodError } from './methods';
 /** import 最大嵌套层数（和 Rust 内核一致：超过就报错，不让递归吃栈） */
 const MAX_IMPORT_DEPTH = LIMITS.importDepth;
 import {
-  cloneVal, collectFields, deepEq, dict, findMethod, fmtVal, instance, isDict, isInstance,
+  cloneVal, collectFields, deepEq, dict, findMethod, fmtVal, instance, isDict, isFn, isInstance,
   isList, toNum, toStr, truthy, typeName, ThrownValue,
   aliasPtr, cellPtr, shiftPtr,
-  type ClassDef, type FuncDef, type Instance, type PtrVal, type Val, isPtr } from './values';
+  type ClassDef, type FnVal, type FuncDef, type Instance, type PtrVal, type Val, isPtr } from './values';
 
 /* 语言核心不该绑死 DOM：浏览器里是 window，Node（测试 / 以后可能的 CLI）里退到 globalThis。
  * 这样同一份运行时在任何宿主都能跑，不需要在测试里硬塞 window 桩。 */
@@ -613,7 +613,13 @@ export class Runner {
       }
 
       case 'funcDef':
-        this.funcs.set(s.name, s);
+        // 函数体内的嵌套函数：注册成局部函数值（闭包捕获当前环境），
+        // 不进全局 funcs 表——不然两个外层调用的捕获会互相污染。
+        if (this.env !== this.globals) {
+          env.define(s.name, this.fnVal(s, env, null));
+        } else {
+          this.funcs.set(s.name, s);
+        }
         return 'normal';
 
       case 'classDef':
@@ -824,14 +830,12 @@ export class Runner {
         yield { kind: 'stmt', node: s, depth };
         const iter = yield* this.evalExpr(s.iter, env);
         const pairs: [Val, Val][] = [];
+        // 列表 / 字符串 / 指针的双变量迭代：i = 下标，v = 值（字典是 键, 值）
         if (isList(iter)) {
-          if (s.valueName) throw new FloatError('for a, b in … 只能用在字典上', s);
           for (let k = 0; k < iter.length; k++) pairs.push([k, iter[k]]);
         } else if (typeof iter === 'string') {
-          if (s.valueName) throw new FloatError('for a, b in … 只能用在字典上', s);
           for (let k = 0; k < iter.length; k++) pairs.push([k, iter[k]]);
         } else if (isPtr(iter)) {
-          if (s.valueName) throw new FloatError('for a, b in … 只能用在字典上', s);
           for (let k = Math.max(0, iter.idx); k < iter.buf.length; k++) pairs.push([k, iter.buf[k]]);
         } else if (isDict(iter)) {
           for (const [k, v] of iter.map) pairs.push([k, v]);
@@ -1007,8 +1011,8 @@ export class Runner {
         const target = yield* this.evalExpr(targetExpr(s.target), env);
         if (!isDict(target)) throw new FloatError(`「${this.targetName(s.target)}」不是字典`, s);
         const key = toStr(yield* this.evalExpr(s.key, env));
-        if (!target.map.has(key)) throw new FloatError(`字典「${this.targetName(s.target)}」里没有键「${key}」`, s);
-        this.globals.assign('__last_read', target.map.get(key) as Val);
+        /* 缺键把 null 记进 __last_read，和 d["键"] 保持一致；要严格就用 data.require */
+        this.globals.assign('__last_read', target.map.has(key) ? (target.map.get(key) as Val) : null);
         return 'normal';
       }
 
@@ -1125,7 +1129,8 @@ export class Runner {
         const v = env.lookup(e.name);
         if (v !== undefined) return v;
         if (this.classes.has(e.name)) throw new FloatError(`「${e.name}」是类名，要创建实例请写 new ${e.name}(…)`, e);
-        if (this.funcs.has(e.name)) throw new FloatError(`「${e.name}」是函数，调用要写 ${e.name}(…)`, e);
+        // 函数当值：顶层函数名直接读出来（可赋值、可传参、可存列表）
+        if (this.funcs.has(e.name)) return this.fnVal(this.funcs.get(e.name) as FuncDef, null, null);
         if (env.selfObj && env.selfObj.fields.has(e.name)) return env.selfObj.fields.get(e.name) as Val;
         // 标准库命名空间不是变量：多半是函数名打错了
         if (isNamespace(e.name)) {
@@ -1181,6 +1186,11 @@ export class Runner {
             if (!init) throw new FloatError(`父类 ${owner.base.name} 没有 init，无需 super(…)`, e);
             return yield* this.callUser(init.fn, args, self, e, init.owner);
           }
+          // 变量里存着函数值（g = double 之后再调 g(…)）：最优先
+          const fv = env.lookup(name);
+          if (fv !== undefined && isFn(fv)) {
+            return yield* this.callFnVal(fv, args, e);
+          }
           const b = getBuiltin(name);
           if (b) return await this.callBuiltin(name, args, e);
           // 方法内裸名调用本类方法
@@ -1223,11 +1233,31 @@ export class Runner {
           if (isDict(obj)) {
             const v = obj.map.get(e.callee.name);
             if (v === undefined) throw new FloatError(`字典里没有键「${e.callee.name}」，它也不是可调用的方法`, e);
+            if (isFn(v)) return yield* this.callFnVal(v, args, e);
             throw new FloatError(`字典的键「${e.callee.name}」不是函数，不能调用`, e);
+          }
+          if (isFn(obj)) {
+            // 函数值被 .成员 调：没有这回事，但报错要说得准
+            throw new FloatError(`函数 ${obj.name} 没有方法「${e.callee.name}」`, e);
           }
           throw new FloatError(`这个值没有方法「${e.callee.name}」：${fmtVal(obj)}`, e);
         }
-        throw new FloatError('这个表达式不能被调用', e);
+        // 下标/别的表达式求出来的函数值：xs[0](…)、f()(…)
+        const callee = yield* this.evalExpr(e.callee, env);
+        if (isFn(callee)) {
+          return yield* this.callFnVal(callee, args, e);
+        }
+        throw new FloatError(`这个值不是函数，不能调用：${fmtVal(callee)}`, e);
+      }
+      case 'lambda': {
+        // fn(x) return 表达式：求值成函数值，捕获当前环境
+        return this.fnVal(this.lambdaFn(e), env, env.selfObj);
+      }
+      case 'slice': {
+        const obj = yield* this.evalExpr(e.obj, env);
+        const from = e.from ? yield* this.evalExpr(e.from, env) : null;
+        const to = e.to ? yield* this.evalExpr(e.to, env) : null;
+        return sliceVal(obj, from, to, e);
       }
       case 'new': {
         const cls = this.classes.get(e.cls);
@@ -1469,10 +1499,12 @@ export class Runner {
       return obj[real];
     }
     if (isDict(obj)) {
+      /* 缺键给 null：Copper 拿来处理脏 JSON，可选字段缺失不该让整段脚本崩。
+         要严格就用 data.require(d, 键)，它缺键会报「字典里没有键」。 */
       const key = toStr(idx);
-      if (!obj.map.has(key)) throw new FloatError(`字典里没有键「${key}」`, spanOf(e));
-      return obj.map.get(key) as Val;
+      return obj.map.has(key) ? (obj.map.get(key) as Val) : null;
     }
+    if (obj === null) throw new FloatError('上一级取到 null（可能是键不存在），先确认字段在不在；要严格就用 data.require(d, 键)', spanOf(e));
     throw new FloatError(`这个值不能用下标访问：${fmtVal(obj)}`, spanOf(e));
   }
 
@@ -1485,12 +1517,13 @@ export class Runner {
       throw new FloatError(`${obj.cls.name} 没有字段「${name}」`, spanOf(e));
     }
     if (isDict(obj)) {
-      if (!obj.map.has(name)) throw new FloatError(`字典里没有键「${name}」`, spanOf(e));
-      return obj.map.get(name) as Val;
+      /* 和 d["键"] 一致：缺键给 null；要严格就用 data.require */
+      return obj.map.has(name) ? (obj.map.get(name) as Val) : null;
     }
     if (name === 'length' && (isList(obj) || typeof obj === 'string')) {
       return obj.length;
     }
+    if (obj === null) throw new FloatError('上一级取到 null（可能是键不存在），先确认字段在不在；要严格就用 data.require(d, 键)', spanOf(e));
     throw new FloatError(`这个值没有成员「${name}」：${fmtVal(obj)}`, spanOf(e));
   }
 
@@ -1612,7 +1645,36 @@ export class Runner {
 
   /* ── 函数与类调用 ── */
 
-  private async *callUser(fn: FuncDef, args: Val[], self: Instance | null, e: Span | Expr, owner: ClassDef | null = null): ValGen {
+  /** 打包函数值：嵌套函数 / lambda 捕获定义时的环境 */
+  private fnVal(fn: FuncDef, env: Env | null, self: Instance | null): FnVal {
+    return { kind: 'fnval', name: fn.name, fn, env, self };
+  }
+
+  /** 调用一个函数值。编译通道里顶层函数是占位值（fn: null），
+   *  只用于传参/打印，真要调用时拦下来给明确报错，而不是崩在 undefined 上。 */
+  private callFnVal(fv: FnVal, args: Val[], e: Span | Expr): ValGen {
+    if (!fv.fn) throw new FloatError(`函数「${fv.name}」不能在这里调用（编译通道占位值）`, e);
+    return this.callUser(fv.fn, args, fv.self, e, null, fv.env as Env | null);
+  }
+
+  /** fn(x) return 表达式 → 一个单语句函数定义（调用时求值 body） */
+  private lambdaFn(e: Extract<Expr, { k: 'lambda' }>): FuncDef {
+    return {
+      ...e,
+      k: 'funcDef',
+      name: '(lambda)',
+      nameCol: e.col,
+      params: e.params,
+      retType: null,
+      body: [{
+        k: 'return', value: e.body,
+        file: e.file, line: e.line, col: e.col, endLine: e.endLine, endCol: e.endCol
+      }]
+    };
+  }
+
+
+  private async *callUser(fn: FuncDef, args: Val[], self: Instance | null, e: Span | Expr, owner: ClassDef | null = null, parent: Env | null = null): ValGen {
     if (args.length > fn.params.length) {
       throw new FloatError(`${fn.name} 只接受 ${fn.params.length} 个参数，实际给了 ${args.length} 个`, spanOf(e));
     }
@@ -1623,8 +1685,9 @@ export class Runner {
         `递归太深了（当前 ${this.callDepth} 层，上限 ${LIMITS.callDepth} 层）停了下来。多半是 ${fn.name} 的结束条件没写对，检查一下它是不是会不断调用自己。`,
         spanOf(e));
     }
-    const env = new Env(this.globals, fn.name);
-    env.selfObj = self;
+    // 闭包：嵌套函数 / lambda 的 parent 是定义时的环境，变量沿父链捕获
+    const env = new Env(parent ?? this.globals, fn.name);
+    if (self) env.selfObj = self;
     for (let k = 0; k < fn.params.length; k++) {
       const p = fn.params[k];
       if (k < args.length) {
@@ -1749,6 +1812,28 @@ export class Runner {
 }
 
 /* ───────────────────────────── 小工具 ───────────────────────────── */
+
+/** 切片：xs[1:3] / s[:2] / xs[2:]，含头不含尾；负数从末尾数，越界截断不报错 */
+function sliceVal(obj: Val, from: Val | null, to: Val | null, e: Expr): Val {
+  const edge = (v: Val | null, def: number, len: number): number => {
+    if (v === null) return def;
+    const n = toNum(v);
+    let i = n === null || Number.isNaN(n) ? 0 : Math.trunc(n);
+    if (i < 0) i += len;
+    return Math.max(0, Math.min(len, i));
+  };
+  if (isList(obj)) {
+    const a = edge(from, 0, obj.length);
+    const b = edge(to, obj.length, obj.length);
+    return a <= b ? obj.slice(a, b) : [];
+  }
+  if (typeof obj === 'string') {
+    const a = edge(from, 0, obj.length);
+    const b = edge(to, obj.length, obj.length);
+    return a <= b ? obj.slice(a, b) : '';
+  }
+  throw new FloatError(`这个类型不支持切片（只有列表和字符串能切）：${fmtVal(obj)}`, e);
+}
 
 function spanOf(e: Span | Expr): Span {
   if ('k' in e) return { file: e.file, line: e.line, col: e.col, endLine: e.endLine, endCol: e.endCol };

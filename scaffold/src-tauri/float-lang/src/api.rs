@@ -137,6 +137,25 @@ pub fn run_from_with_input(
     vm.run()
 }
 
+/// 阻塞交互式运行：给 VM 装一个输入回调，ask 缺答案时同步等它返回。
+/// 和 run_interactive 的「重跑式」不同，整段脚本只跑一次——写文件 / random / 时间
+/// 这些副作用不会因为多问一次就重复发生。
+pub fn run_blocking(
+    file: &str,
+    src: &str,
+    base: Option<&Path>,
+    inputs: Vec<String>,
+    overlay: std::collections::HashMap<String, String>,
+    input_cb: Box<dyn FnMut(&str) -> String>,
+) -> FResult<RunOutcome> {
+    crate::host::set_base(base);
+    let chunk = compile_source_with(file, src, base, overlay)?;
+    let mut vm = Vm::new(chunk);
+    vm.set_inputs(inputs);
+    vm.set_input_cb(input_cb);
+    vm.run()
+}
+
 /// 只跑一次、只要输出文本（测试和简单集成用）
 pub fn run_text(src: &str) -> Result<String, FloatError> {
     run_source(src).map(|o| o.output)

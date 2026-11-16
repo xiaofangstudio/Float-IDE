@@ -411,6 +411,19 @@ impl Checker {
                 }
             }
             ExprKind::Un { a, .. } => self.expr(a),
+            ExprKind::Lambda { params, body } => {
+                // lambda 自成一个作用域，参数是它的局部（和 funcDef 同策略）
+                self.locals.push(Scope::default());
+                for p in params {
+                    self.locals.last_mut().unwrap().vars.insert(Rc::clone(&p.name), p.line);
+                    if let Some(d) = &p.default {
+                        self.expr(d);
+                    }
+                }
+                self.expr(body);
+                let sc = self.locals.pop().unwrap();
+                self.report_unused(&sc);
+            }
             ExprKind::Ternary { cond, a, b } => {
                 self.expr(cond);
                 self.expr(a);
@@ -423,6 +436,11 @@ impl Checker {
             ExprKind::Idx { obj, index } => {
                 self.expr(obj);
                 self.expr(index);
+            }
+            ExprKind::Slice { obj, from, to } => {
+                self.expr(obj);
+                if let Some(f) = from { self.expr(f); }
+                if let Some(t) = to { self.expr(t); }
             }
             ExprKind::Member { obj, .. } => self.expr(obj),
             ExprKind::Call { callee, args } => {

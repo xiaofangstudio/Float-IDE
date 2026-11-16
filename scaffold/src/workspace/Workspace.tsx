@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { api } from '../core/tauri';
+import { api, listen } from '../core/tauri';
 
 const isTauri = (): boolean =>
   typeof window !== 'undefined' && '__TAURI_INTERNALS__' in (window as unknown as Record<string, unknown>);
@@ -115,6 +115,20 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
   }, [clampLayout]);
+
+  /* F5 阻塞式输入：内核跑在独立线程上，ask 时发事件过来，
+   * 这里弹输入行；用户答完用 lang_input 把答案送回去，整段脚本只跑一次。 */
+  const inputRunRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlisten: (() => void) | null = null;
+    void listen<{ runId: string; prompt: string }>('float-input-request', (e) => {
+      inputRunRef.current = e.payload.runId;
+      setAskQ(e.payload.prompt || '请回答');
+      setCtl('running');
+    }).then((fn) => { unlisten = fn; });
+    return () => { unlisten?.(); };
+  }, []);
 
   /* 控制台输出 / 变量面板是"哪个文件的运行结果"就该跟着哪个文件走：
    * 切换活动文件时，如果没在跑，就把上一份输出和调试快照清掉，
@@ -467,8 +481,9 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
   }, [projectDir]);
 
   /* ── Rust 内核的交互式运行 ──
-   * ask 会让内核停下来、把提问交回来；用户答完把答案补进 runInputsRef 再跑一遍。
-   * 脚本对同样的输入是确定性的，所以重跑得到的就是同一条路径，VM 不用做"挂起/恢复"。
+   * F5 走阻塞式：VM 在独立线程里一次跑完，ask 时发 float-input-request 事件，
+   * 界面答完用 lang_input 把答案送回去，整段脚本只跑一次（副作用不会重复）。
+   * runInputsRef 只留作老式兜底（比如 IDE 没收到事件时预置输入）。
    */
   const runInputsRef = useRef<string[]>([]);
   const rustRunRef = useRef<{
@@ -478,6 +493,7 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
   const rustRunOnce = useCallback(async (): Promise<void> => {
     const ctx = rustRunRef.current;
     if (!ctx) return;
+    inputRunRef.current = null; // 上一轮遗留的 runId 不能混进这一轮
     const r = await api.langRun(ctx.file, ctx.src, runInputsRef.current, ctx.extra);
     if (!ctx.alive()) return;
     setLines([]);
@@ -549,10 +565,9 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
       setAskQ(null);
       rustRunRef.current = null;
 
-      /* F5 走 Rust 内核，一套实现到底：class / try / import / ask 全在里面。
-       * ask 不再是"退回另一个引擎"的理由 —— 内核会停下来把提问交给界面，
-       * 拿到回答后补进 inputs 重跑。纯计算脚本重放即同一条路径；
-       * 但 rand / time 每次结果不同，重放会重新执行它们——交互式小游戏请用 F6（真暂停）。 */
+      /* F5 走 Rust 内核，一套实现到底：class / try / import / ask / 闭包 / lambda / HOF 全在里面。
+       * ask 是阻塞式的：内核停在提问处等界面回传答案，答完从原地继续——
+       * 不再补进 inputs 从头重跑，所以同一个脚本里问多次、rand / time / 写文件都只发生一次。 */
       const entrySrc = sources.get(normEntry) ?? '';
       const canNative = mode === 'run' && isTauri();
       if (canNative) {
@@ -1383,12 +1398,14 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
           askQuestion={askQ}
           onAnswer={(a) => {
             setAskQ(null);
-            // Rust 内核：答案补进 inputs 后从头重跑
-            if (rustRunRef.current) {
-              runInputsRef.current = [...runInputsRef.current, a];
-              void rustRunOnce();
+            // F5 / Rust 内核：答案直接送回正在阻塞等待的那次运行，不重跑
+            const runId = inputRunRef.current;
+            if (runId !== null) {
+              inputRunRef.current = null;
+              void api.langInput(runId, a);
               return;
             }
+            // F6 / 旧解释器：断点或 ask 暂停，resume 接着走
             const r = runnerRef.current;
             pushLine({ kind: 'info', text: `> ${a}` });
             r?.resume(a);

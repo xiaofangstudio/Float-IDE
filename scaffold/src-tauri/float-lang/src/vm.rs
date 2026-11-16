@@ -17,7 +17,7 @@
 use crate::builtins::{call_builtin, call_method};
 use crate::bytecode::{Chunk, Op};
 use crate::error::{FloatError, Span};
-use crate::value::{Dict, PtrTarget, Value};
+use crate::value::{Cell, Closure, Dict, PtrTarget, UserFn, Value};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -43,6 +43,9 @@ struct Handler {
     frames_len: usize,
     iters_len: usize,
     ranges_len: usize,
+    /// 出错瞬间 cell / upval 区的长度：catch 跳回来要截回去
+    cells_len: usize,
+    upvals_len: usize,
 }
 
 /// 调用帧。字段全是小整数：fib 这种一秒几百万次调用的场景，
@@ -68,6 +71,9 @@ struct Frame {
     fn_id: u16,
     /// 这次调用实际传了几个实参（默认值打桩要用）
     argc: u8,
+    /// 本帧在 cell_store / upval_store 里的起点（返回时按它截断）
+    cell_base: u32,
+    upval_base: u32,
 }
 
 /// 手动内存的登记：alloc 记一笔，free 划掉，程序结束时对账。
@@ -208,6 +214,11 @@ pub struct Vm {
     gdefined: Vec<bool>,
     stack: OpStack,
     frames: Vec<Frame>,
+    /// 逃逸局部变量的格子区：按帧分段，frame.cell_base 是起点。
+    /// 只有被内层闭包捕获的变量才占格子，普通函数这段长度是 0。
+    cell_store: Vec<Option<Cell>>,
+    /// 闭包捕获的上值区：按帧分段，frame.upval_base 是起点
+    upval_store: Vec<Cell>,
     iters: Vec<IterState>,
     ranges: Vec<RangeLoop>,
     /// try 的处理器栈（出错就弹回最近的一层）
@@ -231,6 +242,9 @@ pub struct Vm {
     /// 交互模式：ask 没有预设输入时"挂起等人回答"，而不是直接给空串
     interactive: bool,
     need_input: bool,
+    /// 阻塞式输入回调：ask 没有预设输入时调它拿答案（回调自己负责等界面输入）。
+    /// 有它时 VM 在同一次 run 里继续跑，不做「补输入重跑」——副作用只发生一次。
+    input_cb: Option<Box<dyn FnMut(&str) -> String>>,
     /// 计时器基准（毫秒）：time read 报的是距这里的秒数
     time_base: f64,
 }
@@ -245,6 +259,8 @@ impl Vm {
             gdefined: vec![false; n],
             stack: OpStack::new(),
             frames: Vec::new(),
+            cell_store: Vec::new(),
+            upval_store: Vec::new(),
             iters: Vec::new(),
             ranges: Vec::new(),
             handlers: Vec::new(),
@@ -260,6 +276,7 @@ impl Vm {
             input_pos: 0,
             interactive: false,
             need_input: false,
+            input_cb: None,
             time_base: now_millis(),
         }
     }
@@ -349,6 +366,23 @@ impl Vm {
     pub fn set_inputs(&mut self, inputs: Vec<String>) {
         self.inputs = inputs;
         self.input_pos = 0;
+    }
+
+    /// 装一个阻塞式输入回调。设置了它，ask 就在同一次运行里同步等答案，
+    /// 不再需要「补一条输入从头重跑」。
+    pub fn set_input_cb(&mut self, cb: Box<dyn FnMut(&str) -> String>) {
+        self.input_cb = Some(cb);
+    }
+
+    /// 当前 ask 的提问文本：输出里最后一行非调试内容
+    fn prompt_text(&self) -> String {
+        self.out
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty() && !l.starts_with('\u{1}'))
+            .unwrap_or("请回答")
+            .trim()
+            .to_string()
     }
 
     /// 出错时取某条指令对应的源码行
@@ -455,8 +489,20 @@ impl Vm {
     fn run_inner(&mut self) -> Result<RunOutcome, FloatError> {
         self.globals = vec![Value::Null; self.chunk.n_globals as usize];
         self.gdefined = vec![false; self.chunk.n_globals as usize];
+        // 顶层函数提升：启动前把函数值放进全局槽，先调用后定义才不报错
+        for (slot, ci) in &self.chunk.hoists {
+            if let Some(Value::Func(f)) = self.chunk.consts.get(*ci as usize) {
+                let s = *slot as usize;
+                if s < self.globals.len() {
+                    self.globals[s] = Value::Func(f.clone());
+                    self.gdefined[s] = true;
+                }
+            }
+        }
         self.stack.sp = STACK_PAD;
         self.frames.clear();
+        self.cell_store.clear();
+        self.upval_store.clear();
         self.iters.clear();
         self.ranges.clear();
         self.handlers.clear();
@@ -477,6 +523,8 @@ impl Vm {
             hdl_base: 0,
             fn_id: u16::MAX,
             argc: 0,
+            cell_base: 0,
+            upval_base: 0,
         });
         // try/catch 的落地方式：exec 里所有报错照旧 `return Err(…)`，
         // 由这里统一接住——有 catch 就把现场倒回去、把错误值压栈、接着跑。
@@ -498,6 +546,8 @@ impl Vm {
                         self.frames.truncate(h.frames_len);
                         self.iters.truncate(h.iters_len);
                         self.ranges.truncate(h.ranges_len);
+                        self.cell_store.truncate(h.cells_len);
+                        self.upval_store.truncate(h.upvals_len);
                         self.stack.sp = h.sp;
                         // 错误值占住栈顶，catch 那边用 SetLocal 取走
                         let v = match self.thrown.take() {
@@ -525,11 +575,16 @@ impl Vm {
 
     /// catch 接到的"运行时错误"长什么样：一个小字典，键是中文的。
     /// （`throw` 抛出来的东西则原样传过去，不做包装。）
+    /// message 不带「第 N 行：」前缀——行号在 行/line 字段里，跟 TS 引擎同一套字段。
     fn error_value(&self, e: &FloatError) -> Value {
+        let raw = strip_line_prefix(&e.message);
         let mut d = crate::value::Dict::new();
-        d.set(Rc::from("消息"), Value::string(e.message.clone()));
-        d.set(Rc::from("message"), Value::string(e.message.clone()));
+        // 键的顺序跟 TS 引擎的错误对象一字不差：message, 消息, line, 行, file, 类型
+        d.set(Rc::from("message"), Value::string(raw.to_string()));
+        d.set(Rc::from("消息"), Value::string(raw.to_string()));
+        d.set(Rc::from("line"), Value::Int(e.span.line as i64));
         d.set(Rc::from("行"), Value::Int(e.span.line as i64));
+        d.set(Rc::from("file"), Value::string(e.span.file.to_string()));
         d.set(Rc::from("类型"), Value::string("运行时错误".to_string()));
         Value::Dict(Rc::new(std::cell::RefCell::new(d)))
     }
@@ -634,6 +689,102 @@ impl Vm {
                         self.gdefined[i as usize] = true;
                     }
                 }
+
+                /* ── 闭包上值：只有捕获了变量的函数才会走到这些冷路径 ── */
+                Op::CellNew(i) => {
+                    let cb = self.frames.last().map(|f| f.cell_base as usize).unwrap_or(0);
+                    let at = cb + i as usize;
+                    if self.cell_store.len() <= at {
+                        self.cell_store.resize(at + 1, None);
+                    }
+                    self.cell_store[at] = Some(Rc::new(RefCell::new(Value::Null)));
+                }
+                Op::BoxParam(i) => {
+                    let cb = self.frames.last().map(|f| f.cell_base as usize).unwrap_or(0);
+                    let at = cb + i as usize;
+                    if self.cell_store.len() <= at {
+                        self.cell_store.resize(at + 1, None);
+                    }
+                    // 把栈槽里的实参值搬进 cell，槽里留 null（它在 [0,sp) 内，不能变成未初始化）
+                    let slot = base + i as usize;
+                    let v = if slot < sp {
+                        std::mem::replace(&mut *sptr.add(slot), Value::Null)
+                    } else {
+                        Value::Null
+                    };
+                    self.cell_store[at] = Some(Rc::new(RefCell::new(v)));
+                }
+                Op::GetBox(i) => {
+                    let cb = self.frames.last().map(|f| f.cell_base as usize).unwrap_or(0);
+                    let at = cb + i as usize;
+                    let v = match self.cell_store.get(at).and_then(|c| c.as_ref()) {
+                        Some(c) => c.borrow().clone(),
+                        None => Value::Null,
+                    };
+                    std::ptr::write(sptr.add(sp), v);
+                    sp += 1;
+                }
+                Op::SetBox(i) => {
+                    sp -= 1;
+                    let v = take(sptr, sp);
+                    let cb = self.frames.last().map(|f| f.cell_base as usize).unwrap_or(0);
+                    let at = cb + i as usize;
+                    if let Some(c) = self.cell_store.get(at).and_then(|c| c.as_ref()) {
+                        *c.borrow_mut() = v;
+                    }
+                }
+                Op::GetUpval(i) => {
+                    let ub = self.frames.last().map(|f| f.upval_base as usize).unwrap_or(0);
+                    let at = ub + i as usize;
+                    let v = match self.upval_store.get(at) {
+                        Some(c) => c.borrow().clone(),
+                        None => Value::Null,
+                    };
+                    std::ptr::write(sptr.add(sp), v);
+                    sp += 1;
+                }
+                Op::SetUpval(i) => {
+                    sp -= 1;
+                    let v = take(sptr, sp);
+                    let ub = self.frames.last().map(|f| f.upval_base as usize).unwrap_or(0);
+                    let at = ub + i as usize;
+                    if let Some(c) = self.upval_store.get(at) {
+                        *c.borrow_mut() = v;
+                    }
+                }
+                Op::MakeClosure { fidx, srcs } => {
+                    let fv = if (fidx as usize) < klen {
+                        (*kptr.add(fidx as usize)).clone()
+                    } else {
+                        Value::Null
+                    };
+                    if let Value::Func(f) = fv {
+                        if f.nupvals == 0 {
+                            std::ptr::write(sptr.add(sp), Value::Func(f));
+                            sp += 1;
+                        } else {
+                            let (cb, ub) = match self.frames.last() {
+                                Some(fr) => (fr.cell_base as usize, fr.upval_base as usize),
+                                None => (0, 0),
+                            };
+                            let sources = self.chunk.upval_sources.get(srcs as usize);
+                            let mut upvals = Vec::with_capacity(f.nupvals);
+                            for src in sources.into_iter().flatten() {
+                                let cell = match src {
+                                    crate::bytecode::UpSrc::Local(i) => self.cell_store.get(cb + *i as usize).cloned().flatten(),
+                                    crate::bytecode::UpSrc::Upval(i) => self.upval_store.get(ub + *i as usize).cloned(),
+                                };
+                                upvals.push(cell.unwrap_or_else(|| Rc::new(RefCell::new(Value::Null))));
+                            }
+                            std::ptr::write(sptr.add(sp), Value::Closure(Rc::new(Closure { func: f, upvals })));
+                            sp += 1;
+                        }
+                    } else {
+                        std::ptr::write(sptr.add(sp), Value::Null);
+                        sp += 1;
+                    }
+                }
+
                 Op::Add | Op::Sub | Op::Mul | Op::Div | Op::IDiv | Op::Mod | Op::Pow => {
                     if sp < 2 {
                         return Err(self.err_at(ip, "运算缺少操作数"));
@@ -1035,49 +1186,57 @@ impl Vm {
                         }
                         std::ptr::write(sptr.add(sp), v);
                         sp += 1;
-                    } else if matches!(&*sptr.add(callee_idx), Value::Func(_)) {
-                        let site = ip - 1;
-                        let fp = match &*sptr.add(callee_idx) {
-                            Value::Func(f) => Rc::as_ptr(f) as usize,
-                            _ => 0,
+                    } else if matches!(&*sptr.add(callee_idx), Value::Func(_) | Value::Closure(_)) {
+                        // 函数原型：普通函数就是它，闭包取其原型（上值单独进帧）
+                        let proto: &Rc<UserFn> = match &*sptr.add(callee_idx) {
+                            Value::Func(f) => f,
+                            Value::Closure(c) => &c.func,
+                            _ => unreachable!(),
                         };
+                        let site = ip - 1;
+                        let fp = Rc::as_ptr(proto) as usize;
                         let ic = *icp.add(site);
-                        let (fid, entry, nlocals, nparams) = if fp != 0 && ic.fp == fp {
+                        let (fid, entry, nlocals, nparams) = if ic.fp == fp {
                             (ic.fn_id, ic.entry as usize, ic.nlocals as usize, ic.nparams as usize)
                         } else {
-                            let (fid, entry, nlocals, nparams) = match &*sptr.add(callee_idx) {
-                                Value::Func(f) => (f.id, f.entry, f.nlocals, f.params.len()),
-                                _ => unreachable!(),
-                            };
+                            let v = (proto.id, proto.entry, proto.nlocals, proto.params.len());
                             *icp.add(site) = CallIc {
                                 fp,
-                                entry: entry as u32,
-                                nlocals: nlocals as u32,
-                                nparams: nparams as u32,
-                                fn_id: fid,
+                                entry: v.1 as u32,
+                                nlocals: v.2 as u32,
+                                nparams: v.3 as u32,
+                                fn_id: v.0,
                             };
-                            (fid, entry, nlocals, nparams)
+                            v
                         };
                         if self.frames.len() >= MAX_DEPTH {
-                            let name = match &*sptr.add(callee_idx) {
-                                Value::Func(f) => f.name.to_string(),
-                                _ => "?".to_string(),
-                            };
                             return Err(self.err_at(ip, format!(
                                 "递归太深了（超过 {} 层）停了下来。检查一下 {} 的结束条件是不是写错了。",
-                                MAX_DEPTH, name
+                                MAX_DEPTH, proto.name
                             )));
                         }
+                        // 多传参数直接报错（跟 TS 引擎一致），不再静默丢弃
                         if n > nparams {
-                            drop_from(sptr, &mut sp, callee_idx + 1 + nparams);
+                            let name = proto.name.to_string();
+                            if name.starts_with("__new_") && nparams == 0 {
+                                let cls = name.trim_start_matches("__new_").trim_end_matches('_');
+                                return Err(self.err_at(ip, format!(
+                                    "类 {} 没有 init 方法，不能接收参数（先在类里写 function init(…)）",
+                                    cls
+                                )));
+                            }
+                            return Err(self.err_at(ip, format!(
+                                "函数 {} 只接受 {} 个参数，实际给了 {} 个",
+                                pretty_fn_name(&name),
+                                nparams,
+                                n
+                            )));
                         }
                         // 参数不足补默认值
                         if n < nparams {
-                            if let Value::Func(f) = &*sptr.add(callee_idx) {
-                                for k in n..nparams {
-                                    std::ptr::write(sptr.add(sp), f.defaults.get(k).cloned().unwrap_or(Value::Null));
-                                    sp += 1;
-                                }
+                            for k in n..nparams {
+                                std::ptr::write(sptr.add(sp), proto.defaults.get(k).cloned().unwrap_or(Value::Null));
+                                sp += 1;
                             }
                         }
                         // callee 那一格留着不挪：返回时 drop_from(base) 会连它一起收掉，
@@ -1087,6 +1246,17 @@ impl Vm {
                         while sp < newbase + want {
                             std::ptr::write(sptr.add(sp), Value::Null);
                             sp += 1;
+                        }
+                        // 给新帧留出 cell / 上值区；普通函数两段都是 0 长度，零开销
+                        let cell_base = self.cell_store.len();
+                        let upval_base = self.upval_store.len();
+                        if !proto.celled.is_empty() {
+                            self.cell_store.resize(cell_base + nlocals.max(nparams), None);
+                        }
+                        if proto.nupvals > 0 {
+                            if let Value::Closure(c) = &*sptr.add(callee_idx) {
+                                self.upval_store.extend_from_slice(&c.upvals);
+                            }
                         }
                         self.next_frame_id += 1;
                         self.frames.push(Frame {
@@ -1100,6 +1270,8 @@ impl Vm {
                             hdl_base: self.handlers.len() as u32,
                             fn_id: fid,
                             argc: n.min(nparams) as u8,
+                            cell_base: cell_base as u32,
+                            upval_base: upval_base as u32,
                         });
                         base = newbase;
                         ip = entry;
@@ -1169,6 +1341,8 @@ impl Vm {
                                     hdl_base: self.handlers.len() as u32,
                                     fn_id: fid,
                                     argc: (n + 1).min(nparams) as u8,
+                                    cell_base: 0,
+                                    upval_base: 0,
                                 });
                                 base = recv_idx;
                                 ip = entry;
@@ -1251,7 +1425,7 @@ impl Vm {
                     let callee_idx = sp - n;
                     let kind = if (slot as usize) < glen {
                         match &*gptr.add(slot as usize) {
-                            Value::Func(_) => 1u8,
+                            Value::Func(_) | Value::Closure(_) => 1u8,
                             Value::Native(_) => 0u8,
                             _ => 2u8,
                         }
@@ -1279,56 +1453,72 @@ impl Vm {
                         std::ptr::write(sptr.add(sp), v);
                         sp += 1;
                     } else if kind == 1 {
-                        let site = ip - 1;
-                        let fp = match &*gptr.add(slot as usize) {
-                            Value::Func(f) => Rc::as_ptr(f) as usize,
-                            _ => 0,
+                        let proto: &Rc<UserFn> = match &*gptr.add(slot as usize) {
+                            Value::Func(f) => f,
+                            Value::Closure(c) => &c.func,
+                            _ => unreachable!(),
                         };
+                        let site = ip - 1;
+                        let fp = Rc::as_ptr(proto) as usize;
                         let ic = *icp.add(site);
-                        let (fid, entry, nlocals, nparams) = if fp != 0 && ic.fp == fp {
+                        let (fid, entry, nlocals, nparams) = if ic.fp == fp {
                             (ic.fn_id, ic.entry as usize, ic.nlocals as usize, ic.nparams as usize)
                         } else {
-                            let (fid, entry, nlocals, nparams) = match &*gptr.add(slot as usize) {
-                                Value::Func(f) => (f.id, f.entry, f.nlocals, f.params.len()),
-                                _ => unreachable!(),
-                            };
+                            let v = (proto.id, proto.entry, proto.nlocals, proto.params.len());
                             *icp.add(site) = CallIc {
                                 fp,
-                                entry: entry as u32,
-                                nlocals: nlocals as u32,
-                                nparams: nparams as u32,
-                                fn_id: fid,
+                                entry: v.1 as u32,
+                                nlocals: v.2 as u32,
+                                nparams: v.3 as u32,
+                                fn_id: v.0,
                             };
-                            (fid, entry, nlocals, nparams)
+                            v
                         };
                         if self.frames.len() >= MAX_DEPTH {
-                            let name = match &*gptr.add(slot as usize) {
-                                Value::Func(f) => f.name.to_string(),
-                                _ => "?".to_string(),
-                            };
                             return Err(self.err_at(ip, format!(
                                 "递归太深了（超过 {} 层）停了下来。检查一下 {} 的结束条件是不是写错了。",
-                                MAX_DEPTH, name
+                                MAX_DEPTH, proto.name
                             )));
                         }
                         if n > nparams {
-                            drop_from(sptr, &mut sp, callee_idx + nparams);
+                            let name = proto.name.to_string();
+                            if name.starts_with("__new_") && nparams == 0 {
+                                let cls = name.trim_start_matches("__new_").trim_end_matches('_');
+                                return Err(self.err_at(ip, format!(
+                                    "类 {} 没有 init 方法，不能接收参数（先在类里写 function init(…)）",
+                                    cls
+                                )));
+                            }
+                            return Err(self.err_at(ip, format!(
+                                "函数 {} 只接受 {} 个参数，实际给了 {} 个",
+                                pretty_fn_name(&name),
+                                nparams,
+                                n
+                            )));
                         }
                         if n < nparams {
-                            if let Value::Func(f) = &*gptr.add(slot as usize) {
-                                for k in n..nparams {
-                                    std::ptr::write(
-                                        sptr.add(sp),
-                                        f.defaults.get(k).cloned().unwrap_or(Value::Null),
-                                    );
-                                    sp += 1;
-                                }
+                            for k in n..nparams {
+                                std::ptr::write(
+                                    sptr.add(sp),
+                                    proto.defaults.get(k).cloned().unwrap_or(Value::Null),
+                                );
+                                sp += 1;
                             }
                         }
                         let want = nlocals.max(nparams);
                         while sp < callee_idx + want {
                             std::ptr::write(sptr.add(sp), Value::Null);
                             sp += 1;
+                        }
+                        let cell_base = self.cell_store.len();
+                        let upval_base = self.upval_store.len();
+                        if !proto.celled.is_empty() {
+                            self.cell_store.resize(cell_base + nlocals.max(nparams), None);
+                        }
+                        if proto.nupvals > 0 {
+                            if let Value::Closure(c) = &*gptr.add(slot as usize) {
+                                self.upval_store.extend_from_slice(&c.upvals);
+                            }
                         }
                         self.next_frame_id += 1;
                         self.frames.push(Frame {
@@ -1342,6 +1532,8 @@ impl Vm {
                             hdl_base: self.handlers.len() as u32,
                             fn_id: fid,
                             argc: n.min(nparams) as u8,
+                            cell_base: cell_base as u32,
+                            upval_base: upval_base as u32,
                         });
                         base = callee_idx;
                         ip = entry;
@@ -1376,6 +1568,21 @@ impl Vm {
                     sp -= 1;
                     let obj = take(sptr, sp);
                     let v = match index_get(&obj, &idx) {
+                        Ok(v) => v,
+                        Err(m) => return Err(self.err_at(ip, m)),
+                    };
+                    std::ptr::write(sptr.add(sp), v);
+                    sp += 1;
+                }
+                Op::Slice => {
+                    if sp < 3 {
+                        return Err(self.err_at(ip, "切片缺少操作数"));
+                    }
+                    sp -= 3;
+                    let to = take(sptr, sp + 2);
+                    let from = take(sptr, sp + 1);
+                    let obj = take(sptr, sp);
+                    let v = match slice_value(&obj, &from, &to) {
                         Ok(v) => v,
                         Err(m) => return Err(self.err_at(ip, m)),
                     };
@@ -1557,8 +1764,13 @@ impl Vm {
                         let v = self.inputs[self.input_pos].clone();
                         self.input_pos += 1;
                         v
+                    } else if self.input_cb.is_some() {
+                        // 阻塞式：回调负责把提问交给界面并等到答案，VM 状态原样继续跑
+                        let prompt = self.prompt_text();
+                        // is_some 已确认，这里 unwrap 不会 panic；先借 prompt 再借 cb，避免同时借 self
+                        (self.input_cb.as_mut().unwrap())(&prompt)
                     } else if self.interactive {
-                        // 没有现成答案：标记"等人回答"，让上层把提问抛给界面
+                        // 老的重跑式兜底（没注入回调时）：标记"等人回答"
                         self.need_input = true;
                         return Err(self.err_at(ip, "__need_input__"));
                     } else {
@@ -1799,6 +2011,8 @@ impl Vm {
                         frames_len: self.frames.len(),
                         iters_len: self.iters.len(),
                         ranges_len: self.ranges.len(),
+                        cells_len: self.cell_store.len(),
+                        upvals_len: self.upval_store.len(),
                     });
                 }
                 Op::TryEnd => {
@@ -1851,6 +2065,13 @@ unsafe fn leave_frame(
     if vm.handlers.len() != frame.hdl_base as usize {
         vm.handlers.truncate(frame.hdl_base as usize);
     }
+    // 本帧的 cell / 上值随帧一起收掉（闭包捕获的格子会被内层持有，不会提前释放）
+    if vm.cell_store.len() != frame.cell_base as usize {
+        vm.cell_store.truncate(frame.cell_base as usize);
+    }
+    if vm.upval_store.len() != frame.upval_base as usize {
+        vm.upval_store.truncate(frame.upval_base as usize);
+    }
     drop_from(sptr, sp, frame.base as usize);
     *base = vm.frames.last().map(|f| f.locals_base as usize).unwrap_or(0);
     if vm.frames.is_empty() {
@@ -1869,6 +2090,55 @@ fn floor_div_i64(x: i64, y: i64) -> i64 {
     } else {
         q
     }
+}
+
+/// 剥掉 err_at 加的「第 N 行：」/「文件 第 N 行：」前缀，还原纯错误消息。
+/// 只在前面确实是这个形状时才剥，普通消息原样返回。
+fn strip_line_prefix(msg: &str) -> &str {
+    let digits_only = |s: &str| !s.is_empty() && s.trim_end().chars().all(|c| c.is_ascii_digit());
+    if let Some(rest) = msg.strip_prefix("第 ") {
+        if let Some(p) = rest.find("行：") {
+            let inner = &rest[..p];
+            if digits_only(inner) {
+                return &rest[p + "行：".len()..];
+            }
+        }
+        return msg;
+    }
+    // 「文件名 第 N 行：消息」
+    if let Some(p) = msg.find(" 第 ") {
+        let rest = &msg[p + 3..];
+        if let Some(q) = rest.find("行：") {
+            let inner = &rest[..q];
+            if digits_only(inner) {
+                return &rest[q + "行：".len()..];
+            }
+        }
+    }
+    msg
+}
+
+/// 报错里用的函数名：class 降级出来的内部名换成人能看懂的。
+/// `__new_Point_` → `类 Point`、`__m_Point_show` → `Point.show`、`__init_Point_` → `Point.init`。
+fn pretty_fn_name(name: &str) -> String {
+    if let Some(rest) = name.strip_prefix("__new_") {
+        let cls = rest.trim_end_matches('_');
+        if !cls.is_empty() {
+            return format!("类 {}", cls);
+        }
+    }
+    if let Some(rest) = name.strip_prefix("__init_") {
+        let cls = rest.trim_end_matches('_');
+        if !cls.is_empty() {
+            return format!("{}.init", cls);
+        }
+    }
+    if let Some(rest) = name.strip_prefix("__m_") {
+        if let Some(dot) = rest.rfind('_') {
+            return format!("{}.{}", &rest[..dot], &rest[dot + 1..]);
+        }
+    }
+    name.to_string()
 }
 
 /// 当前时间的毫秒数（给 time read / time reset 用）。
@@ -2090,7 +2360,7 @@ pub fn arith(op: Op, a: &Value, b: &Value) -> Result<Value, String> {
             },
             Op::Div => {
                 if y == 0 {
-                    return Err("除数为 0".into());
+                    return Err("除数不能为 0".into());
                 }
                 if x % y == 0 {
                     Value::Int(x / y)
@@ -2100,13 +2370,13 @@ pub fn arith(op: Op, a: &Value, b: &Value) -> Result<Value, String> {
             }
             Op::Mod => {
                 if y == 0 {
-                    return Err("取余的除数为 0".into());
+                    return Err("取模的除数不能为 0".into());
                 }
                 Value::Int(x % y)
             }
             Op::IDiv => {
                 if y == 0 {
-                    return Err("整除的除数为 0".into());
+                    return Err("整除的除数不能为 0".into());
                 }
                 Value::Int(floor_div_i64(x, y))
             }
@@ -2131,20 +2401,20 @@ pub fn arith(op: Op, a: &Value, b: &Value) -> Result<Value, String> {
         Op::Mul => Value::Float(x * y),
         Op::Div => {
             if y == 0.0 {
-                return Err("除数为 0".into());
+                return Err("除数不能为 0".into());
             }
             Value::Float(x / y)
         }
         // 整除：浮点也向下取整（7.5 // 2 = 3.0，和 Python 一致）
         Op::IDiv => {
             if y == 0.0 {
-                return Err("整除的除数为 0".into());
+                return Err("整除的除数不能为 0".into());
             }
             Value::Float((x / y).floor())
         }
         Op::Mod => {
             if y == 0.0 {
-                return Err("取余的除数为 0".into());
+                return Err("取模的除数不能为 0".into());
             }
             Value::Float(x % y)
         }
@@ -2195,7 +2465,7 @@ fn norm_index(i: &Value, len: usize) -> Result<usize, String> {
     let raw = i.as_int().ok_or_else(|| "下标要是整数".to_string())?;
     let idx = if raw < 0 { raw + len as i64 } else { raw };
     if idx < 0 || idx as usize >= len {
-        return Err(format!("下标 {} 越界（长度 {}）", raw, len));
+        return Err(format!("下标 {} 超出范围（长度 {}）", raw, len));
     }
     Ok(idx as usize)
 }
@@ -2213,8 +2483,10 @@ pub fn index_get(obj: &Value, idx: &Value) -> Result<Value, String> {
             Ok(Value::string(chars[i].to_string()))
         }
         Value::Dict(d) => {
+            // 缺键给 null：Copper 是拿来处理脏 JSON 的，可选字段缺失不该让整段脚本崩。
+            // 要严格就用 data.require(d, 键)，它缺键会抛「字典里没有键」。
             let key = idx.to_display();
-            d.borrow().get(&key).ok_or_else(|| format!("字典里没有键「{}」", key))
+            Ok(d.borrow().get(&key).unwrap_or(Value::Null))
         }
         Value::Ptr(p) => {
             let m = p.borrow();
@@ -2244,7 +2516,60 @@ pub fn index_get(obj: &Value, idx: &Value) -> Result<Value, String> {
                 }
             }
         }
+        // 缺键取到 null 后再往下取，是脏 JSON 最常见的坑：直接指路，别只丢一句「不能用下标」
+        Value::Null => Err(
+            "上一级取到 null（可能是键不存在），先确认字段在不在；要严格就用 data.require(d, 键)".into()
+        ),
         other => Err(format!("{} 不能用下标取值", other.to_display())),
+    }
+}
+
+/// 切片 xs[a:b]：含头不含尾，负数从末尾数，越界截断不报错（跟 TS 引擎同一套规则）。
+/// 缺的一边传 Null：from 缺 = 0，to 缺 = 长度。
+pub fn slice_value(obj: &Value, from: &Value, to: &Value) -> Result<Value, String> {
+    let edge = |v: &Value, def: i64, len: i64| -> Result<i64, String> {
+        if matches!(v, Value::Null) {
+            return Ok(def);
+        }
+        let n = match v {
+            Value::Int(n) => *n,
+            Value::Float(f) => *f as i64,
+            other => return Err(format!("切片的边界要是整数，得到 {}", other.to_display())),
+        };
+        let mut i = n;
+        if i < 0 {
+            i += len;
+        }
+        Ok(i.clamp(0, len))
+    };
+    match obj {
+        Value::List(l) => {
+            let len = l.borrow().len() as i64;
+            let a = edge(from, 0, len)?;
+            let b = edge(to, len, len)?;
+            let items: Vec<Value> = if a <= b {
+                l.borrow()[a as usize..b as usize].to_vec()
+            } else {
+                Vec::new()
+            };
+            Ok(Value::List(Rc::new(std::cell::RefCell::new(items))))
+        }
+        Value::Str(s) => {
+            let chars: Vec<char> = s.chars().collect();
+            let len = chars.len() as i64;
+            let a = edge(from, 0, len)?;
+            let b = edge(to, len, len)?;
+            let out: String = if a <= b {
+                chars[a as usize..b as usize].iter().collect()
+            } else {
+                String::new()
+            };
+            Ok(Value::string(out))
+        }
+        other => Err(format!(
+            "这个类型不支持切片（只有列表和字符串能切）：{}",
+            other.to_display()
+        )),
     }
 }
 
@@ -2291,7 +2616,11 @@ pub fn index_set(obj: &Value, idx: &Value, val: Value) -> Result<(), String> {
 
 pub fn member_get(obj: &Value, name: &str) -> Result<Value, String> {
     match obj {
-        Value::Dict(d) => d.borrow().get(name).ok_or_else(|| format!("字典里没有键「{}」", name)),
+        // 缺键给 null，和 d["键"] 保持一致；要严格就用 data.require。
+        Value::Dict(d) => Ok(d.borrow().get(name).unwrap_or(Value::Null)),
+        Value::Null => Err(
+            "上一级取到 null（可能是键不存在），先确认字段在不在；要严格就用 data.require(d, 键)".into()
+        ),
         other => Err(format!(
             "{} 没有成员「{}」（类与实例这版 VM 还没实现）",
             other.to_display(),

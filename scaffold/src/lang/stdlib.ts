@@ -168,7 +168,7 @@ export const NAMESPACES: Record<string, readonly string[]> = {
   data: [
     'sort', 'sort_by', 'max', 'min', 'sum', 'avg', 'median', 'stdev', 'count', 'freq', 'tally',
     'unique', 'flatten', 'chunk', 'zip', 'enumerate', 'reverse', 'slice', 'is_empty', 'keys',
-    'values', 'entries', 'merge', 'pick', 'omit', 'get'
+    'values', 'entries', 'merge', 'pick', 'omit', 'get', 'require'
   ],
   json: ['parse', 'stringify', 'pretty', 'valid', 'try_parse'],
   time: [
@@ -590,6 +590,12 @@ def('data', 'get', '字典, 键[, 默认值]', '取字段；没有就给默认�
   const got = d.get(k);
   if (got !== undefined) return got;
   return a.length > 2 ? a[2] : null;
+}, { writes: '__last_read' });
+def('data', 'require', '字典, 键', '取字段；没有就当场报「字典里没有键」', 2, 2, (a) => {
+  const d = dictOf(a[0], 'data.require');
+  const k = sOf(a[1]);
+  if (!d.has(k)) bad(`字典里没有键「${k}」── 不确定它在不在就用 data.get(d, 键, 默认值)`);
+  return d.get(k) as Val;
 }, { writes: '__last_read' });
 
 function bestOf(a: Val[], which: 'max' | 'min'): Val {

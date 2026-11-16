@@ -34,6 +34,7 @@ export const INSTRUCTIONS: InstDoc[] = [
 
   /* 函数与类 */
   { name: 'fn', args: 'fn name(a, b = 默认值)', insert: 'fn ${1:名字}(${2:参数})\n    $0', desc: '定义函数；支持多参数、默认值、返回值、递归。fn 是主写法，function / Function / f 仍然兼容', category: '函数' },
+  { name: 'fn 别名', args: 'fn g = 函数名', insert: 'fn ${1:g} = ${2:函数名}', desc: '把已有函数绑到另一个名字（函数当值）；之后 g(参数) 与原函数调用等价', category: '函数' },
   { name: 'return', args: 'return 表达式 / return', desc: '从函数返回一个值', category: '函数' },
   { name: 'class', args: 'class 名称 / class 名称 extends 父类', desc: '定义类：类体里写字段和方法，init 是构造方法', category: '类' },
   { name: 'new', args: 'new 类名(参数)', insert: 'new ${1:类名}($0)', desc: '创建实例；如果类里有 init，会自动调用', category: '类' },
@@ -51,7 +52,9 @@ export const INSTRUCTIONS: InstDoc[] = [
   { name: 'ask', args: 'ask "问题"', insert: 'ask "$0"', desc: '向用户提问，回答存进 ans 与 __last_ans', category: '输入输出' },
 
   /* 集合 */
-  { name: 'list', args: 'list 名称 / list 名称 = [1, 2]', desc: '声明列表；也可以直接用列表字面量赋值', category: '列表' },
+  { name: 'f{} 拼接', args: 'f{项, 项, …}', insert: 'f{${1:"文本"}, ${2:变量}}', desc: '逗号拼接字面量：带引号的是文本，其余是表达式，每项自动转成字符串；字符串里的空格原样保留', category: '字符串' },
+  { name: '切片', args: 'xs[起点:终点] / s[起点:终点]', desc: '列表 / 字符串切片，含头不含尾；起点终点可省略，负数从末尾数，越界自动截断', category: '集合' },
+  { name: 'list', args: 'list 名称 / list 名称 = [1, 2]', desc: '声明列表；也可以直接用列表字面量赋值。字面量支持跨行，不必挤成一行', category: '列表' },
   { name: 'add to', args: 'add 值 to 列表', desc: '把值追加到列表末尾', category: '列表' },
   { name: 'insert to at', args: 'insert 值 to 列表 at 下标', desc: '在指定位置插入', category: '列表' },
   { name: 'replace with', args: 'replace 列表 下标 with 值', desc: '替换指定下标的元素', category: '列表' },
@@ -60,7 +63,7 @@ export const INSTRUCTIONS: InstDoc[] = [
   { name: 'len', args: 'len 列表 / len(值)', insert: 'len $0', desc: '取长度并写入 __last_len；在表达式里可直接用 len(x)', result: '__last_len', category: '列表' },
   { name: 'dict', args: 'dict 名称 / dict d = {"键": 值}', desc: '声明字典，可用字面量或 key 写入', category: '字典' },
   { name: 'dict set', args: 'dict d key 键 = 值', desc: '写入一个键值对', category: '字典' },
-  { name: 'dict read', args: 'dict d read 键 / d["键"] / d.键', desc: '读取键值并写入 __last_read', result: '__last_read', category: '字典' },
+  { name: 'dict read', args: 'dict d read 键 / d["键"] / d.键', desc: '读取键值并写入 __last_read；缺键返回 null，不报错。要严格抛错用 data.require(d, 键)，要默认值用 data.get(d, 键, 默认)', result: '__last_read', category: '字典' },
   { name: 'dict del', args: 'dict d del 键', desc: '删除一个键', category: '字典' },
 
   /* 运行时 / 模块 */
@@ -129,6 +132,16 @@ export const SNIPPETS: { label: string; detail: string; body: string }[] = [
     label: 'while',
     detail: '条件循环',
     body: 'while (${1:条件})\n    ${2:break}\n'
+  },
+  {
+    label: 'f{} 拼接',
+    detail: '逗号拼接文本与表达式',
+    body: 'f{${1:"文本"}, ${2:变量}, "!"}'
+  },
+  {
+    label: 'for 双变量',
+    detail: '遍历时同时拿下标和值',
+    body: 'for ${1:i}, ${2:v} in ${3:列表}\n    print(${1:i}, ${2:v})\n'
   }
 ];
 

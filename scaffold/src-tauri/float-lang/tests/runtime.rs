@@ -223,7 +223,7 @@ fn 位运算() {
 
 #[test]
 fn 除零报错() {
-    assert!(err_of("print(1 / 0)").contains("除数为 0"));
+    assert!(err_of("print(1 / 0)").contains("除数不能为 0"));
 }
 
 #[test]
@@ -234,7 +234,7 @@ fn 无限递归被拦住() {
 
 #[test]
 fn 下标越界报错() {
-    assert!(err_of("list xs = [1]\nprint(xs[5])").contains("越界"));
+    assert!(err_of("list xs = [1]\nprint(xs[5])").contains("超出范围"));
 }
 
 #[test]

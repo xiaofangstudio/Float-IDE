@@ -1,0 +1,262 @@
+### 函数当值传变量
+function double(x)
+    return x * 2
+fn g = double
+print(g(5))
+
+### 闭包捕获外层变量
+int n = 10
+function addn(x)
+    return x + n
+print(addn(5))
+
+### 嵌套函数内定义函数
+function outer()
+    function inner()
+        return 7
+    return inner()
+print(outer())
+
+### 字典方法调用取值
+dict d = {"a": 1, "b": 2}
+print(d.keys())
+
+### 表达式结果直接点方法
+list xs = [3, 1, 2]
+print(xs.sort())
+
+### 字符串链式方法
+str s = " Ab C "
+print(s.trim().upper())
+
+### and or not 关键字
+int a = 1
+int b = 2
+if a == 1 and b == 2
+    print("both")
+if not (a == 2)
+    print("not ok")
+
+### for in 带值变量
+list xs = [10, 20]
+for i, v in xs
+    print(i, v)
+
+### for in 字典
+dict d = {"x": 1}
+for k, v in d
+    print(k, v)
+
+### 负下标
+list xs = [1, 2, 3]
+print(xs[-1])
+
+### 切片
+list xs = [1, 2, 3, 4]
+print(xs[1:3])
+
+### 三元链
+int x = 5
+str r = x > 3 ? "大" : x > 1 ? "中" : "小"
+print(r)
+
+### 方法调用后继续下标
+dict d = {"k": [1, 2, 3]}
+print(d["k"][1])
+
+### class 定义与实例
+class Point
+    int x = 0
+    int y = 0
+    function show()
+        return "{x},{y}"
+Point p = new Point(3, 4)
+print(p.show())
+
+### try catch
+try
+    int a = 1 / 0
+catch e
+    print("caught", e)
+
+### throw 与 catch 消息
+try
+    throw "boom"
+catch e
+    print(e)
+
+### 解构
+function two()
+    return [1, 2]
+a, b = two()
+print(a + b)
+
+### 默认参数
+function greet(name = "世界")
+    return "hi " + name
+print(greet())
+print(greet("铜"))
+
+### 可变参数 arguments
+function f()
+    return len(arguments)
+print(f(1, 2, 3))
+
+### 递归函数
+function fib(n)
+    if n < 2
+        return n
+    return fib(n - 1) + fib(n - 2)
+print(fib(10))
+
+### 函数先调用后定义
+print(later())
+function later()
+    return "ok"
+
+### stop 中止
+int i = 0
+while true
+    i += 1
+    if i > 3
+        stop
+print(i)
+
+### if out 条件跳出
+int i = 0
+repeat 10
+    i += 1
+    if out i > 4
+print(i)
+
+### wait until
+time reset
+print("t")
+
+### 全角引号字符串
+dict d = {"键": "值"}
+print(d["键"])
+
+### f{} 拼接嵌套调用
+int n = 3
+print(f{"值=", n, "!"})
+
+### 位运算
+int a = 6
+print(a & 3, a | 1, a ^ 5, a << 2, a >> 1)
+
+### 自增自减前缀后缀
+int i = 5
+i++
+++i
+i--
+print(i)
+
+### 指针 addr read write
+int x = 42
+ptr p = addr(x)
+write(p, 7)
+print(read(p))
+
+### 多返回值解构下标
+dict d = {"a": {"b": [1, 2]}}
+print(d["a"]["b"][0])
+
+### 空函数体调用
+function noop()
+print(noop() == null)
+
+### 长运算符链
+print(1 + 2 + 3 + 4 + 5 + 6)
+
+### 一元负与取负链
+print(-(-5))
+print(--5 == 3)
+
+### 函数赋值不带 fn 关键字
+function double(x)
+    return x * 2
+g = double
+print(g(5))
+
+### 前缀自增
+int i = 5
+++i
+print(i)
+
+### elif 分支
+int x = 2
+if x == 1
+    print("一")
+elif x == 2
+    print("二")
+else
+    print("其他")
+
+### 成员赋值与复合赋值
+dict d = {"n": 1}
+d.n += 5
+print(d.n)
+
+### 下标复合赋值
+list xs = [1, 2]
+xs[0] += 10
+print(xs[0])
+
+### 类带 init
+class P
+    int x = 0
+    function init(px)
+        x = px
+    function get()
+        return x
+P p = new P(9)
+print(p.get())
+
+### 函数比较与打印
+function f()
+    return 1
+print(f)
+
+### 字符串下标
+str s = "abc"
+print(s[1])
+
+### 字符串切片
+str s = "abcdef"
+print(s[1:3])
+
+### 列表迭代给下标值
+list xs = ["a", "b"]
+for i, v in xs
+    print(i, v)
+
+### while else / 循环标签
+int n = 0
+while n < 3
+    n += 1
+print(n)
+
+### 字典字面量表达式键
+int k = 5
+dict d = {k: 1}
+print(d[5])
+
+### null 比较
+print(null == null)
+int x = null
+print(x == null)
+
+### 布尔短路验证副作用
+function side(tag, v)
+    print("eval", tag)
+    return v
+int r = false and side("A", true)
+print(r)
+
+### 传列表给函数并修改
+function fill(xs)
+    xs.push(99)
+list xs = [1]
+fill(xs)
+print(xs)

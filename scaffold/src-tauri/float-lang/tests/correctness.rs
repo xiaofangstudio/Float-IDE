@@ -320,7 +320,7 @@ fn 字典遍历与取值() {
 #[test]
 fn 除零会报错而不是崩() {
     let e = run_source("print(1 / 0)\n").unwrap_err();
-    assert!(e.message.contains("除数为 0"), "实际：{}", e.message);
+    assert!(e.message.contains("除数不能为 0"), "实际：{}", e.message);
 }
 
 #[test]
@@ -332,7 +332,7 @@ fn 步长为零会报错() {
 #[test]
 fn 下标越界会报错() {
     let e = run_source("list xs = [1]\nprint(xs[5])\n").unwrap_err();
-    assert!(e.message.contains("越界"), "实际：{}", e.message);
+    assert!(e.message.contains("超出范围"), "实际：{}", e.message);
 }
 
 #[test]

@@ -70,6 +70,7 @@ pub fn run() {
             commands::project::recent_push,
             commands::project::recent_remove,
             commands::lang::lang_run,
+            commands::lang::lang_input,
             commands::lang::lang_check,
             commands::project::pick_folder,
             commands::project::pick_open_file,

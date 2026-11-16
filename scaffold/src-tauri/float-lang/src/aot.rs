@@ -452,6 +452,10 @@ fn scan_expr(e: &Expr) -> Result<(), AotError> {
             scan_expr(obj)?;
             scan_expr(index)
         }
+        ExprKind::Slice { obj, from, to } => {
+            // AOT 这版先不跟切片：明确报「没实现」，别生成跑不对的代码
+            Err(AotError::unsupported("切片 xs[a:b]（AOT 暂不支持，用 F5 跑）", e.span.line))
+        }
         ExprKind::Member { obj, .. } => scan_expr(obj),
         ExprKind::Call { callee, args } => {
             if let ExprKind::Var(n) = &callee.kind {
@@ -1427,6 +1431,9 @@ fn emit_expr(cg: &mut Cg, e: &Expr) -> Result<String, AotError> {
             // 这里直接拒绝，交给 VM 报「变量没有定义」——两边行为一致。
             Err(AotError::msg(format!("变量「{}」没有定义（第 {} 行）", name, e.span.line)))
         }
+        ExprKind::Lambda { .. } => Err(AotError::msg(
+            "AOT 暂不支持内联函数 fn(x) return …（请用 function 定义），解释器 / F5 里可以用"
+        )),
         ExprKind::SelfRef => Ok("c_self.clone()".into()),
         ExprKind::List(items) => {
             // 大表格：编成紧凑数据串，运行时一次解析（否则几千条语句会把 rustc 拖死）
@@ -1538,6 +1545,9 @@ fn emit_expr(cg: &mut Cg, e: &Expr) -> Result<String, AotError> {
             let ii = emit_expr(cg, index)?;
             Ok(format!("index_get(&({}), &({})){}", oo, ii, em(e)))
         }
+        ExprKind::Slice { .. } => {
+            Err(AotError::unsupported("切片 xs[a:b]（AOT 暂不支持，用 F5 跑）", e.span.line))
+        }
         ExprKind::Member { obj, name } => {
             let oo = emit_expr(cg, obj)?;
             Ok(format!("member_get(&({}), {}){}", oo, lit_str(name), em(e)))
@@ -1595,6 +1605,20 @@ fn emit_expr(cg: &mut Cg, e: &Expr) -> Result<String, AotError> {
 
 /// 调用：用户函数（补默认值）→ 内建 → 动态（一等公民函数值）
 fn emit_call(cg: &mut Cg, name: &str, args: &[Expr], e: &Expr) -> Result<String, AotError> {
+    // 9 个回调式高阶函数在 VM 里是编译期内联展开（bytecode::emit_hof），
+    // stdlib 运行时并没有对应实现，AOT 也不会生成回调闭包。若照常走
+    // call_builtin("data.map", …) 会"编译通过但运行报错"，所以这里明确拒绝，
+    // 交回 F5 VM 执行（和 lambda / 切片 / ask 同一策略）。
+    if matches!(
+        name,
+        "data.map" | "data.filter" | "data.reduce" | "data.groupby" | "data.index_by"
+            | "data.any" | "data.all" | "data.find" | "data.find_index"
+    ) {
+        return Err(AotError::unsupported(
+            &format!("高阶函数 {}（AOT 暂不支持回调，请用 F5 运行）", name),
+            e.span.line,
+        ));
+    }
     let aa = emit_args(cg, args)?;
 
     let meta_clone = cg.meta.get(name).cloned();
@@ -1843,6 +1867,11 @@ fn count_nodes(s: &Stmt) -> usize {
             ExprKind::Bin { a, b, .. } => 1 + expr_nodes(a) + expr_nodes(b),
             ExprKind::Ternary { cond, a, b } => 1 + expr_nodes(cond) + expr_nodes(a) + expr_nodes(b),
             ExprKind::Idx { obj, index } => 1 + expr_nodes(obj) + expr_nodes(index),
+            ExprKind::Slice { obj, from, to } => {
+                1 + expr_nodes(obj)
+                    + from.as_ref().map(|x| expr_nodes(x)).unwrap_or(0)
+                    + to.as_ref().map(|x| expr_nodes(x)).unwrap_or(0)
+            }
             ExprKind::Member { obj, .. } => 1 + expr_nodes(obj),
             ExprKind::Call { callee, args } => 1 + expr_nodes(callee) + args.iter().map(expr_nodes).sum::<usize>(),
             ExprKind::New { args, .. } => 1 + args.iter().map(expr_nodes).sum::<usize>(),

@@ -42,6 +42,17 @@ fn 未定义变量在翻译期就报() {
 }
 
 #[test]
+fn 回调式高阶函数在_AOT_明确拒绝() {
+    // data.map 等 9 个 HOF 只在 VM 里编译期内联展开，stdlib 运行时没有实现。
+    // AOT 不能生成 call_builtin("data.map", …)（会编译通过但运行报错），
+    // 必须明确拒绝并交回 F5。
+    let src = "list xs = [1, 2]\nfn twice(x)\n    return x * 2\nprint(data.map(xs, twice))\n";
+    let e = emit(src).expect_err("高阶函数应该拒绝");
+    assert!(e.message.contains("高阶函数"), "原因要说清楚：{}", e.message);
+    assert!(e.message.contains("F5"), "要给出改法：{}", e.message);
+}
+
+#[test]
 fn 类能翻出构造与方法分派() {
     let r = emit("class Dog\n    str name = \"\"\n    fn init(n)\n        name = n\n    fn bark()\n        return name + \"汪\"\nDog d = new Dog(\"大黄\")\nprint(d.bark())\n")
         .expect("类应该能翻");
