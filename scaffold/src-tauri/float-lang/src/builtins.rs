@@ -49,12 +49,12 @@ pub fn builtin_static(name: &str) -> Option<&'static str> {
 }
 
 /// 正式名字表。**全英文**——语言是给程序员用的，不搞易语言那套中文关键字。
-pub const BUILTIN_NAMES: [&str; 101] = [
+pub const BUILTIN_NAMES: [&str; 103] = [
     "dictallkey", "dictallval", "sorted",
     "alloc", "free",
     "len", "str", "int", "float", "bool", "type", "abs", "floor", "ceil", "round", "sqrt", "pow",
     "mod", "min", "max", "idiv", "random", "rand", "range", "sin", "cos", "tan", "sqrt2", "log", "exp", "join",
-    "upper", "lower", "trim", "split", "substr", "strlen", "contain", "indexof", "char", "listin",
+    "upper", "lower", "trim", "split", "substr", "strlen", "contain", "indexof", "char", "charcode", "charfrom", "listin",
     "dictin", "not", "and", "or", "eq", "lt", "gt",
     "add", "sub", "mul", "div",
     // 数学（对标 Python math 的能力，名字沿用大家熟的那批）
@@ -393,6 +393,30 @@ pub fn call_builtin(name: &str, args: &[Value]) -> R<Value> {
                 return Err(format!("char 下标 {} 越界", i));
             }
             Ok(Value::string(chars[idx as usize].to_string()))
+        }
+        // charcode(s, i)：第 i 个字符的 Unicode 码点（自举 lexer 判字符类别的
+        // 基础件：中文区段、字母、数字都靠它）。越界明确报错，不静默给 -1。
+        "charcode" => {
+            need(args, 2, "charcode")?;
+            let s = s_of(&args[0]);
+            let i = int_of(&args[1], "charcode")?;
+            let chars: Vec<char> = s.chars().collect();
+            let idx = if i < 0 { i + chars.len() as i64 } else { i };
+            if idx < 0 || idx as usize >= chars.len() {
+                return Err(format!("charcode 下标 {} 越界", i));
+            }
+            Ok(Value::Int(chars[idx as usize] as u32 as i64))
+        }
+        // charfrom(n)：码点 → 单字符字符串（charcode 的逆，构造字符/转义输出用）。
+        // 0、代理区、超出 Unicode 的码点明确报错，不静默出废字符。
+        "charfrom" => {
+            need(args, 1, "charfrom")?;
+            let n = int_of(&args[0], "charfrom")?;
+            if n <= 0 || n > 0x10FFFF as i64 || (0xD800..=0xDFFF).contains(&n) {
+                return Err(format!("charfrom 码点 {} 不是合法字符", n));
+            }
+            let c = char::from_u32(n as u32).ok_or_else(|| format!("charfrom 码点 {} 不是合法字符", n))?;
+            Ok(Value::string(c.to_string()))
         }
         "listin" => {
             need(args, 2, "listin")?;

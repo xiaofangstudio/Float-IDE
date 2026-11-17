@@ -1,0 +1,742 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+/* colang：Copper 自举编译器的「环境层」扩展
+/* 依赖前面已有的词法器 + 递归下降语法器（真 AST，不是正则糊弄）
+/* 提供：JSON 形式 AST 输出、结构统计、体检报告、命令行驱动
+/* 注意：Copper 字符串字面量里不能出现裸括号类字符，
+/*      所以 JSON 的括号一律用 charfrom 现造
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── 字符常量 ── */
+
+function jq()
+    return charfrom(34)
+
+function jbs()
+    return charfrom(92)
+
+function lb()
+    return charfrom(123)
+
+function rb()
+    return charfrom(125)
+
+function sl()
+    return charfrom(91)
+
+function sr()
+    return charfrom(93)
+
+function sep()
+    return ","
+
+/* ── JSON 拼装器 ── */
+
+function json_esc(s)
+    let n = strlen(s)
+    let out = ""
+    let i = 0
+    while i < n
+        let code = cc(s, i)
+        if code == 34
+            out = out + jbs() + jq()
+        elif code == 92
+            out = out + jbs() + jbs()
+        elif code == 10
+            out = out + jbs() + "n"
+        elif code == 13
+            out = out + jbs() + "r"
+        elif code == 9
+            out = out + jbs() + "t"
+        elif code < 32
+            out = out + " "
+        else
+            out = out + cw(s, i)
+        i += 1
+    return out
+
+function j_str(s)
+    if s == null
+        return "null"
+    return jq() + json_esc(s) + jq()
+
+function j_num(n)
+    if n == null
+        return "null"
+    return str(n)
+
+/* 一个字段：key 用原样，值已经是 JSON 文本 */
+function jf_to(raw)
+    return jq() + "t" + "o" + jq() + ":" + raw
+
+function jf(key, raw)
+    return jq() + key + jq() + ":" + raw
+
+/* 一个字段：值是字符串 */
+function jfs(key, v)
+    return jq() + key + jq() + ":" + j_str(v)
+
+function join_texts(items)
+    let out = ""
+    let i = 0
+    while i < len(items)
+        if i > 0
+            out = out + sep()
+        out = out + items[i]
+        i += 1
+    return out
+
+function j_obj(fields)
+    return lb() + join_texts(fields) + rb()
+
+function j_arr(items)
+    return sl() + join_texts(items) + sr()
+
+/* ── 表达式 → JSON ── */
+
+function j_exprs(items)
+    let out = []
+    let i = 0
+    while i < len(items)
+        add j_expr(items[i]) to out
+        i += 1
+    return j_arr(out)
+
+function j_pairs(pairs)
+    let out = []
+    let i = 0
+    while i < len(pairs)
+        let pr = pairs[i]
+        let one = []
+        add j_expr(pr[0]) to one
+        add j_expr(pr[1]) to one
+        add j_arr(one) to out
+        i += 1
+    return j_arr(out)
+
+function j_params(params)
+    let out = []
+    let i = 0
+    while i < len(params)
+        let p = params[i]
+        let f = []
+        add jfs("n", p["n"]) to f
+        add jf("ty",  j_str(p["ty"])) to f
+        add j_obj(f) to out
+        i += 1
+    return j_arr(out)
+
+function j_expr(e)
+    if e == null
+        return "null"
+    let k = e["k"]
+    let f = []
+    add jfs("k", k) to f
+    if k == "Num"
+        add jf("v",  j_num(e["v"])) to f
+        return j_obj(f)
+    if k == "Str"
+        add jf("v",  j_str(e["v"])) to f
+        return j_obj(f)
+    if k == "Bool"
+        add jf("v",  j_str(e["v"])) to f
+        return j_obj(f)
+    if k == "Null"
+        return j_obj(f)
+    if k == "Var"
+        add jfs("v", e["v"]) to f
+        return j_obj(f)
+    if k == "Self"
+        return j_obj(f)
+    if k == "List"
+        add jf("v",  j_exprs(e["v"])) to f
+        return j_obj(f)
+    if k == "Dict"
+        add jf("v",  j_pairs(e["v"])) to f
+        return j_obj(f)
+    if k == "Un"
+        add jfs("op", e["op"]) to f
+        add jf("a",  j_expr(e["a"])) to f
+        return j_obj(f)
+    if k == "Bin"
+        add jfs("op", e["op"]) to f
+        add jf("a",  j_expr(e["a"])) to f
+        add jf("b",  j_expr(e["b"])) to f
+        return j_obj(f)
+    if k == "Tern"
+        add jf("c",  j_expr(e["c"])) to f
+        add jf("a",  j_expr(e["a"])) to f
+        add jf("b",  j_expr(e["b"])) to f
+        return j_obj(f)
+    if k == "Idx"
+        add jf("o",  j_expr(e["o"])) to f
+        add jf("i",  j_expr(e["i"])) to f
+        return j_obj(f)
+    if k == "Slice"
+        add jf("o",  j_expr(e["o"])) to f
+        add jf("f",  j_expr(e["f"])) to f
+        add jf("t",  j_expr(e["t"])) to f
+        return j_obj(f)
+    if k == "Member"
+        add jfs("n", e["n"]) to f
+        add jf("o",  j_expr(e["o"])) to f
+        return j_obj(f)
+    if k == "Call"
+        add jf("c",  j_expr(e["c"])) to f
+        add jf("args",  j_exprs(e["args"])) to f
+        return j_obj(f)
+    if k == "New"
+        add jfs("n", e["n"]) to f
+        add jf("args",  j_exprs(e["args"])) to f
+        return j_obj(f)
+    if k == "Lambda"
+        add jf("params",  j_params(e["params"])) to f
+        add jf("body",  j_expr(e["body"])) to f
+        return j_obj(f)
+    add jfs("k", "Unsupported") to f
+    return j_obj(f)
+
+/* ── 赋值目标 → JSON ── */
+
+function j_target(t)
+    if t == null
+        return "null"
+    let k = t["k"]
+    let f = []
+    add jfs("k", k) to f
+    if k == "TVar"
+        add jfs("n", t["n"]) to f
+        return j_obj(f)
+    if k == "TMember"
+        add jfs("n", t["n"]) to f
+        add jf("o",  j_expr(t["o"])) to f
+        return j_obj(f)
+    if k == "TIdx"
+        add jf("o",  j_expr(t["o"])) to f
+        add jf("i",  j_expr(t["i"])) to f
+        return j_obj(f)
+    if k == "TDeref"
+        add jf("e",  j_expr(t["e"])) to f
+        return j_obj(f)
+    return j_obj(f)
+
+/* ── 语句 → JSON ── */
+
+function j_stmts(items)
+    let out = []
+    let i = 0
+    while i < len(items)
+        add j_stmt(items[i]) to out
+        i += 1
+    return j_arr(out)
+
+function j_body(items)
+    if items == null
+        return "null"
+    return j_stmts(items)
+
+function j_branches(brs)
+    let out = []
+    let i = 0
+    while i < len(brs)
+        let f = []
+        add jf("cond",  j_expr(brs[i][0])) to f
+        add jf("body",  j_stmts(brs[i][1])) to f
+        add j_obj(f) to out
+        i += 1
+    return j_arr(out)
+
+function j_stmt(s)
+    let k = s["k"]
+    let f = []
+    add jfs("k", k) to f
+    add jf("ln",  j_num(s["ln"])) to f
+    if k == "Decl"
+        add jfs("ty", s["ty"]) to f
+        add jfs("n", s["n"]) to f
+        add jf("init",  j_expr(s["init"])) to f
+        return j_obj(f)
+    if k == "Assign"
+        add jfs("op", s["op"]) to f
+        add jf("t",  j_target(s["t"])) to f
+        add jf("v",  j_expr(s["v"])) to f
+        return j_obj(f)
+    if k == "IncDec"
+        add jf("d",  j_num(s["d"])) to f
+        add jf("p",  j_str(s["p"])) to f
+        add jf("t",  j_target(s["t"])) to f
+        return j_obj(f)
+    if k == "Expr"
+        add jf("e",  j_expr(s["e"])) to f
+        return j_obj(f)
+    if k == "Print"
+        add jf("args",  j_exprs(s["args"])) to f
+        return j_obj(f)
+    if k == "Report"
+        add jf("args",  j_exprs(s["args"])) to f
+        return j_obj(f)
+    if k == "Debug"
+        add jf("lv",  j_num(s["lv"])) to f
+        add jf("args",  j_exprs(s["args"])) to f
+        return j_obj(f)
+    if k == "Ask"
+        add jf("e",  j_expr(s["e"])) to f
+        return j_obj(f)
+    if k == "If"
+        add jf("branches",  j_branches(s["branches"])) to f
+        add jf("else",  j_body(s["else"])) to f
+        return j_obj(f)
+    if k == "While"
+        add jf("cond",  j_expr(s["cond"])) to f
+        add jf("body",  j_stmts(s["body"])) to f
+        return j_obj(f)
+    if k == "Repeat"
+        add jf("count",  j_expr(s["count"])) to f
+        add jf("body",  j_stmts(s["body"])) to f
+        return j_obj(f)
+    if k == "ForRange"
+        add jfs("var", s["var"]) to f
+        add jf("incl",  j_str(s["incl"])) to f
+        add jf("from",  j_expr(s["from"])) to f
+        f.push(jf_to(j_expr(s["to"])))
+        add jf("step",  j_expr(s["step"])) to f
+        add jf("body",  j_stmts(s["body"])) to f
+        return j_obj(f)
+    if k == "ForIn"
+        add jfs("var", s["var"]) to f
+        add jf("val",  j_str(s["val"])) to f
+        add jf("iter",  j_expr(s["iter"])) to f
+        add jf("body",  j_stmts(s["body"])) to f
+        return j_obj(f)
+    if k == "Destructure"
+        add jf("names",  j_strs(s["names"])) to f
+        add jf("v",  j_expr(s["v"])) to f
+        return j_obj(f)
+    if k == "IfOut"
+        add jf("e",  j_expr(s["e"])) to f
+        return j_obj(f)
+    if k == "WaitUntil"
+        add jf("cond",  j_expr(s["cond"])) to f
+        add jf("body",  j_stmts(s["body"])) to f
+        return j_obj(f)
+    if k == "TimeRead"
+        return j_obj(f)
+    if k == "TimeReset"
+        return j_obj(f)
+    if k == "Break"
+        return j_obj(f)
+    if k == "Continue"
+        return j_obj(f)
+    if k == "Stop"
+        return j_obj(f)
+    if k == "Nop"
+        return j_obj(f)
+    if k == "Return"
+        add jf("e",  j_expr(s["e"])) to f
+        return j_obj(f)
+    if k == "Throw"
+        add jf("e",  j_expr(s["e"])) to f
+        return j_obj(f)
+    if k == "FuncDef"
+        add jfs("n", s["n"]) to f
+        add jf("ret",  j_str(s["ret"])) to f
+        add jf("params",  j_params(s["params"])) to f
+        add jf("body",  j_stmts(s["body"])) to f
+        return j_obj(f)
+    if k == "Try"
+        add jfs("catch", s["catch"]) to f
+        add jf("body",  j_stmts(s["body"])) to f
+        add jf("cbody",  j_body(s["cbody"])) to f
+        add jf("fin",  j_body(s["fin"])) to f
+        return j_obj(f)
+    if k == "Group"
+        add jf("list",  j_stmts(s["list"])) to f
+        return j_obj(f)
+    return j_obj(f)
+
+function j_strs(items)
+    let out = []
+    let i = 0
+    while i < len(items)
+        add j_str(items[i]) to out
+        i += 1
+    return j_arr(out)
+
+/* ── 结构统计 ── */
+
+function new_stats()
+    return {"stmts": 0, "funcs": 0, "classes": 0, "exprs": 0, "decls": 0, "calls": 0, "depth": 0, "maxbody": 0}
+
+function count_expr(e, sv, depth)
+    if e == null
+        return ""
+    sv["exprs"] += 1
+    if depth > sv["depth"]
+        sv["depth"] = depth
+    let k = e["k"]
+    if k == "Bin"
+        count_expr(e["a"], sv, depth + 1)
+        count_expr(e["b"], sv, depth + 1)
+        return ""
+    if k == "Tern"
+        count_expr(e["c"], sv, depth + 1)
+        count_expr(e["a"], sv, depth + 1)
+        count_expr(e["b"], sv, depth + 1)
+        return ""
+    if k == "Un"
+        count_expr(e["a"], sv, depth + 1)
+        return ""
+    if k == "Call"
+        sv["calls"] += 1
+        count_expr(e["c"], sv, depth + 1)
+        count_list_expr(e["args"], sv, depth + 1)
+        return ""
+    if k == "New"
+        count_list_expr(e["args"], sv, depth + 1)
+        return ""
+    if k == "Idx"
+        count_expr(e["o"], sv, depth + 1)
+        count_expr(e["i"], sv, depth + 1)
+        return ""
+    if k == "Slice"
+        count_expr(e["o"], sv, depth + 1)
+        count_expr(e["f"], sv, depth + 1)
+        count_expr(e["t"], sv, depth + 1)
+        return ""
+    if k == "Member"
+        count_expr(e["o"], sv, depth + 1)
+        return ""
+    if k == "List"
+        count_list_expr(e["v"], sv, depth + 1)
+        return ""
+    if k == "Dict"
+        let pairs = e["v"]
+        let i = 0
+        while i < len(pairs)
+            count_expr(pairs[i][0], sv, depth + 1)
+            count_expr(pairs[i][1], sv, depth + 1)
+            i += 1
+        return ""
+    if k == "Lambda"
+        count_expr(e["body"], sv, depth + 1)
+        return ""
+    return ""
+
+function count_list_expr(items, sv, depth)
+    let i = 0
+    while i < len(items)
+        count_expr(items[i], sv, depth)
+        i += 1
+    return ""
+
+function count_stmts(items, sv, depth)
+    let i = 0
+    while i < len(items)
+        count_stmt(items[i], sv, depth)
+        i += 1
+    if len(items) > sv["maxbody"]
+        sv["maxbody"] = len(items)
+    return ""
+
+function count_stmt(s, sv, depth)
+    sv["stmts"] += 1
+    if depth > sv["depth"]
+        sv["depth"] = depth
+    let k = s["k"]
+    if k == "Decl"
+        sv["decls"] += 1
+        count_expr(s["init"], sv, depth + 1)
+        return ""
+    if k == "Assign"
+        count_expr(s["v"], sv, depth + 1)
+        return ""
+    if k == "IncDec"
+        return ""
+    if k == "Expr"
+        count_expr(s["e"], sv, depth + 1)
+        return ""
+    if k == "Print"
+        count_list_expr(s["args"], sv, depth + 1)
+        return ""
+    if k == "Report"
+        count_list_expr(s["args"], sv, depth + 1)
+        return ""
+    if k == "Debug"
+        count_list_expr(s["args"], sv, depth + 1)
+        return ""
+    if k == "Ask"
+        count_expr(s["e"], sv, depth + 1)
+        return ""
+    if k == "If"
+        let brs = s["branches"]
+        let i = 0
+        while i < len(brs)
+            count_expr(brs[i][0], sv, depth + 1)
+            count_stmts(brs[i][1], sv, depth + 1)
+            i += 1
+        if s["else"] != null
+            count_stmts(s["else"], sv, depth + 1)
+        return ""
+    if k == "While"
+        count_expr(s["cond"], sv, depth + 1)
+        count_stmts(s["body"], sv, depth + 1)
+        return ""
+    if k == "Repeat"
+        count_expr(s["count"], sv, depth + 1)
+        count_stmts(s["body"], sv, depth + 1)
+        return ""
+    if k == "ForRange"
+        count_expr(s["from"], sv, depth + 1)
+        count_expr(s["to"], sv, depth + 1)
+        count_expr(s["step"], sv, depth + 1)
+        count_stmts(s["body"], sv, depth + 1)
+        return ""
+    if k == "ForIn"
+        count_expr(s["iter"], sv, depth + 1)
+        count_stmts(s["body"], sv, depth + 1)
+        return ""
+    if k == "Destructure"
+        count_expr(s["v"], sv, depth + 1)
+        return ""
+    if k == "IfOut"
+        count_expr(s["e"], sv, depth + 1)
+        return ""
+    if k == "WaitUntil"
+        count_expr(s["cond"], sv, depth + 1)
+        count_stmts(s["body"], sv, depth + 1)
+        return ""
+    if k == "Return"
+        count_expr(s["e"], sv, depth + 1)
+        return ""
+    if k == "Throw"
+        count_expr(s["e"], sv, depth + 1)
+        return ""
+    if k == "FuncDef"
+        sv["funcs"] += 1
+        count_stmts(s["body"], sv, depth + 1)
+        return ""
+    if k == "Try"
+        count_stmts(s["body"], sv, depth + 1)
+        if s["cbody"] != null
+            count_stmts(s["cbody"], sv, depth + 1)
+        if s["fin"] != null
+            count_stmts(s["fin"], sv, depth + 1)
+        return ""
+    if k == "Group"
+        sv["classes"] += 1
+        count_stmts(s["list"], sv, depth + 1)
+        return ""
+    return ""
+
+/* ── 体检：只查结构上确实错的（不猜） ── */
+
+function lint_stmts(items, ctx, out)
+    let i = 0
+    while i < len(items)
+        lint_stmt(items[i], ctx, out)
+        i += 1
+    return ""
+
+function lint_exprs(items, out)
+    let i = 0
+    while i < len(items)
+        lint_expr(items[i], out)
+        i += 1
+    return ""
+
+function lint_stmt(s, ctx, out)
+    let k = s["k"]
+    if k == "Break" or k == "Continue"
+        if ctx["loop"] < 1
+            add {"ln": s["ln"], "msg": "break/continue 只能写在循环里面"} to out
+        return ""
+    if k == "Return"
+        if ctx["func"] < 1
+            add {"ln": s["ln"], "msg": "return 只能写在函数里面"} to out
+        lint_expr(s["e"], out)
+        return ""
+    if k == "FuncDef"
+        let inner = {"loop": 0, "func": 1}
+        let names = []
+        let i = 0
+        while i < len(s["params"])
+            let pn = s["params"][i]["n"]
+            if list_has(names, pn)
+                add {"ln": s["ln"], "msg": "参数重名「" + pn + "」"} to out
+            add pn to names
+            i += 1
+        lint_stmts(s["body"], inner, out)
+        return ""
+    if k == "While"
+        lint_expr(s["cond"], out)
+        let inner = {"loop": ctx["loop"] + 1, "func": ctx["func"]}
+        lint_stmts(s["body"], inner, out)
+        return ""
+    if k == "Repeat"
+        lint_expr(s["count"], out)
+        let inner = {"loop": ctx["loop"] + 1, "func": ctx["func"]}
+        lint_stmts(s["body"], inner, out)
+        return ""
+    if k == "ForRange"
+        lint_expr(s["from"], out)
+        lint_expr(s["to"], out)
+        lint_expr(s["step"], out)
+        let inner = {"loop": ctx["loop"] + 1, "func": ctx["func"]}
+        lint_stmts(s["body"], inner, out)
+        return ""
+    if k == "ForIn"
+        lint_expr(s["iter"], out)
+        let inner = {"loop": ctx["loop"] + 1, "func": ctx["func"]}
+        lint_stmts(s["body"], inner, out)
+        return ""
+    if k == "WaitUntil"
+        lint_expr(s["cond"], out)
+        let inner = {"loop": ctx["loop"] + 1, "func": ctx["func"]}
+        lint_stmts(s["body"], inner, out)
+        return ""
+    if k == "If"
+        let brs = s["branches"]
+        let i = 0
+        while i < len(brs)
+            lint_expr(brs[i][0], out)
+            lint_stmts(brs[i][1], ctx, out)
+            i += 1
+        if s["else"] != null
+            lint_stmts(s["else"], ctx, out)
+        return ""
+    if k == "Try"
+        lint_stmts(s["body"], ctx, out)
+        if s["cbody"] != null
+            lint_stmts(s["cbody"], ctx, out)
+        if s["fin"] != null
+            lint_stmts(s["fin"], ctx, out)
+        return ""
+    if k == "Group"
+        lint_stmts(s["list"], ctx, out)
+        return ""
+    if k == "Decl"
+        lint_expr(s["init"], out)
+        return ""
+    if k == "Assign"
+        lint_expr(s["v"], out)
+        return ""
+    if k == "Expr"
+        lint_expr(s["e"], out)
+        return ""
+    if k == "Print" or k == "Report" or k == "Debug"
+        lint_exprs(s["args"], out)
+        return ""
+    if k == "Throw"
+        lint_expr(s["e"], out)
+        return ""
+    if k == "Ask"
+        lint_expr(s["e"], out)
+        return ""
+    return ""
+
+function lint_expr(e, out)
+    if e == null
+        return ""
+    let k = e["k"]
+    if k == "Bin"
+        lint_expr(e["a"], out)
+        lint_expr(e["b"], out)
+        return ""
+    if k == "Tern"
+        lint_expr(e["c"], out)
+        lint_expr(e["a"], out)
+        lint_expr(e["b"], out)
+        return ""
+    if k == "Un"
+        lint_expr(e["a"], out)
+        return ""
+    if k == "Call"
+        lint_expr(e["c"], out)
+        lint_exprs(e["args"], out)
+        return ""
+    if k == "New"
+        lint_exprs(e["args"], out)
+        return ""
+    if k == "Idx"
+        lint_expr(e["o"], out)
+        lint_expr(e["i"], out)
+        return ""
+    if k == "Slice"
+        lint_expr(e["o"], out)
+        lint_expr(e["f"], out)
+        lint_expr(e["t"], out)
+        return ""
+    if k == "Member"
+        lint_expr(e["o"], out)
+        return ""
+    if k == "List"
+        lint_exprs(e["v"], out)
+        return ""
+    if k == "Dict"
+        let pairs = e["v"]
+        let i = 0
+        while i < len(pairs)
+            lint_expr(pairs[i][0], out)
+            lint_expr(pairs[i][1], out)
+            i += 1
+        return ""
+    if k == "Lambda"
+        lint_expr(e["body"], out)
+        return ""
+    return ""
+
+/* ── 报告 ── */
+
+function stats_line(sv)
+    return "语句 " + str(sv["stmts"]) + " / 函数 " + str(sv["funcs"]) + " / 类 " + str(sv["classes"]) + " / 表达式 " + str(sv["exprs"]) + " / 调用 " + str(sv["calls"]) + " / 最大嵌套 " + str(sv["depth"]) + " / 最大块 " + str(sv["maxbody"])
+
+/* ── 命令行驱动 ──
+/* COLANG_TARGET：要处理的 .co
+/* COLANG_MODE：ast（默认，与 Rust 侧 ast_dump 同格式）/ json / stats / check */
+
+function colang_run(target)
+    if strlen(target) == 0
+        print("colang：没有给目标文件，请设环境变量 COLANG_TARGET")
+        return 1
+    if not hasfile(target)
+        print("colang：读不到文件「" + target + "」")
+        return 2
+    let r = parse_source(target)
+    if not r["ok"]
+        print("colang：语法有错 —— " + r["err"])
+        return 3
+    let mode = getenv("COLANG_MODE")
+    if strlen(mode) == 0
+        mode = "ast"
+    let sv = new_stats()
+    count_stmts(r["body"], sv, 1)
+    let bad = []
+    let ctx = {"loop": 0, "func": 0}
+    lint_stmts(r["body"], ctx, bad)
+    if mode == "stats"
+        print(stats_line(sv))
+        return 0
+    if mode == "json"
+        let f = []
+        add jfs("kind", "program") to f
+        add jfs("file", target) to f
+        add jf("stmts",  j_stmts(r["body"])) to f
+        print(j_obj(f))
+        return 0
+    if mode == "check"
+        if len(bad) == 0
+            print("colang：体检通过（" + stats_line(sv) + "）")
+            return 0
+        let i = 0
+        while i < len(bad)
+            print("  第 " + str(bad[i]["ln"]) + " 行：" + bad[i]["msg"])
+            i += 1
+        print("colang：体检发现 " + str(len(bad)) + " 处问题")
+        return 4
+    print("Program")
+    print_trim(dump_stmts(r["body"], 1))
+    return 0
+
+let colang_target = getenv("COLANG_TARGET")
+let colang_rc = colang_run(colang_target)
+if colang_rc != 0
+    print("退出码 " + str(colang_rc))

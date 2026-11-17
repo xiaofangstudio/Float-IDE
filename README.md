@@ -76,19 +76,39 @@ cargo run --release --example aot /* 你的脚本.co -o 程序.exe --run
 
 | 用例 | VM | AOT | CPython |
 |---|---|---|---|
-| fib(30) 递归 | 93.1 ms | **33.7 ms** | 124.4 ms |
+| fib(30) 递归 | 93.1 ms | **4.0 ms**（整型特化） | 124.4 ms |
 | 循环累加 500 万 | 79.5 ms | **0.8 ms** | 139.9 ms |
 | 字符串拼接 5 万 | 0.9 ms | **2.5 ms** | 3.0 ms |
 
-fib 是 CPython 的 **3.7 倍**、VM 的 2.8 倍；循环被 LLVM 直接算成了闭式解。
+fib 是 CPython 的 **31 倍**、VM 的 23 倍（整型特化把每层递归压到几个 `i64` 运算）；循环被 LLVM 直接算成了闭式解。
 字符串拼接两者同一档（VM 有就地追加，AOT 走同一份 `compound_value`）。
+
+**整型 / 浮点函数特化：热路径不再装箱**
+
+AOT 会先做一遍保守推断：一个函数的参数、局部变量、返回值全是整数、且体里没有全局变量、没有字符串/列表/字典混用，就整体编译成 `i64` 版本；浮点同理编译成 `f64` 版本（整型优先）。推断不通过就退回通用 `V` 值路径，**语义一个字不变**，只是慢了。
+
+特化后的递归函数每层只有一个 `u32` 深度计数加几个 `i64` 局部，帧约 100 字节。生成程序把 `main` 跑在 **512MB 虚拟预留的大栈线程**上（按需提交，递归不深几乎不占内存），递归上限因此从 VM 的 16384 层提到 **100 万层**。栈溢出仍由 `INT_CALL_DEPTH` 计数兜底报「递归太深」，不会 abort。
+
+**VM 侧同步放宽**：`CALL_DEPTH` 由 400 提到 16384，配套 `lang_run` 与 `examples/check` 都跑在 64MB 栈线程上——这个数字和线程栈是绑定的，新增运行入口必须同样套大栈线程。
+
+**AOT 现在也支持高阶函数与内联函数**
+
+`data.map` / `filter` / `reduce` / `groupby` / `index_by` / `any` / `all` / `find` / `find_index` 九个回调式高阶函数，从「VM 编译期内联展开」补齐成 AOT 的 prelude 运行时实现（`hof_run` / `hof_dispatch`），回调经静态表 / 注册表间接调用；内联 `fn(x) return …` 编译成隐藏函数 `__lambda_行_列`，发射 `V::Native` 引用。这条限制从此取消。
 
 **AOT 不支持什么（编译期明确报，自动回落 VM 跑，结果不变）**
 
 - 指针 `&` / `*`、`alloc` 之外的裸内存操作
 - `ask`（需要交互宿主）、`wait until`、`time read`
-- 函数里再定义函数、try 块里带 return/break/continue
+- 函数里定义具名函数、try 块里带 return/break/continue
 - 用到这些的脚本会打印「AOT 暂不支持：…（第 N 行）」，然后照常用 VM 出结果
+
+**Copper 环境：编译器从 IDE 里搬出去**
+
+IDE 不再自带一套编译，改为读环境（`commands/copper_env.rs`）。环境里是已经编好的 `copper.exe`（由 `bootstrap/colang.co` AOT 出来的）、自举版 `copper-self.exe` 和运行时前奏 `colang_rt.rs`。
+
+查找顺序：`COPPER_HOME` 环境变量 → 用户级 `%APPDATA%\Float\copper`（macOS/Linux 是 `~/.copper`）→ IDE 同级的 `copper_env/`（绿色版）。
+
+找不到就返回 `found = false`，界面提示「先装 Copper 环境」，**不静默退回内置实现**——静默降级会让人以为在用环境，实际没在用。对应命令：`copper_env_info` / `copper_env_compilers` / `copper_build`。
 
 **大工程：分块 + 增量编译**
 
@@ -424,7 +444,7 @@ Copper 保留了一批旧写法做兼容（老 .cw 文件不用改也能跑）�
 | **保存撞车** | Ctrl+S 与自动保存同时写同一文件；保存期间继续敲的代码会被标成已保存而丢掉 | 单文件写盘串行化 + 内容快照校验：只有「期间没再改动」才清脏标记 |
 | **语言核心绑死 DOM** | `interp.ts` 直接用 `window`，换个宿主就崩 | 宿主探测（`window` → `globalThis`），同一份运行时在浏览器 / Node 都能跑 |
 | **自引用容器** | `list a = [1]` + `add a to a` 之后 `print a` / 拷贝 / 比较 → 爆栈崩掉 | 环检测：打印成 `[1, …(循环)]`，拷贝与比较保持结构 |
-| **无限递归** | 报一句引擎的 `Maximum call stack size exceeded`，没行列、看不懂 | 统一上限 400 层，两条执行通道都报：「递归太深了（超过 400 层）… 多半是 f() 的结束条件没写对」 |
+| **无限递归** | 报一句引擎的 `Maximum call stack size exceeded`，没行列、看不懂 | 分档上限：VM 16384 层、AOT 特化 100 万层，报「递归太深了（超过 N 层）… 多半是 f() 的结束条件没写对」 |
 | **静默通过的坏代码** | `if` 不写条件 → 整段分支变成永不执行的死代码；顶层 `return` / `out` 被悄悄吞掉 | 全部给出诊断 |
 | **print 语法** | 只有 `print(x)` 能用，`print x` 报「看不懂」 | 括号可选，`print n` / `print a, b` 都可以 |
 
@@ -741,6 +761,15 @@ F5 交给 Rust 内核跑字节码 VM（快），F6 用内置解释器逐行跑�
 
 ## 近期更新
 
+### 未发布（2026-11-18）
+
+- **AOT 整型 / 浮点函数特化**：参数、局部、返回值全是 `i64`（或 `f64`）且不碰全局的函数，整体编译成原生数值路径，不再层层装箱；推断保守，不通过就退回通用 `V` 路径，语义不变。实测 `fib(30)` 从 33.7 ms 降到 **4.0 ms**。
+- **递归上限跨量级提升**：AOT 特化路径跑在 512MB 虚拟预留大栈线程上，递归上限 **100 万层**（帧约 100B）；VM 侧 `CALL_DEPTH` 400 → **16384**，配套入口统一换 64MB 栈线程，`INT_CALL_DEPTH` 计数兜底不 abort。
+- **AOT 支持九个高阶函数与内联函数**：`data.map/filter/reduce/groupby/index_by/any/all/find/find_index` 从「仅 VM 编译期内联」补齐为 AOT prelude 运行时（`hof_run` / `hof_dispatch`）；`fn(x) return …` 编译成隐藏函数 `__lambda_行_列` 并发射 `V::Native`，原来那条「AOT 不支持」的限制取消。
+- **Copper 环境接入**（`commands/copper_env.rs`）：IDE 改读外部工具链——`COPPER_HOME` → 用户级 `%APPDATA%\Float\copper` / `~/.copper` → 同级 `copper_env/`；新增 `copper_env_info` / `copper_env_compilers` / `copper_build` 三个命令，找不到就明说，不静默降级。
+- **自举实验产出**（`float-lang/bootstrap/`）：用 Copper 写的 Copper 编译器 `colang.co`（词法 / 语法 / 代码生成拆成 `copper_lex.co`、`copper_parse.co`、`colang_codegen.co`），经 AOT 编成 exe 后能编自己，二进制与中间导出不入库。
+- **AOT 调试开关**：`aot_debug_int` feature 打印整型特化推断结果；`examples/ast_dump.rs` / `dump_tokens.rs` 用于比对自举版与本体的 AST / token 流。
+
 ### 1.0.0（2026-11-17）
 
 - **类型声明有强制力**：`int x = "abc"` / `int x = 3.7` 编译就报错（TS 引擎同步对齐 Rust 内核），要转换用 `int()` / `str()` 显式转。
@@ -755,7 +784,7 @@ F5 交给 Rust 内核跑字节码 VM（快），F6 用内置解释器逐行跑�
 
 - **内联函数与闭包**（Rust 内核 / F5）：`fn(x) return x + base` 匿名函数、多行内联体、闭包各自持有独立环境；TS 兼容引擎同步支持。
 - **`lazy` 惰性参数**（Rust 内核）：按需求值，`AND2` / `OR2` 由此实现真短路（第二个参数不满足前置条件就不求值）。
-- **九个回调式高阶函数**（仅 Rust 内核 / F5）：`data.map` / `filter` / `reduce` / `groupby` / `index_by` / `any` / `all` / `find` / `find_index`；`any` / `all` 短路。**TS 兼容引擎没有回调通道，这 9 个只在 F5 可用**；AOT 明确不支持。
+- **九个回调式高阶函数**（仅 Rust 内核 / F5）：`data.map` / `filter` / `reduce` / `groupby` / `index_by` / `any` / `all` / `find` / `find_index`；`any` / `all` 短路。**TS 兼容引擎没有回调通道，这 9 个只在 F5 可用**。
 - **字典宽松取值**：缺键取下标 / 成员统一给 `null`，不再崩；新增 `data.require`（缺键报错）与 `data.get`（带默认值）。
 - **`ask` 真正阻塞**：Rust 内核新增 `lang_input` 通道，等待输入时不再空转，答案精确送回对应那次运行。
 - **补全列表键盘操作**：`↑` / `↓` 逐项、`PageUp` / `PageDown` 整页、`Enter` 选中，快捷键说明同步。

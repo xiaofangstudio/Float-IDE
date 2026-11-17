@@ -1,0 +1,3460 @@
+/* Copper 自举语法分析器（第 2a 步 · parser 自举）
+/* 与 Rust 引擎 src/parser.rs 语义对齐：缩进决定块范围，真递归下降建 AST。
+/* AST 用 dict 节点表示（kind 字段 + 子节点），不是正则糊弄，变量/字典/列表/作用域完整。
+/* 输入：环境变量 COPPER_PARSE_TARGET 指向的 .co 源码
+/* 输出：与 examples/ast_dump.rs 完全相同的规范化 AST 文本，逐行对拍用
+/*
+/* 支持：变量声明、赋值（含复合/自增自减）、表达式语句、print、if/elif/else、
+/*       while、repeat、forever、for-range、for-in、break/continue/stop、return、
+/*       函数定义（含默认值参数）、throw、try/catch/finally，以及完整表达式：
+/*       二元优先级链、一元、三元、调用、成员、下标、切片、列表、字典、new、lambda。
+
+/* 字符串里裸 { } 会撞插值词法，字符字面量一律用码点构造
+let LBRACE = charfrom(123)
+let RBRACE = charfrom(125)
+let LBRACK = charfrom(91)
+let RBRACK = charfrom(93)
+/* 括号类字面量也走码点：源码里写右括号会被宿主解析器当成括号终止 */
+let LPAR = charfrom(40)
+let RPAR = charfrom(41)
+
+/* ═══════════════════════════ 词法层（复用 copper_lex.co 的实现） ═══════════════════════════ */
+
+function halfwidth(c)
+    if c == "＋"
+        return "+"
+    if c == "－"
+        return "-"
+    if c == "＊"
+        return "*"
+    if c == "／"
+        return "/"
+    if c == "％"
+        return "%"
+    if c == "＝"
+        return "="
+    if c == "＜"
+        return "<"
+    if c == "＞"
+        return ">"
+    if c == "！"
+        return "!"
+    if c == "＆"
+        return "&"
+    if c == "｜"
+        return "|"
+    if c == "＾"
+        return "^"
+    if c == "～"
+        return "~"
+    if c == "〜"
+        return "~"
+    if c == "（"
+        return LPAR
+    if c == "）"
+        return RPAR
+    if c == "［"
+        return LBRACK
+    if c == "］"
+        return RBRACK
+    if c == charfrom(65371)
+        return LBRACE
+    if c == charfrom(65373)
+        return RBRACE
+    if c == "，"
+        return ","
+    if c == "；"
+        return ";"
+    if c == "："
+        return ":"
+    if c == "？"
+        return "?"
+    if c == "。"
+        return "."
+    if c == charfrom(8220)
+        return "\""
+    if c == charfrom(8221)
+        return "\""
+    if c == charfrom(8216)
+        return "'"
+    if c == charfrom(8217)
+        return "'"
+    return c
+
+function cw(code, i)
+    if i < 0
+        return ""
+    if i >= strlen(code)
+        return ""
+    return char(code, i)
+
+function cc(code, i)
+    if i < 0
+        return -1
+    if i >= strlen(code)
+        return -1
+    return charcode(code, i)
+
+function is_digit_n(n)
+    return n >= 48 and n <= 57
+
+function is_alpha_n(n)
+    return (n >= 65 and n <= 90) or (n >= 97 and n <= 122)
+
+function is_id_start_n(n)
+    if is_alpha_n(n)
+        return true
+    if n == 95
+        return true
+    if n >= 19968 and n <= 40895
+        return true
+    if n >= 13312 and n <= 19903
+        return true
+    return false
+
+function is_id_part_n(n)
+    if is_id_start_n(n)
+        return true
+    return is_digit_n(n)
+
+function is_hex_n(n)
+    if is_digit_n(n)
+        return true
+    if n >= 97 and n <= 102
+        return true
+    if n >= 65 and n <= 70
+        return true
+    return false
+
+function starts_with_at(code, i, pat)
+    let plen = strlen(pat)
+    let k = 0
+    while k < plen
+        if halfwidth(cw(code, i + k)) != char(pat, k)
+            return false
+        k += 1
+    return true
+
+function strip_line_comment(line)
+    let n = strlen(line)
+    let i = 0
+    let in_str = ""
+    while i < n
+        let c = cw(line, i)
+        if in_str != ""
+            if c == "\\"
+                i += 2
+                continue
+            if halfwidth(c) == in_str
+                in_str = ""
+            i += 1
+            continue
+        if c == "\"" or c == "'"
+            in_str = c
+            i += 1
+            continue
+        if c == "/" and cw(line, i + 1) == "*"
+            return {"code": substr(line, 0, i), "comment": substr(line, i + 2, n - i - 2)}
+        i += 1
+    return {"code": line, "comment": ""}
+
+function esc(s)
+    let n = strlen(s)
+    let out = ""
+    let i = 0
+    while i < n
+        let c = cw(s, i)
+        if c == "\\"
+            out = out + "\\\\"
+        elif c == "\""
+            out = out + "\\\""
+        elif c == "\n"
+            out = out + "\\n"
+        elif c == "\t"
+            out = out + "\\t"
+        elif c == "\r"
+            out = out + "\\r"
+        else
+            out = out + c
+        i += 1
+    return out
+
+let KEYWORDS = ["new", "class", "extends", "function", "fn", "return", "import", "super"]
+let OPERATORS = ["===", "!==", "**=", "<<=", ">>=", "==", "!=", "<=", ">=", "&&", "||", "**", "<<", ">>", "+=", "-=", "*=", "/=", "%=", "++", "--", "//", "=>", "+", "-", "*", "/", "%", "<", ">", "!", "~", "&", "|", "^", "=", "?", ":", "@", "#"]
+
+function hex_value(raw)
+    let n = strlen(raw)
+    let v = 0
+    let i = 2
+    while i < n
+        let d = charcode(raw, i)
+        if d >= 48 and d <= 57
+            v = v * 16 + (d - 48)
+        elif d >= 97 and d <= 102
+            v = v * 16 + (d - 87)
+        elif d >= 65 and d <= 70
+            v = v * 16 + (d - 55)
+        else
+            return float("nan")
+        i += 1
+    return v
+
+function push_tok(toks, kind, text, col, end_col, num)
+    add {"kind": kind, "text": text, "col": col, "end": end_col, "num": num} to toks
+
+/* 切一行成 token 流（不含 EOF），失败返回 {ok:false,err,ecol} */
+function lex_line(code, start_col)
+    let n = strlen(code)
+    let toks = []
+    let i = 0
+    while i < n
+        let raw_c = cw(code, i)
+        let c = halfwidth(raw_c)
+        if c == " " or c == "\t" or c == "　" or c == "\r"
+            i += 1
+            continue
+        if c == "\"" or c == "'"
+            let quote = c
+            let j = i + 1
+            let text = ""
+            let depth = 0
+            let closed = false
+            while j < n
+                let cj = halfwidth(cw(code, j))
+                if cj == quote and depth == 0
+                    closed = true
+                    break
+                if cj == LBRACE
+                    depth += 1
+                elif cj == RBRACE and depth > 0
+                    depth -= 1
+                if cw(code, j) == "\\" and j + 1 < n
+                    let e = cw(code, j + 1)
+                    if e == "n"
+                        text = text + "\n"
+                    elif e == "t"
+                        text = text + "\t"
+                    elif e == "r"
+                        text = text + "\r"
+                    elif e == "0"
+                        text = text + "\0"
+                    elif e == "\\"
+                        text = text + "\\"
+                    elif e == "\""
+                        text = text + "\""
+                    elif e == "'"
+                        text = text + "'"
+                    elif e == LBRACE or e == RBRACE
+                        text = text + "\\" + e
+                    else
+                        text = text + e
+                    j += 2
+                    continue
+                text = text + cw(code, j)
+                j += 1
+            if not closed
+                return {"ok": false, "err": "字符串没有结束引号", "ecol": start_col + i}
+            push_tok(toks, "STR", text, start_col + i, start_col + j + 1, "")
+            i = j + 1
+            continue
+        let cn = cc(code, i)
+        let next_is_digit = is_digit_n(cc(code, i + 1))
+        if is_digit_n(cn) or (c == "." and next_is_digit)
+            let start = i
+            if c == "0" and (cw(code, i + 1) == "x" or cw(code, i + 1) == "X")
+                i += 2
+                while i < n and (is_hex_n(cc(code, i)) or cw(code, i) == "_")
+                    i += 1
+                let raw = ""
+                let k = start
+                while k < i
+                    if cw(code, k) != "_"
+                        raw = raw + cw(code, k)
+                    k += 1
+                push_tok(toks, "NUM", raw, start_col + start, start_col + i, hex_value(raw))
+                continue
+            while i < n and (is_digit_n(cc(code, i)) or cw(code, i) == "_")
+                i += 1
+            if i < n and cw(code, i) == "." and is_digit_n(cc(code, i + 1))
+                i += 1
+                while i < n and (is_digit_n(cc(code, i)) or cw(code, i) == "_")
+                    i += 1
+            if i < n and (cw(code, i) == "e" or cw(code, i) == "E")
+                let save = i
+                i += 1
+                if i < n and (cw(code, i) == "+" or cw(code, i) == "-")
+                    i += 1
+                if is_digit_n(cc(code, i))
+                    while i < n and is_digit_n(cc(code, i))
+                        i += 1
+                else
+                    i = save
+            let raw = ""
+            let k = start
+            while k < i
+                if cw(code, k) != "_"
+                    raw = raw + cw(code, k)
+                k += 1
+            push_tok(toks, "NUM", raw, start_col + start, start_col + i, float(raw))
+            continue
+        if is_id_start_n(cn)
+            let start = i
+            while i < n and is_id_part_n(cc(code, i))
+                i += 1
+            let word = substr(code, start, i - start)
+            if word == "and" or word == "or" or word == "not"
+                let prev_dot = false
+                if len(toks) > 0
+                    let prev = toks[len(toks) - 1]
+                    if prev["kind"] == "OP" and prev["text"] == "."
+                        prev_dot = true
+                if not prev_dot
+                    let op = "&&"
+                    if word == "or"
+                        op = "||"
+                    if word == "not"
+                        op = "!"
+                    push_tok(toks, "OP", op, start_col + start, start_col + i, "")
+                    continue
+            let kind = "IDENT"
+            if listin(word, KEYWORDS)
+                kind = "KW"
+            push_tok(toks, kind, word, start_col + start, start_col + i, "")
+            continue
+        let matched = ""
+        for op in OPERATORS
+            if matched == "" and starts_with_at(code, i, op)
+                matched = op
+        if matched != ""
+            let mlen = strlen(matched)
+            push_tok(toks, "OP", matched, start_col + i, start_col + i + mlen, "")
+            i += mlen
+            continue
+        if c == LPAR or c == RPAR or c == LBRACK or c == RBRACK or c == LBRACE or c == RBRACE or c == "," or c == "." or c == ";"
+            push_tok(toks, "PUNC", c, start_col + i, start_col + i + 1, "")
+            i += 1
+            continue
+        let hint = ""
+        let hn = cc(code, i)
+        if (hn >= 65280 and hn <= 65519) or (hn >= 12288 and hn <= 12607)
+            hint = "——这是全角/中文标点，代码里要写半角"
+        return {"ok": false, "err": "无法识别的字符「" + raw_c + "」" + hint, "ecol": start_col + i}
+    return {"ok": true, "toks": toks}
+
+/* ═══════════════════════════ 优先级 ═══════════════════════════ */
+
+function prec_of(op)
+    if op == "||"
+        return 10
+    if op == "&&"
+        return 15
+    if op == "|"
+        return 20
+    if op == "^"
+        return 25
+    if op == "&"
+        return 30
+    if op == "==" or op == "!=" or op == "===" or op == "!=="
+        return 35
+    if op == "<" or op == ">" or op == "<=" or op == ">="
+        return 40
+    if op == "<<" or op == ">>"
+        return 45
+    if op == "+" or op == "-"
+        return 50
+    if op == "*" or op == "/" or op == "%" or op == "//"
+        return 60
+    if op == "**"
+        return 70
+    return -1
+
+function op_name(t)
+    if t == "+"
+        return "Add"
+    if t == "-"
+        return "Sub"
+    if t == "*"
+        return "Mul"
+    if t == "/"
+        return "Div"
+    if t == "//"
+        return "IDiv"
+    if t == "%"
+        return "Mod"
+    if t == "**"
+        return "Pow"
+    if t == "==" or t == "==="
+        return "Eq"
+    if t == "!=" or t == "!=="
+        return "Ne"
+    if t == "<"
+        return "Lt"
+    if t == "<="
+        return "Le"
+    if t == ">"
+        return "Gt"
+    if t == ">="
+        return "Ge"
+    if t == "&&"
+        return "And"
+    if t == "||"
+        return "Or"
+    if t == "&"
+        return "BitAnd"
+    if t == "|"
+        return "BitOr"
+    if t == "^"
+        return "BitXor"
+    if t == "<<"
+        return "Shl"
+    if t == ">>"
+        return "Shr"
+    return "?"
+
+function assign_op_name(t)
+    if t == "="
+        return "Set"
+    if t == "+="
+        return "Add"
+    if t == "-="
+        return "Sub"
+    if t == "*="
+        return "Mul"
+    if t == "/="
+        return "Div"
+    if t == "%="
+        return "Mod"
+    if t == "**="
+        return "Pow"
+    return "-"
+
+/* ═══════════════════════════ 表达式解析（状态 = [toks, pos, err]） ═══════════════════════════ */
+
+function new_ep(toks, pos)
+    return [toks, pos, ""]
+
+function ep_cur(st)
+    if st[1] >= len(st[0])
+        return null
+    return st[0][st[1]]
+
+function ep_tx(st)
+    let t = ep_cur(st)
+    if t == null
+        return ""
+    return t["text"]
+
+function ep_at(st, text)
+    return ep_tx(st) == text and ep_cur(st) != null
+
+function ep_adv(st)
+    st[1] += 1
+    return ""
+
+function ep_err(st, msg)
+    if st[2] == ""
+        st[2] = msg
+    return null
+
+function ep_peek_tx(st, k)
+    let i = st[1] + k
+    if i >= len(st[0])
+        return ""
+    return st[0][i]["text"]
+
+/* 解析完整表达式（含三元） */
+function ep_expr(st, minprec)
+    let left = ep_bin(st, minprec)
+    if left == null
+        return null
+    if ep_at(st, "?")
+        ep_adv(st)
+        let a = ep_expr(st, 0)
+        if a == null
+            return ep_err(st, "三元的中间段缺失")
+        if not ep_at(st, ":")
+            return ep_err(st, "三元缺 :")
+        ep_adv(st)
+        let b = ep_expr(st, 0)
+        if b == null
+            return ep_err(st, "三元的后面一段缺失")
+        return {"k": "Tern", "c": left, "a": a, "b": b}
+    return left
+
+function ep_bin(st, minprec)
+    let left = ep_unary(st)
+    if left == null
+        return null
+    while true
+        let t = ep_cur(st)
+        if t == null
+            break
+        let op = t["text"]
+        if t["kind"] == "IDENT" and op == "mod"
+            op = "%"
+        let p = prec_of(op)
+        if p < minprec
+            break
+        ep_adv(st)
+        let next_min = p + 1
+        if op == "**"
+            next_min = p
+        let right = ep_bin(st, next_min)
+        if right == null
+            if st[2] == ""
+                st[2] = "运算符 " + op + " 后面缺操作数"
+            return null
+        left = {"k": "Bin", "op": op_name(op), "a": left, "b": right}
+    return left
+
+function ep_unary(st)
+    let t = ep_cur(st)
+    if t == null
+        return ep_err(st, "表达式缺失")
+    if t["kind"] == "OP"
+        let u = t["text"]
+        /* **p 在值位置 = 两级解引用（词法把两个 * 收成了一个 OP） */
+        if u == "**"
+            ep_adv(st)
+            let a2 = ep_unary(st)
+            if a2 == null
+                return null
+            return {"k": "Un", "op": "Deref", "a": {"k": "Un", "op": "Deref", "a": a2}}
+        if u == "-" or u == "!" or u == "~" or u == "&" or u == "*"
+            ep_adv(st)
+            let a = ep_unary(st)
+            if a == null
+                return null
+            let name = "Neg"
+            if u == "!"
+                name = "Not"
+            if u == "~"
+                name = "BitNot"
+            if u == "&"
+                name = "Addr"
+            if u == "*"
+                name = "Deref"
+            return {"k": "Un", "op": name, "a": a}
+    return ep_postfix(st)
+
+function ep_args(st)
+    let args = []
+    if ep_at(st, RPAR)
+        ep_adv(st)
+        return args
+    while true
+        let a = ep_expr(st, 0)
+        if a == null
+            return null
+        add a to args
+        if ep_at(st, ",")
+            ep_adv(st)
+            continue
+        break
+    if not ep_at(st, RPAR)
+        return ep_err(st, "调用参数缺右括号")
+    ep_adv(st)
+    return args
+
+function ep_postfix(st)
+    let base = ep_primary(st)
+    if base == null
+        return null
+    while true
+        let t = ep_cur(st)
+        if t == null
+            break
+        if t["kind"] == "PUNC"
+            if t["text"] == LPAR
+                ep_adv(st)
+                let args = ep_args(st)
+                if args == null
+                    return null
+                base = {"k": "Call", "c": base, "args": args}
+                continue
+            if t["text"] == LBRACK
+                ep_adv(st)
+                let idx = ep_expr(st, 0)
+                if idx == null
+                    return null
+                if ep_at(st, ":")
+                    ep_adv(st)
+                    let to = null
+                    if not ep_at(st, RBRACK)
+                        to = ep_expr(st, 0)
+                        if to == null
+                            return null
+                    if not ep_at(st, RBRACK)
+                        return ep_err(st, "切片缺右方括号")
+                    ep_adv(st)
+                    base = {"k": "Slice", "o": base, "f": idx, "t": to}
+                    continue
+                if not ep_at(st, RBRACK)
+                    return ep_err(st, "下标缺右方括号")
+                ep_adv(st)
+                base = {"k": "Idx", "o": base, "i": idx}
+                continue
+        if t["kind"] == "PUNC" and t["text"] == "."
+            ep_adv(st)
+            let nm = ep_cur(st)
+            if nm == null
+                return ep_err(st, "成员访问后面缺名字")
+            ep_adv(st)
+            base = {"k": "Member", "o": base, "n": nm["text"]}
+            continue
+        break
+    return base
+
+function ep_primary(st)
+    let t = ep_cur(st)
+    if t == null
+        return ep_err(st, "表达式缺失")
+    if t["kind"] == "NUM"
+        ep_adv(st)
+        return {"k": "Num", "v": t["num"]}
+    if t["kind"] == "STR"
+        ep_adv(st)
+        return {"k": "Str", "v": t["text"]}
+    if t["kind"] == "PUNC" and t["text"] == LPAR
+        ep_adv(st)
+        /* 先试参数列表形式： (a, b) => 表达式 */
+        let saved = st[1]
+        let ps = []
+        let looks_lambda = true
+        if ep_at(st, RPAR)
+            ep_adv(st)
+        else
+            while true
+                let it = ep_cur(st)
+                if it == null or it["kind"] != "IDENT"
+                    looks_lambda = false
+                    break
+                add it["text"] to ps
+                ep_adv(st)
+                if ep_at(st, ",")
+                    ep_adv(st)
+                    continue
+                break
+            if looks_lambda and ep_at(st, RPAR)
+                ep_adv(st)
+            else
+                looks_lambda = false
+        if looks_lambda and ep_at(st, "=>")
+            ep_adv(st)
+            let body = ep_expr(st, 0)
+            if body == null
+                return null
+            let params = []
+            for p in ps
+                add {"n": p, "ty": null, "def": null, "lazy": false} to params
+            return {"k": "Lambda", "params": params, "body": body}
+        /* 退回普通括号表达式 */
+        st[1] = saved
+        let inner = ep_expr(st, 0)
+        if inner == null
+            return null
+        if not ep_at(st, RPAR)
+            return ep_err(st, "括号没有闭合")
+        ep_adv(st)
+        return inner
+    if t["kind"] == "PUNC" and t["text"] == LBRACK
+        ep_adv(st)
+        let items = []
+        if ep_at(st, RBRACK)
+            ep_adv(st)
+            return {"k": "List", "v": items}
+        while true
+            let it = ep_expr(st, 0)
+            if it == null
+                return null
+            add it to items
+            if ep_at(st, ",")
+                ep_adv(st)
+                continue
+            break
+        if not ep_at(st, RBRACK)
+            return ep_err(st, "列表缺右方括号")
+        ep_adv(st)
+        return {"k": "List", "v": items}
+    if t["kind"] == "PUNC" and t["text"] == LBRACE
+        ep_adv(st)
+        let pairs = []
+        if ep_at(st, RBRACE)
+            ep_adv(st)
+            return {"k": "Dict", "v": pairs}
+        while true
+            let kt = ep_cur(st)
+            let key = null
+            if kt != null and kt["kind"] == "STR"
+                ep_adv(st)
+                key = {"k": "Str", "v": kt["text"]}
+            elif kt != null and (kt["kind"] == "IDENT" or kt["kind"] == "KW")
+                ep_adv(st)
+                key = {"k": "Str", "v": kt["text"]}
+            else
+                key = ep_expr(st, 0)
+                if key == null
+                    return null
+            if not ep_at(st, ":")
+                return ep_err(st, "字典键后面缺冒号")
+            ep_adv(st)
+            let v = ep_expr(st, 0)
+            if v == null
+                return null
+            add [key, v] to pairs
+            if ep_at(st, ",")
+                ep_adv(st)
+                continue
+            break
+        if not ep_at(st, RBRACE)
+            return ep_err(st, "字典缺右花括号")
+        ep_adv(st)
+        return {"k": "Dict", "v": pairs}
+    if t["kind"] == "IDENT" or t["kind"] == "KW"
+        let w = t["text"]
+        if w == "true"
+            ep_adv(st)
+            return {"k": "Bool", "v": true}
+        if w == "false"
+            ep_adv(st)
+            return {"k": "Bool", "v": false}
+        if w == "null"
+            ep_adv(st)
+            return {"k": "Null"}
+        if w == "self"
+            ep_adv(st)
+            return {"k": "Self"}
+        if w == "new"
+            ep_adv(st)
+            let cn = ep_cur(st)
+            if cn == null
+                return ep_err(st, "new 后面缺类名")
+            ep_adv(st)
+            if not ep_at(st, LPAR)
+                return {"k": "New", "n": cn["text"], "args": []}
+            ep_adv(st)
+            let args = ep_args(st)
+            if args == null
+                return null
+            return {"k": "New", "n": cn["text"], "args": args}
+        ep_adv(st)
+        /* 汇编式算术：add a b / mul 2 3 4（空格分隔，左结合）
+        /* 要两个以上的操作数挨着才算，否则 sub 只是普通变量名
+        if listin(w, ASM_ARITH) and not ep_at(st, LPAR) and asm_ok(st)
+            let opn = asm_op(w)
+            let acc = ep_unary(st)
+            if acc == null
+                return null
+            while true
+                let t2 = ep_cur(st)
+                if t2 == null
+                    break
+                let k2 = t2["kind"]
+                if k2 == "NUM" or k2 == "STR" or k2 == "IDENT" or k2 == "KW"
+                    let r2 = ep_unary(st)
+                    if r2 == null
+                        return null
+                    acc = {"k": "Bin", "op": opn, "a": acc, "b": r2}
+                    continue
+                if k2 == "PUNC" and (t2["text"] == LPAR or t2["text"] == LBRACK or t2["text"] == LBRACE)
+                    let r3 = ep_unary(st)
+                    if r3 == null
+                        return null
+                    acc = {"k": "Bin", "op": opn, "a": acc, "b": r3}
+                    continue
+                break
+            return acc
+        return {"k": "Var", "v": w}
+    return ep_err(st, "认不出这个表达式起点「" + t["text"] + "」")
+
+/* ═══════════════════════════ 语句解析 ═══════════════════════════ */
+
+let TYPE_WORDS = ["int", "float", "str", "bool", "list", "dict", "ptr", "addr", "var", "let"]
+/* 语句关键字：不能当成自定义类型名（否则 if hit 会被读成声明） */
+let STMT_WORDS = ["if", "elif", "else", "while", "repeat", "forever", "main", "for", "break", "balo", "continue", "stop", "return", "fn", "function", "Function", "f", "try", "catch", "finally", "throw", "print", "ask", "report", "报告", "debug", "调试", "wait", "time", "class", "extends", "import", "new", "super", "self", "true", "false", "null", "and", "or", "not"]
+
+function ty_word(w)
+    if w == "addr"
+        return "ptr"
+    if w == "let"
+        return "var"
+    return w
+
+/* 从整行 token 建表达式 */
+function expr_of_line(toks, from)
+    let st = new_ep(toks, from)
+    let e = ep_expr(st, 0)
+    if e == null
+        return {"ok": false, "err": st[2]}
+    if st[1] < len(toks)
+        return {"ok": false, "err": "表达式后面多了内容「" + toks[st[1]]["text"] + "」"}
+    return {"ok": true, "e": e}
+
+/* 表达式 → 赋值目标 */
+function to_target(e)
+    if e == null
+        return null
+    if e["k"] == "Var"
+        return {"k": "TVar", "n": e["v"]}
+    if e["k"] == "Member"
+        return {"k": "TMember", "o": e["o"], "n": e["n"]}
+    if e["k"] == "Idx"
+        return {"k": "TIdx", "o": e["o"], "i": e["i"]}
+    if e["k"] == "Un" and e["op"] == "Deref"
+        return {"k": "TDeref", "e": e["a"]}
+    return null
+
+/* 找某一层 token 里第一个文本等于 text 的位置（找不到 -1） */
+function find_tok(toks, text)
+    let i = 0
+    while i < len(toks)
+        if toks[i]["text"] == text
+            return i
+        i += 1
+    return -1
+
+function slice_toks(toks, from, to)
+    let out = []
+    let i = from
+    while i < to
+        add toks[i] to out
+        i += 1
+    return out
+
+/* 逗号分隔的表达式列表（print 无括号写法用） */
+function expr_list_of(toks, from)
+    let out = []
+    let st = new_ep(toks, from)
+    while true
+        let e = ep_expr(st, 0)
+        if e == null
+            return {"ok": false, "err": "参数缺失"}
+        add e to out
+        if st[1] < len(toks) and toks[st[1]]["text"] == ","
+            st[1] += 1
+            continue
+        break
+    if st[1] != len(toks)
+        return {"ok": false, "err": "语句后面多了内容「" + toks[st[1]]["text"] + "」"}
+    return {"ok": true, "list": out}
+
+/* 语句列表：st = [lines, i, n, err] */
+function parse_stmts(st, indent, out)
+    while st[1] < st[2]
+        let ln = st[0][st[1]]
+        if ln["ind"] < indent
+            break
+        if ln["ind"] > indent
+            st[3] = "缩进对不上（第 " + str(ln["ln"]) + " 行）：这一行比上一行多缩进，但没有能接住它的块"
+            break
+        let first = ln["toks"][0]["text"]
+        if first == "elif" or first == "else" or first == "catch" or first == "finally"
+            break
+        /* 行首右大括号：有些老脚本用它收尾，块本身靠缩进，直接跳过 */
+        if first == RBRACE
+            st[1] += 1
+            continue
+        /* import：多文件展开在环境层做（引擎侧 parse_program 单文件时不产 AST） */
+        if first == "import"
+            st[1] += 1
+            continue
+        let r = parse_one(st, indent)
+        if r == null
+            break
+        add r to out
+    return out
+
+/* 解析当前行开头的语句（含它的块），推进 st[1] */
+function parse_one(st, indent)
+    let ln = st[0][st[1]]
+    let toks = ln["toks"]
+    let head = toks[0]
+    let w = head["text"]
+    let li = ln["ln"]
+    /* 空语句：只有分号 */
+    if len(toks) == 1 and head["text"] == ";"
+        st[1] += 1
+        return {"k": "Nop", "ln": li}
+
+    /* ── 声明 ── */
+    if listin(w, TYPE_WORDS) and len(toks) >= 2
+        let nt = toks[1]
+        if nt["kind"] == "IDENT"
+            let nm = nt["text"]
+            /* dict 名 read 键 —— 简写：等于把 scores[k] 读进 __last_read */
+            if len(toks) > 2 and toks[2]["text"] == "read"
+                let r = expr_of_line(toks, 3)
+                if not r["ok"]
+                    return parse_fail(st, li, r["err"])
+                st[1] += 1
+                return {"k": "Assign", "t": {"k": "TVar", "n": "__last_read"}, "op": "Set", "v": {"k": "Idx", "o": {"k": "Var", "v": nm}, "i": r["e"]}, "ln": li}
+            let init = null
+            if len(toks) > 2
+                if toks[2]["text"] == "="
+                    let r = expr_of_line(toks, 3)
+                    if not r["ok"]
+                        return parse_fail(st, li, r["err"])
+                    init = r["e"]
+                else
+                    return parse_fail(st, li, "声明后面只认 = 或直接换行")
+            st[1] += 1
+            return {"k": "Decl", "ty": ty_word(w), "n": nm, "init": init, "ln": li}
+
+    /* ── class：降级成一组函数（__m_/__init_/__fields_/__new_）── */
+    if w == "class"
+        return parse_class(st, indent, toks, li)
+
+    /* ── if out（条件式 break，没有块）── */
+    if w == "if" and len(toks) > 1 and toks[1]["text"] == "out"
+        let r = expr_of_line(toks, 2)
+        if not r["ok"]
+            return parse_fail(st, li, r["err"])
+        st[1] += 1
+        return {"k": "IfOut", "e": r["e"], "ln": li}
+
+    /* ── wait until ── */
+    if w == "wait"
+        if len(toks) > 1 and toks[1]["text"] == "until"
+            let r = expr_of_line(toks, 2)
+            if not r["ok"]
+                return parse_fail(st, li, r["err"])
+            st[1] += 1
+            let body = parse_block(st, indent)
+            return {"k": "WaitUntil", "cond": r["e"], "body": body, "ln": li}
+        st[1] += 1
+        return {"k": "Nop", "ln": li}
+
+    /* ── time read / time reset ── */
+    if w == "time"
+        if len(toks) > 1 and toks[1]["text"] == "read"
+            st[1] += 1
+            return {"k": "TimeRead", "ln": li}
+        if len(toks) > 1 and toks[1]["text"] == "reset"
+            st[1] += 1
+            return {"k": "TimeReset", "ln": li}
+        return parse_fail(st, li, "time 只认 time read / time reset")
+
+    /* ── report / 报告 ── */
+    if w == "report" or w == "报告"
+        if len(toks) > 1 and toks[1]["text"] == LPAR
+            let ps = new_ep(toks, 1)
+            ep_adv(ps)
+            let args = ep_args(ps)
+            if args == null
+                return parse_fail(st, li, ps[2])
+            if ps[1] != len(toks)
+                return parse_fail(st, li, "报告 后面多了内容")
+            st[1] += 1
+            return {"k": "Report", "args": args, "ln": li}
+        if len(toks) > 1
+            let r = expr_list_of(toks, 1)
+            if not r["ok"]
+                return parse_fail(st, li, r["err"])
+            st[1] += 1
+            return {"k": "Report", "args": r["list"], "ln": li}
+        st[1] += 1
+        return {"k": "Report", "args": [], "ln": li}
+
+    /* ── debug / 调试：调试 报告 内容（也认 调试(报告, 内容)）── */
+    if w == "debug" or w == "调试"
+        let lv = debug_level(toks, 1)
+        if lv < 0
+            return parse_fail(st, li, "调试 后面要跟 报告/警告/报错")
+        st[1] += 1
+        if toks[1]["text"] == LPAR
+            /* 函数式：调试(级别, 内容...) */
+            let ps = new_ep(toks, 2)
+            /* 跳过级别词和逗号 */
+            ep_adv(ps)
+            if ep_at(ps, ",")
+                ep_adv(ps)
+            let args = ep_args(ps)
+            if args == null
+                return parse_fail(st, li, ps[2])
+            return {"k": "Debug", "lv": lv, "args": args, "ln": li}
+        let rest = slice_toks(toks, 2, len(toks))
+        let r = expr_list_of(rest, 0)
+        if not r["ok"]
+            return parse_fail(st, li, r["err"])
+        return {"k": "Debug", "lv": lv, "args": r["list"], "ln": li}
+
+    /* ── 自定义类型声明：Dog d = new Dog(...)（类型名 = 类名，TypeName::Var）── */
+    if head["kind"] == "IDENT" and len(toks) >= 2 and toks[1]["kind"] == "IDENT" and not listin(w, STMT_WORDS)
+        if len(toks) == 2 or toks[2]["text"] == "="
+            let nm = toks[1]["text"]
+            let init = null
+            if len(toks) > 2
+                let r = expr_of_line(toks, 3)
+                if not r["ok"]
+                    return parse_fail(st, li, r["err"])
+                init = r["e"]
+            st[1] += 1
+            return {"k": "Decl", "ty": "var", "n": nm, "init": init, "ln": li}
+
+    /* ── if ── */
+    if w == "if"
+        return parse_if(st, indent, toks, li)
+
+    /* ── while ── */
+    if w == "while"
+        let r = expr_of_line(toks, 1)
+        if not r["ok"]
+            return parse_fail(st, li, r["err"])
+        st[1] += 1
+        let body = parse_block(st, indent)
+        return {"k": "While", "cond": r["e"], "body": body, "ln": li}
+
+    /* ── repeat ── */
+    if w == "repeat"
+        let r = expr_of_line(toks, 1)
+        if not r["ok"]
+            return parse_fail(st, li, r["err"])
+        st[1] += 1
+        let body = parse_block(st, indent)
+        return {"k": "Repeat", "count": r["e"], "body": body, "ln": li}
+
+    /* ── forever ── */
+    if w == "forever"
+        st[1] += 1
+        let body = parse_block(st, indent)
+        return {"k": "While", "cond": {"k": "Bool", "v": true}, "body": body, "ln": li}
+
+    /* ── main loop ── */
+    if w == "main" and len(toks) > 1 and toks[1]["text"] == "loop"
+        st[1] += 1
+        let body = parse_block(st, indent)
+        return {"k": "While", "cond": {"k": "Bool", "v": true}, "body": body, "ln": li}
+
+    /* ── for ── */
+    if w == "for"
+        return parse_for(st, indent, toks, li)
+
+    /* ── 跳转 ── */
+    if w == "break" and len(toks) == 1
+        st[1] += 1
+        return {"k": "Break", "ln": li}
+    if (w == "balo" or w == "continue") and len(toks) == 1
+        st[1] += 1
+        return {"k": "Continue", "ln": li}
+    if w == "stop" and len(toks) == 1
+        st[1] += 1
+        return {"k": "Stop", "ln": li}
+
+    /* ── return ── */
+    if w == "return"
+        st[1] += 1
+        if len(toks) == 1
+            return {"k": "Return", "e": null, "ln": li}
+        let r = expr_of_line(toks, 1)
+        if not r["ok"]
+            return parse_fail(st, li, r["err"])
+        return {"k": "Return", "e": r["e"], "ln": li}
+
+    /* ── 函数定义 ── */
+    if w == "fn" or w == "function" or w == "Function"
+        return parse_func(st, indent, toks, li)
+
+    /* ── throw ── */
+    if w == "throw"
+        let r = expr_of_line(toks, 1)
+        if not r["ok"]
+            return parse_fail(st, li, r["err"])
+        st[1] += 1
+        return {"k": "Throw", "e": r["e"], "ln": li}
+
+    /* ── try ── */
+    if w == "try"
+        st[1] += 1
+        let body = parse_block(st, indent)
+        let cname = null
+        let cbody = null
+        let fin = null
+        if st[1] < st[2] and st[0][st[1]]["ind"] == indent and st[0][st[1]]["toks"][0]["text"] == "catch"
+            let cl = st[0][st[1]]
+            if len(cl["toks"]) > 1
+                cname = cl["toks"][1]["text"]
+            st[1] += 1
+            cbody = parse_block(st, indent)
+        if st[1] < st[2] and st[0][st[1]]["ind"] == indent and st[0][st[1]]["toks"][0]["text"] == "finally"
+            st[1] += 1
+            fin = parse_block(st, indent)
+        return {"k": "Try", "body": body, "catch": cname, "cbody": cbody, "fin": fin, "ln": li}
+
+    /* ── print ── */
+    if w == "print"
+        if len(toks) > 1 and toks[1]["text"] == LPAR
+            let ps = new_ep(toks, 1)
+            ep_adv(ps)
+            let args = ep_args(ps)
+            if args == null
+                return parse_fail(st, li, ps[2])
+            if ps[1] != len(toks)
+                return parse_fail(st, li, "print 后面多了内容")
+            st[1] += 1
+            return {"k": "Print", "args": args, "ln": li}
+        if len(toks) > 1
+            let r = expr_list_of(toks, 1)
+            if not r["ok"]
+                return parse_fail(st, li, r["err"])
+            st[1] += 1
+            return {"k": "Print", "args": r["list"], "ln": li}
+
+    /* ── ask：把回答写进 ans ── */
+    if w == "ask"
+        st[1] += 1
+        if len(toks) == 1
+            return {"k": "Ask", "e": null, "ln": li}
+        let r = expr_of_line(toks, 1)
+        if not r["ok"]
+            return parse_fail(st, li, r["err"])
+        return {"k": "Ask", "e": r["e"], "ln": li}
+
+    /* ── add X to L / insert X to L at N / replace L N with V（语法糖，降级成方法调用）── */
+    if w == "add"
+        let to = find_tok(toks, "to")
+        if to > 0 and to + 1 < len(toks)
+            let sub = slice_toks(toks, 1, to)
+            let r = expr_of_line(sub, 0)
+            if not r["ok"]
+                return parse_fail(st, li, r["err"])
+            let nm = toks[to + 1]["text"]
+            st[1] += 1
+            return {"k": "Expr", "e": {"k": "Call", "c": {"k": "Member", "o": {"k": "Var", "v": nm}, "n": "push"}, "args": [r["e"]]}, "ln": li}
+    if w == "insert"
+        let to = find_tok(toks, "to")
+        let at = find_tok(toks, "at")
+        if to > 0 and at > to and to + 1 < len(toks) and at + 1 < len(toks)
+            let sub = slice_toks(toks, 1, to)
+            let r = expr_of_line(sub, 0)
+            if not r["ok"]
+                return parse_fail(st, li, r["err"])
+            let sub2 = slice_toks(toks, at + 1, len(toks))
+            let r2 = expr_of_line(sub2, 0)
+            if not r2["ok"]
+                return parse_fail(st, li, r2["err"])
+            let nm = toks[to + 1]["text"]
+            st[1] += 1
+            return {"k": "Expr", "e": {"k": "Call", "c": {"k": "Member", "o": {"k": "Var", "v": nm}, "n": "insert"}, "args": [r2["e"], r["e"]]}, "ln": li}
+    if w == "replace"
+        let wi = find_tok(toks, "with")
+        if wi > 1 and wi + 1 < len(toks)
+            let nm = toks[1]["text"]
+            let sub = slice_toks(toks, 2, wi)
+            let ri = expr_of_line(sub, 0)
+            if not ri["ok"]
+                return parse_fail(st, li, ri["err"])
+            let sub2 = slice_toks(toks, wi + 1, len(toks))
+            let rv = expr_of_line(sub2, 0)
+            if not rv["ok"]
+                return parse_fail(st, li, rv["err"])
+            st[1] += 1
+            return {"k": "Assign", "t": {"k": "TIdx", "o": {"k": "Var", "v": nm}, "i": ri["e"]}, "op": "Set", "v": rv["e"], "ln": li}
+
+    /* ── 解构赋值：a, b = f() ── */
+    if len(toks) > 2 and toks[0]["kind"] == "IDENT"
+        let eq = find_tok(toks, "=")
+        if eq > 2
+            let names = []
+            let ok_names = true
+            let i = 0
+            while i < eq
+                if toks[i]["kind"] != "IDENT"
+                    ok_names = false
+                    break
+                add toks[i]["text"] to names
+                i += 1
+                if i < eq
+                    if toks[i]["text"] != ","
+                        ok_names = false
+                        break
+                    i += 1
+            if ok_names and len(names) > 1
+                let r = expr_of_line(toks, eq + 1)
+                if not r["ok"]
+                    return parse_fail(st, li, r["err"])
+                st[1] += 1
+                return {"k": "Destructure", "names": names, "v": r["e"], "ln": li}
+
+    /* ── 赋值 / 自增自减 / 表达式语句 ── */
+    let st2 = new_ep(toks, 0)
+    let e = ep_expr(st2, 0)
+    if e == null
+        return parse_fail(st, li, st2[2])
+    let rest = st2[1]
+    if rest < len(toks)
+        let rt = toks[rest]
+        if rt["kind"] == "OP"
+            let aop = assign_op_name(rt["text"])
+            if aop != "-"
+                let tgt = to_target(e)
+                if tgt == null
+                    return parse_fail(st, li, "等号左边要是变量、成员、下标或解引用")
+                let v = null
+                if rt["text"] == "="
+                    let r2 = expr_of_line(toks, rest + 1)
+                    if not r2["ok"]
+                        return parse_fail(st, li, r2["err"])
+                    v = r2["e"]
+                else
+                    /* 复合赋值：c += 1 等价 c = c + 1，AST 保留 Assign(op) */
+                    let r2 = expr_of_line(toks, rest + 1)
+                    if not r2["ok"]
+                        return parse_fail(st, li, r2["err"])
+                    v = r2["e"]
+                st[1] += 1
+                return {"k": "Assign", "t": tgt, "op": aop, "v": v, "ln": li}
+            if rt["text"] == "++" or rt["text"] == "--"
+                if rest + 1 != len(toks)
+                    return parse_fail(st, li, "自增自减后面不能再跟东西")
+                let tgt = to_target(e)
+                if tgt == null
+                    return parse_fail(st, li, "自增自减的对象要是变量、成员或下标")
+                let d = 1
+                if rt["text"] == "--"
+                    d = -1
+                st[1] += 1
+                return {"k": "IncDec", "t": tgt, "d": d, "p": false, "ln": li}
+    if rest != len(toks)
+        return parse_fail(st, li, "语句后面多了内容「" + toks[rest]["text"] + "」")
+    st[1] += 1
+    return {"k": "Expr", "e": e, "ln": li}
+
+function parse_fail(st, li, msg)
+    st[3] = "第 " + str(li) + " 行：" + msg
+    st[1] = st[2]
+    return null
+
+/* 解析块：下一行必须比 indent 缩进更深；返回语句列表 */
+function parse_block(st, indent)
+    let body = []
+    if st[1] >= st[2]
+        return body
+    let next = st[0][st[1]]
+    if next["ind"] <= indent
+        return body
+    let child = next["ind"]
+    return parse_stmts(st, child, body)
+
+let ASM_ARITH = ["add", "sub", "mul", "div", "mod"]
+
+function is_operand_start(t)
+    let k = t["kind"]
+    if k == "NUM" or k == "STR" or k == "IDENT" or k == "KW"
+        return true
+    if k == "PUNC" and (t["text"] == LPAR or t["text"] == LBRACK or t["text"] == LBRACE)
+        return true
+    return false
+
+/* 汇编式算术要挨着的两个操作数才算，避免 sub 这种变量名被误判 */
+function asm_ok(st)
+    let toks = st[0]
+    let p = st[1]
+    if p + 1 >= len(toks)
+        return false
+    if toks[p]["kind"] == "PUNC"
+        return false
+    if not is_operand_start(toks[p])
+        return false
+    if not is_operand_start(toks[p + 1])
+        return false
+    return true
+
+function asm_op(w)
+    if w == "sub"
+        return "Sub"
+    if w == "mul"
+        return "Mul"
+    if w == "div"
+        return "Div"
+    if w == "mod"
+        return "Mod"
+    return "Add"
+
+/* ═══════════════════════════ class 降级（与 Rust lower_class 对齐） ═══════════════════════════ */
+
+let CLASS_INFO = {}
+
+function list_has(items, x)
+    for it in items
+        if it == x
+            return true
+    return false
+
+function debug_level(toks, at)
+    if at >= len(toks)
+        return -1
+    let w = toks[at]["text"]
+    if w == "报告" or w == "report" or w == "info"
+        return 1
+    if w == "警告" or w == "warn" or w == "warning"
+        return 2
+    if w == "报错" or w == "error" or w == "err"
+        return 3
+    return -1
+
+function self_param()
+    return {"n": "self", "ty": null, "def": null, "lazy": false}
+
+/* 表达式改写：self → SelfRef，裸字段名 → self.字段，super(...) → 父类 init */
+function rw_expr(e, fields, locals, base)
+    if e == null
+        return null
+    let k = e["k"]
+    if k == "Var"
+        let v = e["v"]
+        if v == "self"
+            return {"k": "Self"}
+        if list_has(fields, v) and not list_has(locals, v)
+            return {"k": "Member", "o": {"k": "Self"}, "n": v}
+        return e
+    if k == "Call"
+        if e["c"]["k"] == "Var" and e["c"]["v"] == "super" and base != null
+            let args = [{"k": "Self"}]
+            for a in e["args"]
+                add rw_expr(a, fields, locals, base) to args
+            return {"k": "Call", "c": {"k": "Var", "v": "__init_" + base + "_"}, "args": args}
+        return {"k": "Call", "c": rw_expr(e["c"], fields, locals, base), "args": rw_list(e["args"], fields, locals, base)}
+    if k == "Bin"
+        return {"k": "Bin", "op": e["op"], "a": rw_expr(e["a"], fields, locals, base), "b": rw_expr(e["b"], fields, locals, base)}
+    if k == "Un"
+        return {"k": "Un", "op": e["op"], "a": rw_expr(e["a"], fields, locals, base)}
+    if k == "Tern"
+        return {"k": "Tern", "c": rw_expr(e["c"], fields, locals, base), "a": rw_expr(e["a"], fields, locals, base), "b": rw_expr(e["b"], fields, locals, base)}
+    if k == "Idx"
+        return {"k": "Idx", "o": rw_expr(e["o"], fields, locals, base), "i": rw_expr(e["i"], fields, locals, base)}
+    if k == "Slice"
+        return {"k": "Slice", "o": rw_expr(e["o"], fields, locals, base), "f": rw_expr(e["f"], fields, locals, base), "t": rw_expr(e["t"], fields, locals, base)}
+    if k == "Member"
+        return {"k": "Member", "o": rw_expr(e["o"], fields, locals, base), "n": e["n"]}
+    if k == "List"
+        return {"k": "List", "v": rw_list(e["v"], fields, locals, base)}
+    if k == "Dict"
+        let pairs = []
+        for pr in e["v"]
+            add [rw_expr(pr[0], fields, locals, base), rw_expr(pr[1], fields, locals, base)] to pairs
+        return {"k": "Dict", "v": pairs}
+    if k == "New"
+        return {"k": "New", "n": e["n"], "args": rw_list(e["args"], fields, locals, base)}
+    if k == "Lambda"
+        let ls = locals
+        for p in e["params"]
+            add p["n"] to ls
+        return {"k": "Lambda", "params": e["params"], "body": rw_expr(e["body"], fields, ls, base)}
+    return e
+
+function rw_list(items, fields, locals, base)
+    let out = []
+    for it in items
+        add rw_expr(it, fields, locals, base) to out
+    return out
+
+function rw_target(t, fields, locals, base)
+    let k = t["k"]
+    if k == "TVar"
+        let v = t["n"]
+        if list_has(fields, v) and not list_has(locals, v) and v != "self"
+            return {"k": "TMember", "o": {"k": "Self"}, "n": v}
+        return t
+    if k == "TMember"
+        return {"k": "TMember", "o": rw_expr(t["o"], fields, locals, base), "n": t["n"]}
+    if k == "TIdx"
+        return {"k": "TIdx", "o": rw_expr(t["o"], fields, locals, base), "i": rw_expr(t["i"], fields, locals, base)}
+    if k == "TDeref"
+        return {"k": "TDeref", "e": rw_expr(t["e"], fields, locals, base)}
+    return t
+
+function rw_stmts(items, fields, locals, base)
+    let out = []
+    for s in items
+        add rw_stmt(s, fields, locals, base) to out
+    return out
+
+function rw_stmt(s, fields, locals, base)
+    let k = s["k"]
+    if k == "Decl"
+        let init = rw_expr(s["init"], fields, locals, base)
+        add s["n"] to locals
+        return {"k": "Decl", "ty": s["ty"], "n": s["n"], "init": init, "ln": s["ln"]}
+    if k == "Assign"
+        return {"k": "Assign", "t": rw_target(s["t"], fields, locals, base), "op": s["op"], "v": rw_expr(s["v"], fields, locals, base), "ln": s["ln"]}
+    if k == "IncDec"
+        return {"k": "IncDec", "t": rw_target(s["t"], fields, locals, base), "d": s["d"], "p": s["p"], "ln": s["ln"]}
+    if k == "Expr"
+        return {"k": "Expr", "e": rw_expr(s["e"], fields, locals, base), "ln": s["ln"]}
+    if k == "Print"
+        return {"k": "Print", "args": rw_list(s["args"], fields, locals, base), "ln": s["ln"]}
+    if k == "Report"
+        return {"k": "Report", "args": rw_list(s["args"], fields, locals, base), "ln": s["ln"]}
+    if k == "Debug"
+        return {"k": "Debug", "lv": s["lv"], "args": rw_list(s["args"], fields, locals, base), "ln": s["ln"]}
+    if k == "Return"
+        return {"k": "Return", "e": rw_expr(s["e"], fields, locals, base), "ln": s["ln"]}
+    if k == "If"
+        let brs = []
+        for br in s["branches"]
+            add [rw_expr(br[0], fields, locals, base), rw_stmts(br[1], fields, locals, base)] to brs
+        let eb = null
+        if s["else"] != null
+            eb = rw_stmts(s["else"], fields, locals, base)
+        return {"k": "If", "branches": brs, "else": eb, "ln": s["ln"]}
+    if k == "While"
+        return {"k": "While", "cond": rw_expr(s["cond"], fields, locals, base), "body": rw_stmts(s["body"], fields, locals, base), "ln": s["ln"]}
+    if k == "Repeat"
+        return {"k": "Repeat", "count": rw_expr(s["count"], fields, locals, base), "body": rw_stmts(s["body"], fields, locals, base), "ln": s["ln"]}
+    if k == "ForRange"
+        add s["var"] to locals
+        return {"k": "ForRange", "var": s["var"], "from": rw_expr(s["from"], fields, locals, base), "to": rw_expr(s["to"], fields, locals, base), "step": rw_expr(s["step"], fields, locals, base), "incl": s["incl"], "body": rw_stmts(s["body"], fields, locals, base), "ln": s["ln"]}
+    if k == "ForIn"
+        add s["var"] to locals
+        if s["val"] != null
+            add s["val"] to locals
+        return {"k": "ForIn", "var": s["var"], "val": s["val"], "iter": rw_expr(s["iter"], fields, locals, base), "body": rw_stmts(s["body"], fields, locals, base), "ln": s["ln"]}
+    if k == "Throw"
+        return {"k": "Throw", "e": rw_expr(s["e"], fields, locals, base), "ln": s["ln"]}
+    if k == "Try"
+        let cb = null
+        if s["cbody"] != null
+            cb = rw_stmts(s["cbody"], fields, locals, base)
+        let fb = null
+        if s["fin"] != null
+            fb = rw_stmts(s["fin"], fields, locals, base)
+        return {"k": "Try", "body": rw_stmts(s["body"], fields, locals, base), "catch": s["catch"], "cbody": cb, "fin": fb, "ln": s["ln"]}
+    return s
+
+function parse_class(st, indent, toks, li)
+    if len(toks) < 2
+        return parse_fail(st, li, "class 后面要写类名")
+    let cname = toks[1]["text"]
+    let base = null
+    let ei = find_tok(toks, "extends")
+    if ei > 0 and ei + 1 < len(toks)
+        base = toks[ei + 1]["text"]
+    st[1] += 1
+    let body = parse_block(st, indent)
+    let fields = []
+    let methods = []
+    for s in body
+        if s["k"] == "FuncDef"
+            add s to methods
+        elif s["k"] == "Decl"
+            add [s["n"], s["init"]] to fields
+    let own_names = []
+    for f in fields
+        add f[0] to own_names
+    /* 父类字段也算：方法里裸写继承来的字段名 */
+    let all_fields = []
+    for f in own_names
+        add f to all_fields
+    let cur = base
+    while cur != null and CLASS_INFO.has(cur)
+        let info = CLASS_INFO[cur]
+        for f in info["fields"]
+            if not list_has(all_fields, f)
+                add f to all_fields
+        cur = info["base"]
+    CLASS_INFO[cname] = {"base": base, "fields": own_names}
+
+    let out = []
+    /* ① 每个方法 → __m_类_方法(self, ...) */
+    for m in methods
+        let ps = [self_param()]
+        for p in m["params"]
+            add p to ps
+        let locals = ["self"]
+        for p in m["params"]
+            add p["n"] to locals
+        add {"k": "FuncDef", "n": "__m_" + cname + "_" + m["n"], "params": ps, "ret": null, "body": rw_stmts(m["body"], all_fields, locals, base), "ln": li} to out
+    /* ② init → __init_类_ */
+    let init = null
+    for m in methods
+        if m["n"] == "init"
+            init = m
+    if init != null
+        let ps = [self_param()]
+        for p in init["params"]
+            add p to ps
+        let locals = ["self"]
+        for p in init["params"]
+            add p["n"] to locals
+        add {"k": "FuncDef", "n": "__init_" + cname + "_", "params": ps, "ret": null, "body": rw_stmts(init["body"], all_fields, locals, base), "ln": li} to out
+    /* ③ __fields_类_：先铺父类，再铺自己的默认值 */
+    let fb = []
+    if base != null
+        add {"k": "Expr", "e": {"k": "Call", "c": {"k": "Var", "v": "__fields_" + base + "_"}, "args": [{"k": "Var", "v": "self"}]}, "ln": li} to fb
+    for f in fields
+        let dflt = {"k": "Null"}
+        if f[1] != null
+            dflt = f[1]
+        add {"k": "Assign", "t": {"k": "TMember", "o": {"k": "Var", "v": "self"}, "n": f[0]}, "op": "Set", "v": dflt, "ln": li} to fb
+    add {"k": "FuncDef", "n": "__fields_" + cname + "_", "params": [self_param()], "ret": null, "body": fb, "ln": li} to out
+    /* ④ __new_类_：建字典 → 记类名 → 铺字段 → 调 init → 返回 */
+    let nps = []
+    let nb = []
+    add {"k": "Decl", "ty": "dict", "n": "self", "init": {"k": "Dict", "v": []}, "ln": li} to nb
+    add {"k": "Assign", "t": {"k": "TIdx", "o": {"k": "Var", "v": "self"}, "i": {"k": "Str", "v": "__cls"}}, "op": "Set", "v": {"k": "Str", "v": cname}, "ln": li} to nb
+    if base != null
+        add {"k": "Assign", "t": {"k": "TIdx", "o": {"k": "Var", "v": "self"}, "i": {"k": "Str", "v": "__base"}}, "op": "Set", "v": {"k": "Str", "v": base}, "ln": li} to nb
+    add {"k": "Expr", "e": {"k": "Call", "c": {"k": "Var", "v": "__fields_" + cname + "_"}, "args": [{"k": "Var", "v": "self"}]}, "ln": li} to nb
+    if init != null
+        let args = [{"k": "Var", "v": "self"}]
+        for p in init["params"]
+            add p to nps
+            add {"k": "Var", "v": p["n"]} to args
+        add {"k": "Expr", "e": {"k": "Call", "c": {"k": "Var", "v": "__init_" + cname + "_"}, "args": args}, "ln": li} to nb
+    add {"k": "Return", "e": {"k": "Var", "v": "self"}, "ln": li} to nb
+    add {"k": "FuncDef", "n": "__new_" + cname + "_", "params": nps, "ret": null, "body": nb, "ln": li} to out
+    return {"k": "Group", "list": out, "ln": li}
+
+function parse_if(st, indent, toks, li)
+    let branches = []
+    let else_body = null
+    let cond = null
+    let r = expr_of_line(toks, 1)
+    if not r["ok"]
+        return parse_fail(st, li, r["err"])
+    cond = r["e"]
+    st[1] += 1
+    let body = parse_block(st, indent)
+    add [cond, body] to branches
+    while st[1] < st[2]
+        let ln = st[0][st[1]]
+        if ln["ind"] != indent
+            break
+        let w = ln["toks"][0]["text"]
+        if w == "elif"
+            let rr = expr_of_line(ln["toks"], 1)
+            if not rr["ok"]
+                return parse_fail(st, ln["ln"], rr["err"])
+            st[1] += 1
+            let b = parse_block(st, indent)
+            add [rr["e"], b] to branches
+            continue
+        if w == "else"
+            st[1] += 1
+            else_body = parse_block(st, indent)
+            break
+        break
+    return {"k": "If", "branches": branches, "else": else_body, "ln": li}
+
+function parse_for(st, indent, toks, li)
+    /* for i = a to b [step s]  /  for i in range(n)  /  for x in xs  /  for i, v in xs */
+    if len(toks) < 3
+        return parse_fail(st, li, "for 后面不完整")
+    let var = toks[1]["text"]
+    let val = null
+    let at = 1
+    if toks[2]["text"] == ","
+        if len(toks) < 4
+            return parse_fail(st, li, "for 的第二个变量缺失")
+        val = toks[3]["text"]
+        at = 3
+    let kw = ""
+    if at + 1 < len(toks)
+        kw = toks[at + 1]["text"]
+    if kw == "="
+        let from_i = at + 2
+        let from_pos = -1
+        let to_pos = -1
+        let k = from_i
+        while k < len(toks)
+            if toks[k]["text"] == "to"
+                from_pos = k
+                break
+            k += 1
+        if from_pos < 0
+            return parse_fail(st, li, "for-range 缺 to")
+        k = from_pos + 1
+        while k < len(toks)
+            if toks[k]["text"] == "step"
+                to_pos = k
+                break
+            k += 1
+        let from_ok = true
+        let from_e = null
+        if from_pos > from_i
+            let rf = expr_of_line(slice_toks(toks, from_i, from_pos), 0)
+            if not rf["ok"]
+                return parse_fail(st, li, rf["err"])
+            from_e = rf["e"]
+        let to_end = len(toks)
+        if to_pos >= 0
+            to_end = to_pos
+        let toks_to = slice_toks(toks, from_pos + 1, to_end)
+        let rt = expr_of_line(toks_to, 0)
+        if not rt["ok"]
+            return parse_fail(st, li, rt["err"])
+        let step = null
+        if to_pos >= 0
+            let rs = expr_of_line(toks, to_pos + 1)
+            if not rs["ok"]
+                return parse_fail(st, li, rs["err"])
+            step = rs["e"]
+        st[1] += 1
+        let body = parse_block(st, indent)
+        return {"k": "ForRange", "var": var, "from": from_e, "to": rt["e"], "step": step, "incl": true, "body": body, "ln": li}
+    if kw == "in"
+        let r = expr_of_line(toks, at + 2)
+        if not r["ok"]
+            return parse_fail(st, li, r["err"])
+        st[1] += 1
+        let body = parse_block(st, indent)
+        /* for i in range(n) / range(a, b) 降级成 ForRange（与 Rust 侧一致，含首不含尾） */
+        let it = r["e"]
+        if it["k"] == "Call" and it["c"]["k"] == "Var" and it["c"]["v"] == "range"
+            let a = it["args"]
+            if len(a) == 1
+                return {"k": "ForRange", "var": var, "from": null, "to": a[0], "step": null, "incl": false, "body": body, "ln": li}
+            if len(a) == 2
+                return {"k": "ForRange", "var": var, "from": a[0], "to": a[1], "step": null, "incl": false, "body": body, "ln": li}
+        return {"k": "ForIn", "var": var, "val": val, "iter": it, "body": body, "ln": li}
+    return parse_fail(st, li, "for 只认 for i = a to b 或 for i in xs")
+
+function parse_func(st, indent, toks, li)
+    if len(toks) < 2
+        return parse_fail(st, li, "函数名缺失")
+    /* fn int rnd(n)：名字前面可以写返回类型 */
+    let ret = null
+    let at = 1
+    if listin(toks[1]["text"], TYPE_WORDS) and len(toks) > 2 and toks[2]["kind"] == "IDENT"
+        ret = ty_word(toks[1]["text"])
+        at = 2
+    let name = toks[at]["text"]
+    at += 1
+    if at >= len(toks) or toks[at]["text"] != LPAR
+        return parse_fail(st, li, "函数名后面缺参数括号")
+    at += 1
+    let params = []
+    while at < len(toks)
+        if toks[at]["text"] == RPAR
+            at += 1
+            break
+        let nm = toks[at]["text"]
+        let ty = null
+        let def = null
+        let lazy = false
+        at += 1
+        /* lazy 前缀：lazy bool y（延迟参数，每次读它重新求值） */
+        if nm == "lazy"
+            lazy = true
+            if at < len(toks)
+                nm = toks[at]["text"]
+                at += 1
+            else
+                return parse_fail(st, li, "lazy 参数缺名字")
+        /* 类型前置写法：carve(ptr cursor, int n) —— 类型词后面跟参数名 */
+        if (nm == "int" or nm == "float" or nm == "str" or nm == "bool" or nm == "list" or nm == "dict" or nm == "ptr" or nm == "addr") and at < len(toks) and toks[at]["kind"] == "IDENT"
+            ty = nm
+            nm = toks[at]["text"]
+            at += 1
+        if at < len(toks) and toks[at]["text"] == ":"
+            at += 1
+            if at < len(toks)
+                ty = toks[at]["text"]
+                at += 1
+        if at < len(toks) and toks[at]["text"] == "="
+            at += 1
+            let start = at
+            let depth = 0
+            while at < len(toks)
+                let t = toks[at]["text"]
+                if t == LPAR or t == LBRACK or t == LBRACE
+                    depth += 1
+                elif t == RPAR or t == RBRACK or t == RBRACE
+                    if depth == 0
+                        break
+                    depth -= 1
+                if t == "," and depth == 0
+                    break
+                at += 1
+            let toks_def = []
+            let k = start
+            while k < at
+                add toks[k] to toks_def
+                k += 1
+            let r = expr_of_line(toks_def, 0)
+            if not r["ok"]
+                return parse_fail(st, li, r["err"])
+            def = r["e"]
+        add {"n": nm, "ty": ty, "def": def, "lazy": lazy} to params
+        if at < len(toks) and toks[at]["text"] == ","
+            at += 1
+            continue
+        if at < len(toks) and toks[at]["text"] == RPAR
+            at += 1
+            break
+    st[1] += 1
+    let body = parse_block(st, indent)
+    return {"k": "FuncDef", "n": name, "params": params, "ret": ret, "body": body, "ln": li}
+
+/* ═══════════════════════════ AST 输出（与 ast_dump.rs 逐字节一致） ═══════════════════════════ */
+
+function e_str(e)
+    if e == null
+        return "-"
+    let k = e["k"]
+    if k == "Num"
+        return "Num(" + str(e["v"]) + RPAR
+    if k == "Str"
+        return "Str(\"" + esc(e["v"]) + "\"" + RPAR
+    if k == "Bool"
+        if e["v"]
+            return "Bool(true)"
+        return "Bool(false)"
+    if k == "Null"
+        return "Null"
+    if k == "Var"
+        return "Var(" + e["v"] + RPAR
+    if k == "Self"
+        return "Self"
+    if k == "List"
+        return "List([" + join_items(e["v"]) + "])"
+    if k == "Dict"
+        let parts = []
+        for pr in e["v"]
+            add LPAR + e_str(pr[0]) + "," + e_str(pr[1]) + RPAR to parts
+        return "Dict([" + join_list(parts) + "])"
+    if k == "Un"
+        return "Un(" + e["op"] + "," + e_str(e["a"]) + RPAR
+    if k == "Bin"
+        return "Bin(" + e["op"] + "," + e_str(e["a"]) + "," + e_str(e["b"]) + RPAR
+    if k == "Tern"
+        return "Tern(" + e_str(e["c"]) + "," + e_str(e["a"]) + "," + e_str(e["b"]) + RPAR
+    if k == "Idx"
+        return "Idx(" + e_str(e["o"]) + "," + e_str(e["i"]) + RPAR
+    if k == "Slice"
+        return "Slice(" + e_str(e["o"]) + "," + e_str(e["f"]) + "," + e_str(e["t"]) + RPAR
+    if k == "Member"
+        return "Member(" + e_str(e["o"]) + "," + e["n"] + RPAR
+    if k == "Call"
+        return "Call(" + e_str(e["c"]) + ",[" + join_items(e["args"]) + "])"
+    if k == "New"
+        return "New(" + e["n"] + ",[" + join_items(e["args"]) + "])"
+    if k == "Lambda"
+        return "Lambda([" + join_params(e["params"]) + "]," + e_str(e["body"]) + RPAR
+    return "?"
+
+function join_items(items)
+    let parts = []
+    for it in items
+        add e_str(it) to parts
+    return join_list(parts)
+
+function join_list(parts)
+    let out = ""
+    let i = 0
+    while i < len(parts)
+        if i > 0
+            out = out + ","
+        out = out + parts[i]
+        i += 1
+    return out
+
+function param_str(p)
+    let ty = "-"
+    if p["ty"] != null
+        ty = p["ty"]
+    let def = "-"
+    if p["def"] != null
+        def = e_str(p["def"])
+    let lazy = ""
+    if p["lazy"]
+        lazy = ":lazy"
+    return LPAR + p["n"] + ":" + ty + ":" + def + lazy + RPAR
+
+function join_params(params)
+    let parts = []
+    for p in params
+        add param_str(p) to parts
+    return join_list(parts)
+
+function t_str(t)
+    if t == null
+        return "-"
+    let k = t["k"]
+    if k == "TVar"
+        return "Var(" + t["n"] + RPAR
+    if k == "TMember"
+        return "Member(" + e_str(t["o"]) + "," + t["n"] + RPAR
+    if k == "TIdx"
+        return "Idx(" + e_str(t["o"]) + "," + e_str(t["i"]) + RPAR
+    if k == "TDeref"
+        return "Deref(" + e_str(t["e"]) + RPAR
+    return "?"
+
+function join_names(names)
+    let out = ""
+    let i = 0
+    while i < len(names)
+        if i > 0
+            out = out + ","
+        out = out + names[i]
+        i += 1
+    return out
+
+function args_str(items)
+    return LBRACK + join_items(items) + RBRACK
+
+function indent_of(level)
+    let out = ""
+    let i = 0
+    while i < level
+        out = out + "  "
+        i += 1
+    return out
+
+function dump_stmt(s, level)
+    let pad = indent_of(level)
+    let k = s["k"]
+    if k == "Nop"
+        return ""
+    if k == "Decl"
+        return pad + "Decl " + s["ty"] + " " + s["n"] + " " + e_str(s["init"]) + "\n"
+    if k == "Assign"
+        return pad + "Assign " + t_str(s["t"]) + " " + s["op"] + " " + e_str(s["v"]) + "\n"
+    if k == "IncDec"
+        return pad + "IncDec " + t_str(s["t"]) + " " + str(s["d"]) + " " + str(s["p"]) + "\n"
+    if k == "Expr"
+        return pad + "Expr " + e_str(s["e"]) + "\n"
+    if k == "Print"
+        return pad + "Print " + args_str(s["args"]) + "\n"
+    if k == "Report"
+        return pad + "Report " + args_str(s["args"]) + "\n"
+    if k == "Debug"
+        return pad + "Debug " + str(s["lv"]) + " " + args_str(s["args"]) + "\n"
+    if k == "IfOut"
+        return pad + "IfOut " + e_str(s["e"]) + "\n"
+    if k == "WaitUntil"
+        return pad + "WaitUntil " + e_str(s["cond"]) + "\n" + dump_stmts(s["body"], level + 1)
+    if k == "TimeRead"
+        return pad + "TimeRead\n"
+    if k == "TimeReset"
+        return pad + "TimeReset\n"
+    if k == "Destructure"
+        return pad + "Destructure [" + join_names(s["names"]) + "] " + e_str(s["v"]) + "\n"
+    if k == "Ask"
+        return pad + "Ask " + e_str(s["e"]) + "\n"
+    if k == "If"
+        let out = pad + "If\n"
+        for br in s["branches"]
+            let c = "else"
+            if br[0] != null
+                c = e_str(br[0])
+            out = out + indent_of(level + 1) + "Branch " + c + "\n"
+            out = out + dump_stmts(br[1], level + 2)
+        if s["else"] != null
+            out = out + indent_of(level + 1) + "Else\n"
+            out = out + dump_stmts(s["else"], level + 2)
+        return out
+    if k == "While"
+        return pad + "While " + e_str(s["cond"]) + "\n" + dump_stmts(s["body"], level + 1)
+    if k == "Repeat"
+        return pad + "Repeat " + e_str(s["count"]) + "\n" + dump_stmts(s["body"], level + 1)
+    if k == "ForRange"
+        let f = e_str(s["from"])
+        let stp = e_str(s["step"])
+        let inc = 0
+        if s["incl"]
+            inc = 1
+        return pad + "ForRange " + s["var"] + " " + f + " " + e_str(s["to"]) + " " + stp + " " + str(inc) + "\n" + dump_stmts(s["body"], level + 1)
+    if k == "ForIn"
+        let v = "-"
+        if s["val"] != null
+            v = s["val"]
+        return pad + "ForIn " + s["var"] + " " + v + " " + e_str(s["iter"]) + "\n" + dump_stmts(s["body"], level + 1)
+    if k == "Break"
+        return pad + "Break\n"
+    if k == "Continue"
+        return pad + "Continue\n"
+    if k == "Stop"
+        return pad + "Stop\n"
+    if k == "Return"
+        return pad + "Return " + e_str(s["e"]) + "\n"
+    if k == "FuncDef"
+        let r = "-"
+        if s["ret"] != null
+            r = s["ret"]
+        return pad + "FuncDef " + s["n"] + " [" + join_params(s["params"]) + "] " + r + "\n" + dump_stmts(s["body"], level + 1)
+    if k == "Throw"
+        return pad + "Throw " + e_str(s["e"]) + "\n"
+    if k == "Try"
+        let out = pad + "Try\n"
+        out = out + dump_stmts(s["body"], level + 1)
+        let cn = "-"
+        if s["catch"] != null
+            cn = s["catch"]
+        out = out + indent_of(level + 1) + "Catch " + cn + "\n"
+        if s["cbody"] != null
+            out = out + dump_stmts(s["cbody"], level + 2)
+        out = out + indent_of(level + 1) + "Finally\n"
+        if s["fin"] != null
+            out = out + dump_stmts(s["fin"], level + 2)
+        return out
+    if k == "Group"
+        return pad + "Group\n" + dump_stmts(s["list"], level + 1)
+    return pad + "Unsupported " + k + "\n"
+
+function dump_stmts(items, level)
+    let out = ""
+    for s in items
+        out = out + dump_stmt(s, level)
+    return out
+
+/* ═══════════════════════════ 主流程 ═══════════════════════════ */
+
+function parse_source(path)
+    let src = readfile(path)
+    let raw_lines = split(src, "\n")
+    let total = len(raw_lines)
+    let lines = []
+    let li = 0
+    while li < total
+        let raw = raw_lines[li]
+        let skip = 0
+        let raw_len = strlen(raw)
+        while skip < raw_len
+            let sn = cc(raw, skip)
+            if sn == 32 or sn == 9 or sn == 12288 or sn == 13
+                skip += 1
+            else
+                break
+        let parts = strip_line_comment(raw)
+        let code = trim(parts["code"])
+        if strlen(code) > 0
+            let res = lex_line(code, 1)
+            if not res["ok"]
+                return {"ok": false, "err": "第 " + str(li + 1) + " 行：" + res["err"], "lines": [], "body": []}
+            add {"ln": li + 1, "ind": skip, "toks": res["toks"]} to lines
+        li += 1
+    if len(lines) == 0
+        return {"ok": true, "body": [], "lines": lines}
+    let st = [lines, 0, len(lines), ""]
+    let body = []
+    if lines[0]["ind"] != 0
+        return {"ok": true, "body": body, "lines": lines, "err": ""}
+    parse_stmts(st, 0, body)
+    if st[3] != ""
+        return {"ok": false, "err": st[3], "lines": lines, "body": body}
+    if st[1] < st[2]
+        return {"ok": false, "err": "第 " + str(lines[st[1]]["ln"]) + " 行：这一行没收进任何块（缩进对不上）", "lines": lines, "body": body}
+    return {"ok": true, "body": body, "lines": lines, "err": ""}
+
+function main_parse(path)
+    let r = parse_source(path)
+    if not r["ok"]
+        print("PARSE_ERROR " + r["err"])
+        return ""
+    print("Program")
+    print_trim(dump_stmts(r["body"], 1))
+    return ""
+
+/* print 一段已带换行的文本，去掉尾部多余换行 */
+function print_trim(s)
+    let n = strlen(s)
+    if n == 0
+        return ""
+    let out = substr(s, 0, n - 1)
+    print(out)
+    return ""
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+/* colang：Copper 自举编译器的「环境层」扩展
+/* 依赖前面已有的词法器 + 递归下降语法器（真 AST，不是正则糊弄）
+/* 提供：JSON 形式 AST 输出、结构统计、体检报告、命令行驱动
+/* 注意：Copper 字符串字面量里不能出现裸括号类字符，
+/*      所以 JSON 的括号一律用 charfrom 现造
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── 字符常量 ── */
+
+function jq()
+    return charfrom(34)
+
+function jbs()
+    return charfrom(92)
+
+function lb()
+    return charfrom(123)
+
+function rb()
+    return charfrom(125)
+
+function sl()
+    return charfrom(91)
+
+function sr()
+    return charfrom(93)
+
+function sep()
+    return ","
+
+/* ── JSON 拼装器 ── */
+
+function json_esc(s)
+    let n = strlen(s)
+    let out = ""
+    let i = 0
+    while i < n
+        let code = cc(s, i)
+        if code == 34
+            out = out + jbs() + jq()
+        elif code == 92
+            out = out + jbs() + jbs()
+        elif code == 10
+            out = out + jbs() + "n"
+        elif code == 13
+            out = out + jbs() + "r"
+        elif code == 9
+            out = out + jbs() + "t"
+        elif code < 32
+            out = out + " "
+        else
+            out = out + cw(s, i)
+        i += 1
+    return out
+
+function j_str(s)
+    if s == null
+        return "null"
+    return jq() + json_esc(s) + jq()
+
+function j_num(n)
+    if n == null
+        return "null"
+    return str(n)
+
+/* 一个字段：key 用原样，值已经是 JSON 文本 */
+function jf_to(raw)
+    return jq() + "t" + "o" + jq() + ":" + raw
+
+function jf(key, raw)
+    return jq() + key + jq() + ":" + raw
+
+/* 一个字段：值是字符串 */
+function jfs(key, v)
+    return jq() + key + jq() + ":" + j_str(v)
+
+function join_texts(items)
+    let out = ""
+    let i = 0
+    while i < len(items)
+        if i > 0
+            out = out + sep()
+        out = out + items[i]
+        i += 1
+    return out
+
+function j_obj(fields)
+    return lb() + join_texts(fields) + rb()
+
+function j_arr(items)
+    return sl() + join_texts(items) + sr()
+
+/* ── 表达式 → JSON ── */
+
+function j_exprs(items)
+    let out = []
+    let i = 0
+    while i < len(items)
+        add j_expr(items[i]) to out
+        i += 1
+    return j_arr(out)
+
+function j_pairs(pairs)
+    let out = []
+    let i = 0
+    while i < len(pairs)
+        let pr = pairs[i]
+        let one = []
+        add j_expr(pr[0]) to one
+        add j_expr(pr[1]) to one
+        add j_arr(one) to out
+        i += 1
+    return j_arr(out)
+
+function j_params(params)
+    let out = []
+    let i = 0
+    while i < len(params)
+        let p = params[i]
+        let f = []
+        add jfs("n", p["n"]) to f
+        add jf("ty",  j_str(p["ty"])) to f
+        add j_obj(f) to out
+        i += 1
+    return j_arr(out)
+
+function j_expr(e)
+    if e == null
+        return "null"
+    let k = e["k"]
+    let f = []
+    add jfs("k", k) to f
+    if k == "Num"
+        add jf("v",  j_num(e["v"])) to f
+        return j_obj(f)
+    if k == "Str"
+        add jf("v",  j_str(e["v"])) to f
+        return j_obj(f)
+    if k == "Bool"
+        add jf("v",  j_str(e["v"])) to f
+        return j_obj(f)
+    if k == "Null"
+        return j_obj(f)
+    if k == "Var"
+        add jfs("v", e["v"]) to f
+        return j_obj(f)
+    if k == "Self"
+        return j_obj(f)
+    if k == "List"
+        add jf("v",  j_exprs(e["v"])) to f
+        return j_obj(f)
+    if k == "Dict"
+        add jf("v",  j_pairs(e["v"])) to f
+        return j_obj(f)
+    if k == "Un"
+        add jfs("op", e["op"]) to f
+        add jf("a",  j_expr(e["a"])) to f
+        return j_obj(f)
+    if k == "Bin"
+        add jfs("op", e["op"]) to f
+        add jf("a",  j_expr(e["a"])) to f
+        add jf("b",  j_expr(e["b"])) to f
+        return j_obj(f)
+    if k == "Tern"
+        add jf("c",  j_expr(e["c"])) to f
+        add jf("a",  j_expr(e["a"])) to f
+        add jf("b",  j_expr(e["b"])) to f
+        return j_obj(f)
+    if k == "Idx"
+        add jf("o",  j_expr(e["o"])) to f
+        add jf("i",  j_expr(e["i"])) to f
+        return j_obj(f)
+    if k == "Slice"
+        add jf("o",  j_expr(e["o"])) to f
+        add jf("f",  j_expr(e["f"])) to f
+        add jf("t",  j_expr(e["t"])) to f
+        return j_obj(f)
+    if k == "Member"
+        add jfs("n", e["n"]) to f
+        add jf("o",  j_expr(e["o"])) to f
+        return j_obj(f)
+    if k == "Call"
+        add jf("c",  j_expr(e["c"])) to f
+        add jf("args",  j_exprs(e["args"])) to f
+        return j_obj(f)
+    if k == "New"
+        add jfs("n", e["n"]) to f
+        add jf("args",  j_exprs(e["args"])) to f
+        return j_obj(f)
+    if k == "Lambda"
+        add jf("params",  j_params(e["params"])) to f
+        add jf("body",  j_expr(e["body"])) to f
+        return j_obj(f)
+    add jfs("k", "Unsupported") to f
+    return j_obj(f)
+
+/* ── 赋值目标 → JSON ── */
+
+function j_target(t)
+    if t == null
+        return "null"
+    let k = t["k"]
+    let f = []
+    add jfs("k", k) to f
+    if k == "TVar"
+        add jfs("n", t["n"]) to f
+        return j_obj(f)
+    if k == "TMember"
+        add jfs("n", t["n"]) to f
+        add jf("o",  j_expr(t["o"])) to f
+        return j_obj(f)
+    if k == "TIdx"
+        add jf("o",  j_expr(t["o"])) to f
+        add jf("i",  j_expr(t["i"])) to f
+        return j_obj(f)
+    if k == "TDeref"
+        add jf("e",  j_expr(t["e"])) to f
+        return j_obj(f)
+    return j_obj(f)
+
+/* ── 语句 → JSON ── */
+
+function j_stmts(items)
+    let out = []
+    let i = 0
+    while i < len(items)
+        add j_stmt(items[i]) to out
+        i += 1
+    return j_arr(out)
+
+function j_body(items)
+    if items == null
+        return "null"
+    return j_stmts(items)
+
+function j_branches(brs)
+    let out = []
+    let i = 0
+    while i < len(brs)
+        let f = []
+        add jf("cond",  j_expr(brs[i][0])) to f
+        add jf("body",  j_stmts(brs[i][1])) to f
+        add j_obj(f) to out
+        i += 1
+    return j_arr(out)
+
+function j_stmt(s)
+    let k = s["k"]
+    let f = []
+    add jfs("k", k) to f
+    add jf("ln",  j_num(s["ln"])) to f
+    if k == "Decl"
+        add jfs("ty", s["ty"]) to f
+        add jfs("n", s["n"]) to f
+        add jf("init",  j_expr(s["init"])) to f
+        return j_obj(f)
+    if k == "Assign"
+        add jfs("op", s["op"]) to f
+        add jf("t",  j_target(s["t"])) to f
+        add jf("v",  j_expr(s["v"])) to f
+        return j_obj(f)
+    if k == "IncDec"
+        add jf("d",  j_num(s["d"])) to f
+        add jf("p",  j_str(s["p"])) to f
+        add jf("t",  j_target(s["t"])) to f
+        return j_obj(f)
+    if k == "Expr"
+        add jf("e",  j_expr(s["e"])) to f
+        return j_obj(f)
+    if k == "Print"
+        add jf("args",  j_exprs(s["args"])) to f
+        return j_obj(f)
+    if k == "Report"
+        add jf("args",  j_exprs(s["args"])) to f
+        return j_obj(f)
+    if k == "Debug"
+        add jf("lv",  j_num(s["lv"])) to f
+        add jf("args",  j_exprs(s["args"])) to f
+        return j_obj(f)
+    if k == "Ask"
+        add jf("e",  j_expr(s["e"])) to f
+        return j_obj(f)
+    if k == "If"
+        add jf("branches",  j_branches(s["branches"])) to f
+        add jf("else",  j_body(s["else"])) to f
+        return j_obj(f)
+    if k == "While"
+        add jf("cond",  j_expr(s["cond"])) to f
+        add jf("body",  j_stmts(s["body"])) to f
+        return j_obj(f)
+    if k == "Repeat"
+        add jf("count",  j_expr(s["count"])) to f
+        add jf("body",  j_stmts(s["body"])) to f
+        return j_obj(f)
+    if k == "ForRange"
+        add jfs("var", s["var"]) to f
+        add jf("incl",  j_str(s["incl"])) to f
+        add jf("from",  j_expr(s["from"])) to f
+        f.push(jf_to(j_expr(s["to"])))
+        add jf("step",  j_expr(s["step"])) to f
+        add jf("body",  j_stmts(s["body"])) to f
+        return j_obj(f)
+    if k == "ForIn"
+        add jfs("var", s["var"]) to f
+        add jf("val",  j_str(s["val"])) to f
+        add jf("iter",  j_expr(s["iter"])) to f
+        add jf("body",  j_stmts(s["body"])) to f
+        return j_obj(f)
+    if k == "Destructure"
+        add jf("names",  j_strs(s["names"])) to f
+        add jf("v",  j_expr(s["v"])) to f
+        return j_obj(f)
+    if k == "IfOut"
+        add jf("e",  j_expr(s["e"])) to f
+        return j_obj(f)
+    if k == "WaitUntil"
+        add jf("cond",  j_expr(s["cond"])) to f
+        add jf("body",  j_stmts(s["body"])) to f
+        return j_obj(f)
+    if k == "TimeRead"
+        return j_obj(f)
+    if k == "TimeReset"
+        return j_obj(f)
+    if k == "Break"
+        return j_obj(f)
+    if k == "Continue"
+        return j_obj(f)
+    if k == "Stop"
+        return j_obj(f)
+    if k == "Nop"
+        return j_obj(f)
+    if k == "Return"
+        add jf("e",  j_expr(s["e"])) to f
+        return j_obj(f)
+    if k == "Throw"
+        add jf("e",  j_expr(s["e"])) to f
+        return j_obj(f)
+    if k == "FuncDef"
+        add jfs("n", s["n"]) to f
+        add jf("ret",  j_str(s["ret"])) to f
+        add jf("params",  j_params(s["params"])) to f
+        add jf("body",  j_stmts(s["body"])) to f
+        return j_obj(f)
+    if k == "Try"
+        add jfs("catch", s["catch"]) to f
+        add jf("body",  j_stmts(s["body"])) to f
+        add jf("cbody",  j_body(s["cbody"])) to f
+        add jf("fin",  j_body(s["fin"])) to f
+        return j_obj(f)
+    if k == "Group"
+        add jf("list",  j_stmts(s["list"])) to f
+        return j_obj(f)
+    return j_obj(f)
+
+function j_strs(items)
+    let out = []
+    let i = 0
+    while i < len(items)
+        add j_str(items[i]) to out
+        i += 1
+    return j_arr(out)
+
+/* ── 结构统计 ── */
+
+function new_stats()
+    return {"stmts": 0, "funcs": 0, "classes": 0, "exprs": 0, "decls": 0, "calls": 0, "depth": 0, "maxbody": 0}
+
+function count_expr(e, sv, depth)
+    if e == null
+        return ""
+    sv["exprs"] += 1
+    if depth > sv["depth"]
+        sv["depth"] = depth
+    let k = e["k"]
+    if k == "Bin"
+        count_expr(e["a"], sv, depth + 1)
+        count_expr(e["b"], sv, depth + 1)
+        return ""
+    if k == "Tern"
+        count_expr(e["c"], sv, depth + 1)
+        count_expr(e["a"], sv, depth + 1)
+        count_expr(e["b"], sv, depth + 1)
+        return ""
+    if k == "Un"
+        count_expr(e["a"], sv, depth + 1)
+        return ""
+    if k == "Call"
+        sv["calls"] += 1
+        count_expr(e["c"], sv, depth + 1)
+        count_list_expr(e["args"], sv, depth + 1)
+        return ""
+    if k == "New"
+        count_list_expr(e["args"], sv, depth + 1)
+        return ""
+    if k == "Idx"
+        count_expr(e["o"], sv, depth + 1)
+        count_expr(e["i"], sv, depth + 1)
+        return ""
+    if k == "Slice"
+        count_expr(e["o"], sv, depth + 1)
+        count_expr(e["f"], sv, depth + 1)
+        count_expr(e["t"], sv, depth + 1)
+        return ""
+    if k == "Member"
+        count_expr(e["o"], sv, depth + 1)
+        return ""
+    if k == "List"
+        count_list_expr(e["v"], sv, depth + 1)
+        return ""
+    if k == "Dict"
+        let pairs = e["v"]
+        let i = 0
+        while i < len(pairs)
+            count_expr(pairs[i][0], sv, depth + 1)
+            count_expr(pairs[i][1], sv, depth + 1)
+            i += 1
+        return ""
+    if k == "Lambda"
+        count_expr(e["body"], sv, depth + 1)
+        return ""
+    return ""
+
+function count_list_expr(items, sv, depth)
+    let i = 0
+    while i < len(items)
+        count_expr(items[i], sv, depth)
+        i += 1
+    return ""
+
+function count_stmts(items, sv, depth)
+    let i = 0
+    while i < len(items)
+        count_stmt(items[i], sv, depth)
+        i += 1
+    if len(items) > sv["maxbody"]
+        sv["maxbody"] = len(items)
+    return ""
+
+function count_stmt(s, sv, depth)
+    sv["stmts"] += 1
+    if depth > sv["depth"]
+        sv["depth"] = depth
+    let k = s["k"]
+    if k == "Decl"
+        sv["decls"] += 1
+        count_expr(s["init"], sv, depth + 1)
+        return ""
+    if k == "Assign"
+        count_expr(s["v"], sv, depth + 1)
+        return ""
+    if k == "IncDec"
+        return ""
+    if k == "Expr"
+        count_expr(s["e"], sv, depth + 1)
+        return ""
+    if k == "Print"
+        count_list_expr(s["args"], sv, depth + 1)
+        return ""
+    if k == "Report"
+        count_list_expr(s["args"], sv, depth + 1)
+        return ""
+    if k == "Debug"
+        count_list_expr(s["args"], sv, depth + 1)
+        return ""
+    if k == "Ask"
+        count_expr(s["e"], sv, depth + 1)
+        return ""
+    if k == "If"
+        let brs = s["branches"]
+        let i = 0
+        while i < len(brs)
+            count_expr(brs[i][0], sv, depth + 1)
+            count_stmts(brs[i][1], sv, depth + 1)
+            i += 1
+        if s["else"] != null
+            count_stmts(s["else"], sv, depth + 1)
+        return ""
+    if k == "While"
+        count_expr(s["cond"], sv, depth + 1)
+        count_stmts(s["body"], sv, depth + 1)
+        return ""
+    if k == "Repeat"
+        count_expr(s["count"], sv, depth + 1)
+        count_stmts(s["body"], sv, depth + 1)
+        return ""
+    if k == "ForRange"
+        count_expr(s["from"], sv, depth + 1)
+        count_expr(s["to"], sv, depth + 1)
+        count_expr(s["step"], sv, depth + 1)
+        count_stmts(s["body"], sv, depth + 1)
+        return ""
+    if k == "ForIn"
+        count_expr(s["iter"], sv, depth + 1)
+        count_stmts(s["body"], sv, depth + 1)
+        return ""
+    if k == "Destructure"
+        count_expr(s["v"], sv, depth + 1)
+        return ""
+    if k == "IfOut"
+        count_expr(s["e"], sv, depth + 1)
+        return ""
+    if k == "WaitUntil"
+        count_expr(s["cond"], sv, depth + 1)
+        count_stmts(s["body"], sv, depth + 1)
+        return ""
+    if k == "Return"
+        count_expr(s["e"], sv, depth + 1)
+        return ""
+    if k == "Throw"
+        count_expr(s["e"], sv, depth + 1)
+        return ""
+    if k == "FuncDef"
+        sv["funcs"] += 1
+        count_stmts(s["body"], sv, depth + 1)
+        return ""
+    if k == "Try"
+        count_stmts(s["body"], sv, depth + 1)
+        if s["cbody"] != null
+            count_stmts(s["cbody"], sv, depth + 1)
+        if s["fin"] != null
+            count_stmts(s["fin"], sv, depth + 1)
+        return ""
+    if k == "Group"
+        sv["classes"] += 1
+        count_stmts(s["list"], sv, depth + 1)
+        return ""
+    return ""
+
+/* ── 体检：只查结构上确实错的（不猜） ── */
+
+function lint_stmts(items, ctx, out)
+    let i = 0
+    while i < len(items)
+        lint_stmt(items[i], ctx, out)
+        i += 1
+    return ""
+
+function lint_exprs(items, out)
+    let i = 0
+    while i < len(items)
+        lint_expr(items[i], out)
+        i += 1
+    return ""
+
+function lint_stmt(s, ctx, out)
+    let k = s["k"]
+    if k == "Break" or k == "Continue"
+        if ctx["loop"] < 1
+            add {"ln": s["ln"], "msg": "break/continue 只能写在循环里面"} to out
+        return ""
+    if k == "Return"
+        if ctx["func"] < 1
+            add {"ln": s["ln"], "msg": "return 只能写在函数里面"} to out
+        lint_expr(s["e"], out)
+        return ""
+    if k == "FuncDef"
+        let inner = {"loop": 0, "func": 1}
+        let names = []
+        let i = 0
+        while i < len(s["params"])
+            let pn = s["params"][i]["n"]
+            if list_has(names, pn)
+                add {"ln": s["ln"], "msg": "参数重名「" + pn + "」"} to out
+            add pn to names
+            i += 1
+        lint_stmts(s["body"], inner, out)
+        return ""
+    if k == "While"
+        lint_expr(s["cond"], out)
+        let inner = {"loop": ctx["loop"] + 1, "func": ctx["func"]}
+        lint_stmts(s["body"], inner, out)
+        return ""
+    if k == "Repeat"
+        lint_expr(s["count"], out)
+        let inner = {"loop": ctx["loop"] + 1, "func": ctx["func"]}
+        lint_stmts(s["body"], inner, out)
+        return ""
+    if k == "ForRange"
+        lint_expr(s["from"], out)
+        lint_expr(s["to"], out)
+        lint_expr(s["step"], out)
+        let inner = {"loop": ctx["loop"] + 1, "func": ctx["func"]}
+        lint_stmts(s["body"], inner, out)
+        return ""
+    if k == "ForIn"
+        lint_expr(s["iter"], out)
+        let inner = {"loop": ctx["loop"] + 1, "func": ctx["func"]}
+        lint_stmts(s["body"], inner, out)
+        return ""
+    if k == "WaitUntil"
+        lint_expr(s["cond"], out)
+        let inner = {"loop": ctx["loop"] + 1, "func": ctx["func"]}
+        lint_stmts(s["body"], inner, out)
+        return ""
+    if k == "If"
+        let brs = s["branches"]
+        let i = 0
+        while i < len(brs)
+            lint_expr(brs[i][0], out)
+            lint_stmts(brs[i][1], ctx, out)
+            i += 1
+        if s["else"] != null
+            lint_stmts(s["else"], ctx, out)
+        return ""
+    if k == "Try"
+        lint_stmts(s["body"], ctx, out)
+        if s["cbody"] != null
+            lint_stmts(s["cbody"], ctx, out)
+        if s["fin"] != null
+            lint_stmts(s["fin"], ctx, out)
+        return ""
+    if k == "Group"
+        lint_stmts(s["list"], ctx, out)
+        return ""
+    if k == "Decl"
+        lint_expr(s["init"], out)
+        return ""
+    if k == "Assign"
+        lint_expr(s["v"], out)
+        return ""
+    if k == "Expr"
+        lint_expr(s["e"], out)
+        return ""
+    if k == "Print" or k == "Report" or k == "Debug"
+        lint_exprs(s["args"], out)
+        return ""
+    if k == "Throw"
+        lint_expr(s["e"], out)
+        return ""
+    if k == "Ask"
+        lint_expr(s["e"], out)
+        return ""
+    return ""
+
+function lint_expr(e, out)
+    if e == null
+        return ""
+    let k = e["k"]
+    if k == "Bin"
+        lint_expr(e["a"], out)
+        lint_expr(e["b"], out)
+        return ""
+    if k == "Tern"
+        lint_expr(e["c"], out)
+        lint_expr(e["a"], out)
+        lint_expr(e["b"], out)
+        return ""
+    if k == "Un"
+        lint_expr(e["a"], out)
+        return ""
+    if k == "Call"
+        lint_expr(e["c"], out)
+        lint_exprs(e["args"], out)
+        return ""
+    if k == "New"
+        lint_exprs(e["args"], out)
+        return ""
+    if k == "Idx"
+        lint_expr(e["o"], out)
+        lint_expr(e["i"], out)
+        return ""
+    if k == "Slice"
+        lint_expr(e["o"], out)
+        lint_expr(e["f"], out)
+        lint_expr(e["t"], out)
+        return ""
+    if k == "Member"
+        lint_expr(e["o"], out)
+        return ""
+    if k == "List"
+        lint_exprs(e["v"], out)
+        return ""
+    if k == "Dict"
+        let pairs = e["v"]
+        let i = 0
+        while i < len(pairs)
+            lint_expr(pairs[i][0], out)
+            lint_expr(pairs[i][1], out)
+            i += 1
+        return ""
+    if k == "Lambda"
+        lint_expr(e["body"], out)
+        return ""
+    return ""
+
+/* ── 报告 ── */
+
+function stats_line(sv)
+    return "语句 " + str(sv["stmts"]) + " / 函数 " + str(sv["funcs"]) + " / 类 " + str(sv["classes"]) + " / 表达式 " + str(sv["exprs"]) + " / 调用 " + str(sv["calls"]) + " / 最大嵌套 " + str(sv["depth"]) + " / 最大块 " + str(sv["maxbody"])
+
+/* ── 命令行驱动 ──
+/* COLANG_TARGET：要处理的 .co
+/* COLANG_MODE：ast（默认，与 Rust 侧 ast_dump 同格式）/ json / stats / check */
+
+function colang_run(target)
+    if strlen(target) == 0
+        print("colang：没有给目标文件，请设环境变量 COLANG_TARGET")
+        return 1
+    if not hasfile(target)
+        print("colang：读不到文件「" + target + "」")
+        return 2
+    let r = parse_source(target)
+    if not r["ok"]
+        print("colang：语法有错 —— " + r["err"])
+        return 3
+    let mode = getenv("COLANG_MODE")
+    if strlen(mode) == 0
+        mode = "ast"
+    let sv = new_stats()
+    count_stmts(r["body"], sv, 1)
+    let bad = []
+    let ctx = {"loop": 0, "func": 0}
+    lint_stmts(r["body"], ctx, bad)
+    if mode == "stats"
+        print(stats_line(sv))
+        return 0
+    if mode == "json"
+        let f = []
+        add jfs("kind", "program") to f
+        add jfs("file", target) to f
+        add jf("stmts",  j_stmts(r["body"])) to f
+        print(j_obj(f))
+        return 0
+    if mode == "check"
+        if len(bad) == 0
+            print("colang：体检通过（" + stats_line(sv) + "）")
+            return 0
+        let i = 0
+        while i < len(bad)
+            print("  第 " + str(bad[i]["ln"]) + " 行：" + bad[i]["msg"])
+            i += 1
+        print("colang：体检发现 " + str(len(bad)) + " 处问题")
+        return 4
+    if mode == "build"
+        return colang_build(target)
+    print("Program")
+    print_trim(dump_stmts(r["body"], 1))
+    return 0
+
+let g_gen_err = ""
+
+let colang_target = getenv("COLANG_TARGET")
+let colang_rc = colang_run(colang_target)
+if colang_rc != 0
+    print("退出码 " + str(colang_rc))
+/* ═══════════════════════════════════════════════════════════════════════════
+/* colang 代码生成层（2c）：把真 AST 发射成 Rust，交给 cargo 编成原生 exe
+/* 约定：全部走 Value（先钉死"能编、能跑、和 VM 逐字节一致"，特化留后面）
+/* 运行时前奏从 COPPER_RT 指向的文件读（就是 AOT 用的那份 prelude）
+/* 注意：Copper 字符串里不能有裸括号，所以括号一律用 charfrom 现造
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+function g_lp()
+    return charfrom(40)
+
+function g_rp()
+    return charfrom(41)
+
+function g_lo()
+    return charfrom(123)
+
+function g_lc()
+    return charfrom(125)
+
+function g_ls()
+    return charfrom(91)
+
+function g_rs()
+    return charfrom(93)
+
+function g_cm()
+    return ","
+
+function g_q()
+    return charfrom(34)
+
+function g_nl()
+    return "\n"
+
+function g_dot()
+    return "."
+
+function g_map(ln)
+    return ".map_err(" + g_pipe() + "m" + g_pipe() + " fe(" + str(ln) + g_cm() + "1" + g_cm() + "m" + g_rp() + g_rp() + g_qm()
+
+function g_qm()
+    return "?"
+
+function g_pipe()
+    return charfrom(124)
+
+function g_has(s, sub)
+    let n = strlen(s)
+    let m = strlen(sub)
+    if m == 0
+        return true
+    let i = 0
+    while i + m <= n
+        if substr(s, i, m) == sub
+            return true
+        i += 1
+    return false
+
+function g_slash(s)
+    let n = strlen(s)
+    let out = ""
+    let i = 0
+    while i < n
+        if cc(s, i) == 92
+            out = out + "/"
+        else
+            out = out + cw(s, i)
+        i += 1
+    return out
+
+function g_id(name)
+    let n = strlen(name)
+    let out = ""
+    let i = 0
+    while i < n
+        let code = cc(name, i)
+        if code >= 97 and code <= 122
+            out = out + cw(name, i)
+        elif code >= 65 and code <= 90
+            out = out + cw(name, i)
+        elif code >= 48 and code <= 57
+            out = out + cw(name, i)
+        elif code == 95
+            out = out + cw(name, i)
+        else
+            out = out + "_"
+        i += 1
+    return out
+
+function g_p(out, s)
+    add s to out
+    return ""
+
+function g_join(items, acc)
+    let i = 0
+    while i < len(items)
+        acc = acc + items[i] + g_nl()
+        i += 1
+    return acc
+
+/* ── 顶层名字表（全局槽） ── */
+
+function g_collect_globals(body)
+    let names = []
+    add "ans" to names
+    add "__last_ans" to names
+    let i = 0
+    while i < len(body)
+        let s = body[i]
+        if s["k"] == "Decl"
+            if not listin(s["n"], names)
+                add s["n"] to names
+        if s["k"] == "Assign"
+            if s["t"] != null and s["t"]["k"] == "TVar"
+                if not listin(s["t"]["n"], names)
+                    add s["t"]["n"] to names
+        i += 1
+    return names
+
+function g_slot(names, name)
+    let i = 0
+    while i < len(names)
+        if names[i] == name
+            return i
+        i += 1
+    return -1
+
+/* ── 局部名字表（参数 + 体内 Decl + 循环变量） ── */
+
+function g_decls(items, out)
+    if items == null
+        return ""
+    let i = 0
+    while i < len(items)
+        let s = items[i]
+        let k = s["k"]
+        if k == "Decl"
+            if not listin(s["n"], out)
+                add s["n"] to out
+        if k == "If"
+            let j = 0
+            while j < len(s["branches"])
+                g_decls(s["branches"][j][1], out)
+                j += 1
+            g_decls(s["else"], out)
+        if k == "While"
+            g_decls(s["body"], out)
+        if k == "Repeat"
+            g_decls(s["body"], out)
+        if k == "ForRange"
+            if not listin(s["var"], out)
+                add s["var"] to out
+            g_decls(s["body"], out)
+        if k == "ForIn"
+            if not listin(s["var"], out)
+                add s["var"] to out
+            g_decls(s["body"], out)
+        if k == "Group"
+            g_decls(s["list"], out)
+        if k == "Try"
+            g_decls(s["body"], out)
+            g_decls(s["cbody"], out)
+            g_decls(s["fin"], out)
+        i += 1
+    return ""
+
+function g_params(params, out)
+    if params == null
+        return ""
+    let i = 0
+    while i < len(params)
+        if not listin(params[i]["n"], out)
+            add params[i]["n"] to out
+        i += 1
+    return ""
+
+/* ── 上下文 ── */
+
+function g_ctx(globals, locals, fns)
+    return {"g": globals, "l": locals, "f": fns, "err": ""}
+
+function g_var(ctx, name, ln)
+    if listin(name, ctx["l"])
+        return "c_" + g_id(name) + ".clone()"
+    let i = g_slot(ctx["g"], name)
+    if i < 0
+        ctx["err"] = "第 " + str(ln) + " 行：变量 " + name + " 没有声明（AOT 要求先声明再用）"
+        return "V::Null"
+    return "g.v" + g_ls() + str(i) + g_rs() + ".clone()"
+
+function g_dest(ctx, name, ln)
+    if listin(name, ctx["l"])
+        return "c_" + g_id(name)
+    let i = g_slot(ctx["g"], name)
+    if i < 0
+        ctx["err"] = "第 " + str(ln) + " 行：变量 " + name + " 没有声明（AOT 要求先声明再用）"
+        return "c_" + g_id(name)
+    return "g.v" + g_ls() + str(i) + g_rs()
+
+/* ── 字面量 ── */
+
+function g_str(s)
+    return "V::Str(Rc::new(" + g_q() + json_esc(s) + g_q() + g_dot() + "to_string" + g_lp() + g_rp() + g_rp() + g_rp()
+
+function g_num(v)
+    let t = str(v)
+    let i = 0
+    let dot = false
+    while i < strlen(t)
+        if cc(t, i) == 46
+            dot = true
+        i += 1
+    if dot
+        return "V::Float(" + t + ")"
+    return "V::Int(" + t + "i64)"
+
+/* ── 表达式 ── */
+
+function g_args(ctx, items, ln)
+    let out = ""
+    if items == null
+        return out
+    let i = 0
+    while i < len(items)
+        if i > 0
+            out = out + g_cm() + " "
+        out = out + g_lp() + g_expr(ctx, items[i], ln) + g_rp()
+        i += 1
+    return out
+
+function g_bin(ctx, op, a, b, ln)
+    let x = g_expr(ctx, a, ln)
+    let y = g_expr(ctx, b, ln)
+    if op == "Add"
+        return "v_add" + g_lp() + "&" + x + g_cm() + " &" + y + g_rp() + g_map(ln)
+    if op == "Sub"
+        return "v_sub" + g_lp() + "&" + x + g_cm() + " &" + y + g_rp() + g_map(ln)
+    if op == "Mul"
+        return "v_mul" + g_lp() + "&" + x + g_cm() + " &" + y + g_rp() + g_map(ln)
+    if op == "Div" or op == "IDiv"
+        return "arith" + g_lp() + "Op::Div" + g_cm() + " &" + x + g_cm() + " &" + y + g_rp() + g_map(ln)
+    if op == "Mod"
+        return "arith" + g_lp() + "Op::Mod" + g_cm() + " &" + x + g_cm() + " &" + y + g_rp() + g_map(ln)
+    if op == "Pow"
+        return "arith" + g_lp() + "Op::Pow" + g_cm() + " &" + x + g_cm() + " &" + y + g_rp() + g_map(ln)
+    if op == "Eq"
+        return "v_cmp" + g_lp() + "Op::Eq" + g_cm() + " &" + x + g_cm() + " &" + y + g_rp() + g_map(ln)
+    if op == "Ne"
+        return "v_cmp" + g_lp() + "Op::Ne" + g_cm() + " &" + x + g_cm() + " &" + y + g_rp() + g_map(ln)
+    if op == "Lt"
+        return "v_cmp" + g_lp() + "Op::Lt" + g_cm() + " &" + x + g_cm() + " &" + y + g_rp() + g_map(ln)
+    if op == "Le"
+        return "v_cmp" + g_lp() + "Op::Le" + g_cm() + " &" + x + g_cm() + " &" + y + g_rp() + g_map(ln)
+    if op == "Gt"
+        return "v_cmp" + g_lp() + "Op::Gt" + g_cm() + " &" + x + g_cm() + " &" + y + g_rp() + g_map(ln)
+    if op == "Ge"
+        return "v_cmp" + g_lp() + "Op::Ge" + g_cm() + " &" + x + g_cm() + " &" + y + g_rp() + g_map(ln)
+    if op == "BitAnd"
+        return "v_bit" + g_lp() + "Op::BitAnd" + g_cm() + " &" + x + g_cm() + " &" + y + g_rp() + g_map(ln)
+    if op == "BitOr"
+        return "v_bit" + g_lp() + "Op::BitOr" + g_cm() + " &" + x + g_cm() + " &" + y + g_rp() + g_map(ln)
+    if op == "BitXor"
+        return "v_bit" + g_lp() + "Op::BitXor" + g_cm() + " &" + x + g_cm() + " &" + y + g_rp() + g_map(ln)
+    if op == "Shl"
+        return "v_bit" + g_lp() + "Op::Shl" + g_cm() + " &" + x + g_cm() + " &" + y + g_rp() + g_map(ln)
+    if op == "Shr"
+        return "v_bit" + g_lp() + "Op::Shr" + g_cm() + " &" + x + g_cm() + " &" + y + g_rp() + g_map(ln)
+    if op == "And"
+        return g_lo() + " let __l = " + x + "; if t" + g_lp() + "&__l" + g_rp() + " " + g_lo() + " " + y + " " + g_lc() + " else " + g_lo() + " __l " + g_lc() + " " + g_lc()
+    if op == "Or"
+        return g_lo() + " let __l = " + x + "; if t" + g_lp() + "&__l" + g_rp() + " " + g_lo() + " __l " + g_lc() + " else " + g_lo() + " " + y + " " + g_lc() + " " + g_lc()
+    ctx["err"] = "第 " + str(ln) + " 行：代码生成暂不支持运算符 " + op
+    return "V::Null"
+
+function g_expr(ctx, e, ln)
+    if ctx["err"] != ""
+        return "V::Null"
+    if e == null
+        return "V::Null"
+    let k = e["k"]
+    if k == "Num"
+        return g_num(e["v"])
+    if k == "Str"
+        return g_str(e["v"])
+    if k == "Bool"
+        if e["v"] == "true" or e["v"] == true
+            return "V::Bool(true)"
+        return "V::Bool(false)"
+    if k == "Null"
+        return "V::Null"
+    if k == "Var"
+        return g_var(ctx, e["v"], ln)
+    if k == "List"
+        let parts = g_args(ctx, e["v"], ln)
+        return "V::List" + g_lp() + "Rc::new" + g_lp() + "std::cell::RefCell::new" + g_lp() + "vec!" + g_ls() + parts + g_rs() + g_rp() + g_rp() + g_rp()
+    if k == "Dict"
+        let mk = "V::Dict" + g_lp() + "Rc::new" + g_lp() + "std::cell::RefCell::new" + g_lp() + "Dict::new" + g_lp() + g_rp() + g_rp() + g_rp() + g_rp()
+        if len(e["v"]) == 0
+            return mk
+        let parts = []
+        g_p(parts, g_lo() + " let __d = " + mk + ";")
+        for pr in e["v"]
+            g_p(parts, "index_set" + g_lp() + "&__d" + g_cm() + " &" + g_lp() + g_expr(ctx, pr[0], ln) + g_rp() + g_dot() + "clone" + g_lp() + g_rp() + g_cm() + " " + g_lp() + g_expr(ctx, pr[1], ln) + g_rp() + g_dot() + "clone" + g_lp() + g_rp() + g_rp() + g_map(ln) + ";")
+        g_p(parts, "__d " + g_lc())
+        return g_join(parts, "")
+    if k == "Bin"
+        return g_bin(ctx, e["op"], e["a"], e["b"], ln)
+    if k == "Un"
+        let a = g_expr(ctx, e["a"], ln)
+        let op = e["op"]
+        if op == "Not"
+            return "V::Bool" + g_lp() + "!t" + g_lp() + "&" + a + g_rp() + g_rp()
+        if op == "Neg"
+            return "neg" + g_lp() + "&" + a + g_rp() + g_map(ln)
+        if op == "BitNot"
+            return "v_bit" + g_lp() + "Op::BitXor" + g_cm() + " &" + a + g_cm() + " &V::Int(-1i64)" + g_rp() + g_map(ln)
+        ctx["err"] = "第 " + str(ln) + " 行：代码生成暂不支持一元运算 " + op
+        return "V::Null"
+    if k == "Tern"
+        let c = g_expr(ctx, e["c"], ln)
+        let a = g_expr(ctx, e["a"], ln)
+        let b = g_expr(ctx, e["b"], ln)
+        return g_lo() + " if t" + g_lp() + "&" + c + g_rp() + " " + g_lo() + " " + a + " " + g_lc() + " else " + g_lo() + " " + b + " " + g_lc() + " " + g_lc()
+    if k == "Idx"
+        let o = g_expr(ctx, e["o"], ln)
+        let i = g_expr(ctx, e["i"], ln)
+        return "index_get" + g_lp() + "&" + o + g_cm() + " &" + i + g_rp() + g_map(ln)
+    if k == "Member"
+        let o = g_expr(ctx, e["o"], ln)
+        return "member_get" + g_lp() + "&" + o + g_cm() + " " + g_q() + json_esc(e["n"]) + g_q() + g_rp() + g_map(ln)
+    if k == "Call"
+        let c = e["c"]
+        if c != null and c["k"] == "Var"
+            let nm = c["v"]
+            if listin(nm, ctx["f"])
+                /* 参数先落临时变量：嵌套调用都借 &mut g 会撞 double borrow */
+                let pre = []
+                let call = "cf_" + g_id(nm) + g_lp() + "g"
+                let i2 = 0
+                if e["args"] != null
+                    while i2 < len(e["args"])
+                        let tv = "__a" + str(i2)
+                        g_p(pre, "let " + tv + ": V = " + g_lp() + g_expr(ctx, e["args"][i2], ln) + g_rp() + ";")
+                        call = call + g_cm() + " " + tv
+                        i2 += 1
+                call = call + g_rp() + g_qm()
+                let body = ""
+                let j2 = 0
+                while j2 < len(pre)
+                    body = body + pre[j2] + " "
+                    j2 += 1
+                return g_lo() + " " + body + call + " " + g_lc()
+            let a = g_args(ctx, e["args"], ln)
+            return "call_builtin" + g_lp() + g_q() + json_esc(nm) + g_q() + g_cm() + " &" + g_ls() + a + g_rs() + g_rp() + g_map(ln)
+        if c != null and c["k"] == "Member"
+            let o = g_expr(ctx, c["o"], ln)
+            let a = g_args(ctx, e["args"], ln)
+            return "method_call" + g_lp() + "&" + o + g_cm() + " " + g_q() + json_esc(c["n"]) + g_q() + g_cm() + " &" + g_ls() + a + g_rs() + g_cm() + " " + str(ln) + g_rp() + g_qm()
+        ctx["err"] = "第 " + str(ln) + " 行：代码生成暂不支持这种调用形式"
+        return "V::Null"
+    if k == "Slice"
+        ctx["err"] = "第 " + str(ln) + " 行：代码生成暂不支持切片"
+        return "V::Null"
+    if k == "New"
+        ctx["err"] = "第 " + str(ln) + " 行：代码生成暂不支持 new 建对象"
+        return "V::Null"
+    if k == "Lambda"
+        ctx["err"] = "第 " + str(ln) + " 行：代码生成暂不支持 lambda"
+        return "V::Null"
+    ctx["err"] = "第 " + str(ln) + " 行：不认识的表达式节点 " + k
+    return "V::Null"
+
+/* ── 语句 ── */
+
+function g_stmts(ctx, items, out)
+    if items == null
+        return ""
+    let i = 0
+    while i < len(items)
+        g_stmt(ctx, items[i], out)
+        i += 1
+    return ""
+
+function g_cop(op, cur, val, ln)
+    if op == "Add"
+        return "v_add" + g_lp() + "&" + cur + g_cm() + " &" + val + g_rp() + g_map(ln)
+    if op == "Sub"
+        return "v_sub" + g_lp() + "&" + cur + g_cm() + " &" + val + g_rp() + g_map(ln)
+    if op == "Mul"
+        return "v_mul" + g_lp() + "&" + cur + g_cm() + " &" + val + g_rp() + g_map(ln)
+    if op == "Div"
+        return "arith" + g_lp() + "Op::Div" + g_cm() + " &" + cur + g_cm() + " &" + val + g_rp() + g_map(ln)
+    if op == "IDiv"
+        return "arith" + g_lp() + "Op::IDiv" + g_cm() + " &" + cur + g_cm() + " &" + val + g_rp() + g_map(ln)
+    if op == "Mod"
+        return "arith" + g_lp() + "Op::Mod" + g_cm() + " &" + cur + g_cm() + " &" + val + g_rp() + g_map(ln)
+    if op == "Pow"
+        return "arith" + g_lp() + "Op::Pow" + g_cm() + " &" + cur + g_cm() + " &" + val + g_rp() + g_map(ln)
+    if op == "BitAnd"
+        return "v_bit" + g_lp() + "Op::BitAnd" + g_cm() + " &" + cur + g_cm() + " &" + val + g_rp() + g_map(ln)
+    if op == "BitOr"
+        return "v_bit" + g_lp() + "Op::BitOr" + g_cm() + " &" + cur + g_cm() + " &" + val + g_rp() + g_map(ln)
+    if op == "BitXor"
+        return "v_bit" + g_lp() + "Op::BitXor" + g_cm() + " &" + cur + g_cm() + " &" + val + g_rp() + g_map(ln)
+    if op == "Shl"
+        return "v_bit" + g_lp() + "Op::Shl" + g_cm() + " &" + cur + g_cm() + " &" + val + g_rp() + g_map(ln)
+    if op == "Shr"
+        return "v_bit" + g_lp() + "Op::Shr" + g_cm() + " &" + cur + g_cm() + " &" + val + g_rp() + g_map(ln)
+    return "V::Null"
+
+function g_assign(ctx, t, op, v, ln, out)
+    if t == null
+        return ""
+    let tk = t["k"]
+    if tk == "TVar"
+        let dest = g_dest(ctx, t["n"], ln)
+        if op == "Set"
+            g_p(out, dest + " = " + g_lp() + g_expr(ctx, v, ln) + g_rp() + g_dot() + "clone" + g_lp() + g_rp() + ";")
+            return ""
+        let cur = g_var(ctx, t["n"], ln)
+        if op == "Add"
+            g_p(out, dest + " = v_add" + g_lp() + "&" + cur + g_cm() + " &" + g_lp() + g_expr(ctx, v, ln) + g_rp() + g_rp() + g_map(ln) + ";")
+            return ""
+        if op == "Sub"
+            g_p(out, dest + " = v_sub" + g_lp() + "&" + cur + g_cm() + " &" + g_lp() + g_expr(ctx, v, ln) + g_rp() + g_rp() + g_map(ln) + ";")
+            return ""
+        if op == "Mul"
+            g_p(out, dest + " = v_mul" + g_lp() + "&" + cur + g_cm() + " &" + g_lp() + g_expr(ctx, v, ln) + g_rp() + g_rp() + g_map(ln) + ";")
+            return ""
+        if op == "Div"
+            g_p(out, dest + " = arith" + g_lp() + "Op::Div" + g_cm() + " &" + cur + g_cm() + " &" + g_lp() + g_expr(ctx, v, ln) + g_rp() + g_rp() + g_map(ln) + ";")
+            return ""
+        if op == "Mod"
+            g_p(out, dest + " = arith" + g_lp() + "Op::Mod" + g_cm() + " &" + cur + g_cm() + " &" + g_lp() + g_expr(ctx, v, ln) + g_rp() + g_rp() + g_map(ln) + ";")
+            return ""
+        ctx["err"] = "第 " + str(ln) + " 行：代码生成暂不支持复合赋值 " + op
+        return ""
+    if tk == "TIdx"
+        g_p(out, g_lo() + " let __o = " + g_expr(ctx, t["o"], ln) + "; let __i = " + g_expr(ctx, t["i"], ln) + ";")
+        if op == "Set"
+            g_p(out, "  index_set" + g_lp() + "&__o" + g_cm() + " &__i" + g_cm() + " " + g_lp() + g_expr(ctx, v, ln) + g_rp() + g_rp() + g_map(ln) + "; " + g_lc())
+            return ""
+        g_p(out, "  let __cur = index_get" + g_lp() + "&__o" + g_cm() + " &__i" + g_rp() + g_map(ln) + ";")
+        g_p(out, "  index_set" + g_lp() + "&__o" + g_cm() + " &__i" + g_cm() + " " + g_cop(op, "__cur", g_lp() + g_expr(ctx, v, ln) + g_rp(), ln) + g_rp() + g_map(ln) + "; " + g_lc())
+        return ""
+    if tk == "TMember"
+        g_p(out, g_lo() + " let __o = " + g_expr(ctx, t["o"], ln) + ";")
+        if op == "Set"
+            g_p(out, "  member_set" + g_lp() + "&__o" + g_cm() + " " + g_q() + json_esc(t["n"]) + g_q() + g_cm() + " " + g_lp() + g_expr(ctx, v, ln) + g_rp() + g_rp() + g_map(ln) + "; " + g_lc())
+            return ""
+        g_p(out, "  let __cur = member_get" + g_lp() + "&__o" + g_cm() + " " + g_q() + json_esc(t["n"]) + g_q() + g_rp() + g_map(ln) + ";")
+        g_p(out, "  member_set" + g_lp() + "&__o" + g_cm() + " " + g_q() + json_esc(t["n"]) + g_q() + g_cm() + " " + g_cop(op, "__cur", g_lp() + g_expr(ctx, v, ln) + g_rp(), ln) + g_rp() + g_map(ln) + "; " + g_lc())
+        return ""
+    ctx["err"] = "第 " + str(ln) + " 行：代码生成暂不支持的赋值 " + tk
+    return ""
+
+function g_if(ctx, s, out)
+    let brs = s["branches"]
+    let i = 0
+    while i < len(brs)
+        let cond = g_expr(ctx, brs[i][0], s["ln"])
+        let word = "if"
+        if i > 0
+            word = "else if"
+        g_p(out, word + " t" + g_lp() + "&" + g_lp() + cond + g_rp() + g_rp() + " " + g_lo())
+        g_stmts(ctx, brs[i][1], out)
+        g_p(out, g_lc())
+        i += 1
+    if s["else"] != null
+        g_p(out, "else " + g_lo())
+        g_stmts(ctx, s["else"], out)
+        g_p(out, g_lc())
+    return ""
+
+function g_stmt(ctx, s, out)
+    let k = s["k"]
+    let ln = s["ln"]
+    if k == "Decl"
+        let name = s["n"]
+        let init = "V::Null"
+        if s["init"] != null
+            init = g_lp() + g_expr(ctx, s["init"], ln) + g_rp() + g_dot() + "clone" + g_lp() + g_rp()
+        if listin(name, ctx["l"])
+            g_p(out, "c_" + g_id(name) + " = " + init + ";")
+        else
+            g_p(out, g_dest(ctx, name, ln) + " = " + init + ";")
+        return ""
+    if k == "Assign"
+        g_assign(ctx, s["t"], s["op"], s["v"], ln, out)
+        return ""
+    if k == "IncDec"
+        let dest = g_dest(ctx, s["t"]["n"], ln)
+        let one = "V::Int(" + str(s["d"]) + "i64)"
+        if s["p"] == "-"
+            g_p(out, dest + " = v_sub" + g_lp() + "&" + dest + g_dot() + "clone" + g_lp() + g_rp() + g_cm() + " &" + one + g_rp() + g_map(ln) + ";")
+        else
+            g_p(out, dest + " = v_add" + g_lp() + "&" + dest + g_dot() + "clone" + g_lp() + g_rp() + g_cm() + " &" + one + g_rp() + g_map(ln) + ";")
+        return ""
+    if k == "Expr"
+        if s["e"] != null
+            g_p(out, "let _ = " + g_expr(ctx, s["e"], ln) + ";")
+        return ""
+    if k == "Print"
+        let a = g_args(ctx, s["args"], ln)
+        g_p(out, "out_line" + g_lp() + "&show" + g_lp() + "&" + g_ls() + a + g_rs() + g_rp() + g_rp() + ";")
+        return ""
+    if k == "Report"
+        let a = g_args(ctx, s["args"], ln)
+        g_p(out, "out_line" + g_lp() + "&show" + g_lp() + "&" + g_ls() + a + g_rs() + g_rp() + g_rp() + ";")
+        return ""
+    if k == "If"
+        g_if(ctx, s, out)
+        return ""
+    if k == "While"
+        g_p(out, "while t" + g_lp() + "&" + g_lp() + g_expr(ctx, s["cond"], ln) + g_rp() + g_rp() + " " + g_lo())
+        g_stmts(ctx, s["body"], out)
+        g_p(out, g_lc())
+        return ""
+    if k == "Break"
+        g_p(out, "break;")
+        return ""
+    if k == "Continue"
+        g_p(out, "continue;")
+        return ""
+    if k == "Return"
+        if s["e"] == null
+            g_p(out, "return Ok(V::Null);")
+        else
+            g_p(out, "return Ok" + g_lp() + g_expr(ctx, s["e"], ln) + g_rp() + ";")
+        return ""
+    if k == "Stop"
+        g_p(out, "return Ok(V::Null);")
+        return ""
+    if k == "Ask"
+        if s["e"] != null
+            g_p(out, "out_line" + g_lp() + "&show" + g_lp() + "&" + g_ls() + g_lp() + g_expr(ctx, s["e"], ln) + g_rp() + g_dot() + "clone" + g_lp() + g_rp() + g_rs() + g_rp() + g_rp() + ";")
+        g_p(out, "let __ans_v = ask_line" + g_lp() + g_rp() + g_qm() + ";")
+        let a = g_slot(ctx["g"], "ans")
+        let b = g_slot(ctx["g"], "__last_ans")
+        if a >= 0
+            g_p(out, "g.v" + g_ls() + str(a) + g_rs() + " = __ans_v.clone();")
+        if b >= 0
+            g_p(out, "g.v" + g_ls() + str(b) + g_rs() + " = __ans_v.clone();")
+        return ""
+    if k == "FuncDef"
+        return ""
+    if k == "Nop"
+        return ""
+    if k == "Group"
+        g_stmts(ctx, s["list"], out)
+        return ""
+    if k == "Repeat"
+        g_p(out, g_lo() + " let __n = want_int_at" + g_lp() + "&" + g_lp() + g_expr(ctx, s["count"], ln) + g_rp() + g_cm() + " " + str(ln) + g_cm() + " 1" + g_rp() + g_qm() + "; let mut __k: i64 = 0;")
+        g_p(out, "  while __k < __n " + g_lo())
+        g_p(out, "    __k += 1;")
+        g_stmts(ctx, s["body"], out)
+        g_p(out, "  " + g_lc() + " " + g_lc())
+        return ""
+    if k == "ForRange"
+        let vname = s["var"]
+        let cmpword = "<"
+        if s["incl"] == "true"
+            cmpword = "<="
+        g_p(out, g_lo() + " let __a = want_int_at" + g_lp() + "&" + g_lp() + g_expr(ctx, s["from"], ln) + g_rp() + g_cm() + " " + str(ln) + g_cm() + " 1" + g_rp() + g_qm() + ";")
+        g_p(out, "  let __b = want_int_at" + g_lp() + "&" + g_lp() + g_expr(ctx, s["to"], ln) + g_rp() + g_cm() + " " + str(ln) + g_cm() + " 1" + g_rp() + g_qm() + ";")
+        let stepexpr = "1i64"
+        if s["step"] != null
+            stepexpr = "want_int_at" + g_lp() + "&" + g_lp() + g_expr(ctx, s["step"], ln) + g_rp() + g_cm() + " " + str(ln) + g_cm() + " 1" + g_rp() + g_qm()
+        g_p(out, "  let mut __i = __a; let __step = " + stepexpr + ";")
+        g_p(out, "  while " + g_lp() + "__step > 0 && __i " + cmpword + " __b" + g_rp() + " || " + g_lp() + "__step < 0 && __i > __b" + g_rp() + " " + g_lo())
+        g_p(out, "    " + g_dest(ctx, vname, ln) + " = V::Int(__i);")
+        g_stmts(ctx, s["body"], out)
+        g_p(out, "    __i += __step; " + g_lc() + " " + g_lc())
+        return ""
+    if k == "ForIn"
+        let vname = s["var"]
+        let valname = s["val"]
+        if valname == null or strlen(valname) == 0
+            g_p(out, g_lo() + " let __it = iter_src" + g_lp() + "&" + g_lp() + g_expr(ctx, s["iter"], ln) + g_rp() + g_rp() + ".map_err(" + g_pipe() + "m" + g_pipe() + " fe(" + str(ln) + g_cm() + "1" + g_cm() + "m" + g_rp() + g_rp() + g_qm() + ";")
+            g_p(out, "  for __x in __it " + g_lo())
+            g_p(out, "    " + g_dest(ctx, vname, ln) + " = __x;")
+            g_stmts(ctx, s["body"], out)
+            g_p(out, "  " + g_lc() + " " + g_lc())
+            return ""
+        g_p(out, g_lo() + " let __it = iter_pair_src" + g_lp() + "&" + g_lp() + g_expr(ctx, s["iter"], ln) + g_rp() + g_rp() + ".map_err(" + g_pipe() + "m" + g_pipe() + " fe(" + str(ln) + g_cm() + "1" + g_cm() + "m" + g_rp() + g_rp() + g_qm() + ";")
+        g_p(out, "  for " + g_lp() + "__k" + g_cm() + " __v" + g_rp() + " in __it " + g_lo())
+        g_p(out, "    " + g_dest(ctx, vname, ln) + " = __k;")
+        g_p(out, "    " + g_dest(ctx, valname, ln) + " = __v;")
+        g_stmts(ctx, s["body"], out)
+        g_p(out, "  " + g_lc() + " " + g_lc())
+        return ""
+    ctx["err"] = "第 " + str(ln) + " 行：代码生成暂不支持语句 " + k
+    return ""
+
+/* ── 函数 ── */
+
+function g_fn(globals, fnames, f, out)
+    let name = f["n"]
+    let pnames = []
+    g_params(f["params"], pnames)
+    let decls = []
+    g_decls(f["body"], decls)
+    let locals = []
+    let i = 0
+    while i < len(pnames)
+        add pnames[i] to locals
+        i += 1
+    i = 0
+    while i < len(decls)
+        if not listin(decls[i], locals)
+            add decls[i] to locals
+        i += 1
+    let ctx = g_ctx(globals, locals, fnames)
+    let head = "fn cf_" + g_id(name) + g_lp() + "g: &mut Globals"
+    i = 0
+    while i < len(f["params"])
+        head = head + g_cm() + " mut c_" + g_id(f["params"][i]["n"]) + ": V"
+        i += 1
+    g_p(out, "#[allow(unused_mut)]")
+    g_p(out, head + g_rp() + " -> R<V> " + g_lo())
+    g_p(out, "let _d = enter" + g_lp() + g_q() + json_esc(name) + g_q() + g_rp() + g_qm() + ";")
+    i = 0
+    while i < len(decls)
+        if not listin(decls[i], pnames)
+            g_p(out, "let mut c_" + g_id(decls[i]) + ": V = V::Null;")
+        i += 1
+    g_stmts(ctx, f["body"], out)
+    if ctx["err"] != "" and g_gen_err == ""
+        g_gen_err = ctx["err"]
+    g_p(out, "Ok(V::Null)")
+    g_p(out, g_lc())
+    g_p(out, "")
+    return ""
+
+/* ── 整个程序 ── */
+
+function g_program(globals, fns, body, rt_text)
+    let out = []
+    g_p(out, rt_text)
+    g_p(out, "")
+    let fnames = []
+    let i = 0
+    while i < len(fns)
+        add fns[i]["n"] to fnames
+        i += 1
+    i = 0
+    while i < len(fns)
+        g_fn(globals, fnames, fns[i], out)
+        i += 1
+    if g_gen_err != ""
+        print("colang build：" + g_gen_err)
+        return ""
+    let top = []
+    i = 0
+    while i < len(body)
+        if body[i]["k"] != "FuncDef"
+            add body[i] to top
+        i += 1
+    let ctx = g_ctx(globals, [], fnames)
+    let head = "fn run_top" + g_lp() + "g: &mut Globals" + g_rp() + " -> R<V> " + g_lo()
+    g_p(out, "#[allow(unused_mut)]")
+    g_p(out, head)
+    g_stmts(ctx, top, out)
+    if strlen(ctx["err"]) > 0
+        print("colang build：" + ctx["err"])
+        return ""
+    g_p(out, "out_flush" + g_lp() + g_rp() + ";")
+    g_p(out, "Ok(V::Null)")
+    g_p(out, g_lc())
+    g_p(out, "")
+    g_p(out, "fn main" + g_lp() + g_rp() + " " + g_lo())
+    /* 大栈线程：深递归专用（512MB 虚拟预留，按需提交）。递归上限由 prelude 的 enter 管，默认 100 万层 */
+    g_p(out, "    let __h = std::thread::Builder::new" + g_lp() + g_rp() + g_dot() + "stack_size" + g_lp() + "512 * 1024 * 1024" + g_rp() + g_dot() + "spawn" + g_lp() + g_pipe() + g_pipe() + " " + g_lo())
+    g_p(out, "    let mut g = Globals " + g_lo() + " v: vec!" + g_ls() + "V::Null; " + str(len(globals)) + g_rs() + g_cm() + " gi: vec!" + g_ls() + g_rs() + g_cm() + " err: 0 " + g_lc() + ";")
+    g_p(out, "    if let Err(e) = run_top" + g_lp() + "&mut g" + g_rp() + " " + g_lo() + " out_flush" + g_lp() + g_rp() + "; eprintln!" + g_lp() + g_q() + "出错：第 " + charfrom(123) + charfrom(125) + " 行：" + charfrom(123) + charfrom(125) + g_q() + g_cm() + " e.span.line" + g_cm() + " e.message" + g_rp() + "; std::process::exit" + g_lp() + "1" + g_rp() + " " + g_lc())
+    g_p(out, "    " + g_lc() + g_rp() + g_dot() + "unwrap" + g_lp() + g_rp() + g_dot() + "join" + g_lp() + g_rp() + g_dot() + "unwrap" + g_lp() + g_rp() + ";")
+    g_p(out, g_lc())
+    g_p(out, "")
+    return g_join(out, "")
+
+/* ── 驱动：colang build ── */
+
+function colang_build(target)
+    let rt = getenv("COPPER_RT")
+    if strlen(rt) == 0
+        print("colang build：先设环境变量 COPPER_RT 指向运行时前奏文件")
+        return 6
+    if not hasfile(rt)
+        print("colang build：找不到前奏文件 " + rt)
+        return 6
+    let out = getenv("COLANG_OUT")
+    if strlen(out) == 0
+        print("colang build：先设环境变量 COLANG_OUT 指向构建目录")
+        return 6
+    let crate = getenv("COLANG_CRATE")
+    if strlen(crate) == 0
+        print("colang build：先设环境变量 COLANG_CRATE 指向 float-lang crate 目录")
+        return 6
+    let r = parse_source(target)
+    if not r["ok"]
+        print("colang build：语法有错 —— " + r["err"])
+        return 3
+    let globals = g_collect_globals(r["body"])
+    let fns = []
+    let i = 0
+    while i < len(r["body"])
+        if r["body"][i]["k"] == "FuncDef"
+            add r["body"][i] to fns
+        i += 1
+    let code = g_program(globals, fns, r["body"], readfile(rt))
+    if strlen(code) == 0
+        return 5
+    runcmd("mkdir " + out + " 2> nul")
+    runcmd("mkdir " + out + "\\src 2> nul")
+    writefile(pathjoin(out, "src\\main.rs"), code)
+    let toml = g_ls() + "package" + g_rs() + g_nl()
+    toml = toml + "name = " + g_q() + "copper_build" + g_q() + g_nl()
+    toml = toml + "version = " + g_q() + "0.1.0" + g_q() + g_nl()
+    toml = toml + "edition = " + g_q() + "2021" + g_q() + g_nl() + g_nl()
+    toml = toml + g_ls() + g_ls() + "bin" + g_rs() + g_rs() + g_nl()
+    toml = toml + "name = " + g_q() + "app" + g_q() + g_nl()
+    toml = toml + "path = " + g_q() + "src/main.rs" + g_q() + g_nl() + g_nl()
+    toml = toml + g_ls() + "dependencies" + g_rs() + g_nl()
+    toml = toml + "float-lang = " + g_lo() + " path = " + g_q() + g_slash(crate) + g_q() + " " + g_lc() + g_nl() + g_nl()
+    /* 和 Rust 引擎 AOT 一样的构建档位：O3 + 全量 LTO + 单单元，避免跨 crate 不内联 */
+    toml = toml + g_ls() + "profile" + g_dot() + "release" + g_rs() + g_nl()
+    toml = toml + "opt-level = 3" + g_nl()
+    toml = toml + g_q() + "lto" + g_q() + " = " + g_q() + "fat" + g_q() + g_nl()
+    toml = toml + "codegen-units = 1" + g_nl()
+    toml = toml + "panic = " + g_q() + "abort" + g_q() + g_nl()
+    writefile(pathjoin(out, "Cargo.toml"), toml)
+    print("colang build：已发射 Rust 源码，开始编译……")
+    let log = pathjoin(out, "build.log")
+    runcmd("cd /d " + out + " && " + getenv("COLANG_CARGO") + " build --release > " + log + " 2>&1")
+    let lr = readfile(log)
+    if g_has(lr, "error[") or g_has(lr, "could not compile")
+        let n0 = strlen(lr)
+        if n0 > 4000
+            print(substr(lr, n0 - 4000, 4000))
+        else
+            print(lr)
+        print("colang build：编译失败（看上面的 rustc 输出）")
+        return 7
+    if strlen(lr) > 0
+        let n = strlen(lr)
+        if n > 4000
+            print(substr(lr, n - 4000, 4000))
+        else
+            print(lr)
+    let exe = pathjoin(out, "target\\release\\app.exe")
+    if not hasfile(exe)
+        print("colang build：编译失败（看上面的 rustc 输出）")
+        return 7
+    print("colang build：完成 -> " + exe)
+    return 0

@@ -9,3 +9,4 @@ pub mod plugins;
 pub mod mcp;
 pub mod watch;
 pub mod assoc;
+pub mod copper_env;

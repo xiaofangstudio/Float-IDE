@@ -300,11 +300,9 @@ fn build_native(rust_src: &str, script: &Path) -> Result<PathBuf, String> {
     std::fs::write(
         dir.join("Cargo.toml"),
         format!(
-            /* 别用 lto=true + codegen-units=1：那是最吃 rustc 内存的组合，
-             * 编译一个脚本就能顶到几个 G（整机卡死过）。分块路径早就是这套温和参数，
-             * 单文件也对齐：opt-level 2 + 关 LTO + 4 个 codegen 单元 + strip。
-             * 降级一点编译优化无所谓——VM 本来就比 Python 快。 */
-            "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nfloat-lang = {{ path = {:?} }}\n\n[[bin]]\nname = \"{}\"\npath = \"src/main.rs\"\n\n[profile.release]\nopt-level = 2\nlto = false\ncodegen-units = 4\npanic = \"abort\"\nincremental = false\ndebug = false\nstrip = \"symbols\"\n",
+            /* 运行性能优先：O3 + thin LTO + 单 codegen 单元（thin 比 fat 轻得多，
+             * 内存峰值可控）。编译吃内存时靠 -j 1 限流兜底。 */
+            "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nfloat-lang = {{ path = {:?} }}\n\n[[bin]]\nname = \"{}\"\npath = \"src/main.rs\"\n\n[profile.release]\nopt-level = 3\nlto = \"thin\"\ncodegen-units = 1\npanic = \"abort\"\nincremental = false\ndebug = false\nstrip = \"symbols\"\n",
             safe_stem,
             env!("CARGO_MANIFEST_DIR"),
             safe_stem

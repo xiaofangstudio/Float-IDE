@@ -1,0 +1,16 @@
+{
+  "name": "copper",
+  "version": "1.0.0",
+  "language": "Copper 1.0",
+  "platform": "windows-x64",
+  "layout": {
+    "bin": "bin",
+    "lib": "lib"
+  },
+  "compilers": {
+    "env": "bin/copper.exe",
+    "self": "bin/copper-self.exe"
+  },
+  "runtime": "lib/colang_rt.rs",
+  "notes": "copper.exe 是 Copper 源码 colang.co 经 Rust-AOT 编出的环境编译器；copper-self.exe 是 colang.exe 再次编出来的自举版（两者输出逐字节一致）。换平台只需把对应平台的二进制放进 bin/ 并把 platform 改成 macos-arm64 / linux-x64。"
+}

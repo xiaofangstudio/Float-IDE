@@ -1,0 +1,77 @@
+/* bench.co：分项基准（数字/字符串/列表/字典/递归/调用各一条，单独计时）
+/* 直接计时，不把函数当值传递（AOT 侧函数值还没做，避免测出来的是回退路径）
+
+fn fib(int n)
+    if n < 2
+        return n
+    return fib(n - 1) + fib(n - 2)
+
+fn mix(int n)
+    int acc = 0
+    int i = 0
+    while i < n
+        acc = (acc + i * 3) % 1000003
+        i += 1
+    return acc
+
+fn strwork(int n)
+    str s = ""
+    int i = 0
+    while i < n
+        s = s + "x"
+        i += 1
+    return strlen(s)
+
+fn listwork(int n)
+    list xs = []
+    int i = 0
+    while i < n
+        add i to xs
+        i += 1
+    return len(xs)
+
+fn dictwork(int n)
+    dict d = {}
+    int i = 0
+    while i < n
+        d[str(i % 1000)] = i
+        i += 1
+    return d.len()
+
+fn callwork(int n)
+    int acc = 0
+    int i = 0
+    while i < n
+        acc = acc + fib(10)
+        i += 1
+    return acc
+
+int t0 = now()
+int r1 = fib(30)
+int t1 = now()
+print("递归 fib(30) " + str(t1 - t0) + " ms  -> " + str(r1))
+
+t0 = now()
+int r2 = mix(3000000)
+t1 = now()
+print("数字循环 3M " + str(t1 - t0) + " ms  -> " + str(r2))
+
+t0 = now()
+int r3 = strwork(100000)
+t1 = now()
+print("字符串拼接 100k " + str(t1 - t0) + " ms  -> " + str(r3))
+
+t0 = now()
+int r4 = listwork(300000)
+t1 = now()
+print("列表 push 300k " + str(t1 - t0) + " ms  -> " + str(r4))
+
+t0 = now()
+int r5 = dictwork(100000)
+t1 = now()
+print("字典写入 100k " + str(t1 - t0) + " ms  -> " + str(r5))
+
+t0 = now()
+int r6 = callwork(100000)
+t1 = now()
+print("函数调用 100k 次 " + str(t1 - t0) + " ms  -> " + str(r6))

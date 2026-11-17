@@ -1,0 +1,404 @@
+/* Copper 自举词法器（第 2a 步 · 半自举）
+/* 与 Rust 引擎 src/token.rs 的 tokenize_line 逐 token 语义 1:1 对齐：
+/* 全角归一、字符串转义与插值括号嵌套、数字四种形态、中文标识符、
+/* and/or/not 运算符写法、40 个运算符最长匹配、9 个标点、词法报错位置。
+/* 输入：环境变量 COPPER_LEX_TARGET 指向的 .co 源码
+/* 输出：与 examples/dump_tokens.rs 完全相同的格式，逐 token 对拍用
+
+/* Copper 字符串里写裸 { 会撞插值词法（{ 让引号闭合判定挂起），
+/* 所以本文件里所有 { } 字符字面量一律用码点构造
+let LBRACE = charfrom(123)
+let RBRACE = charfrom(125)
+
+/* ── 全角符号 → 半角（只用于代码区，字符串内容不转换）── */
+function halfwidth(c)
+    if c == "＋"
+        return "+"
+    if c == "－"
+        return "-"
+    if c == "＊"
+        return "*"
+    if c == "／"
+        return "/"
+    if c == "％"
+        return "%"
+    if c == "＝"
+        return "="
+    if c == "＜"
+        return "<"
+    if c == "＞"
+        return ">"
+    if c == "！"
+        return "!"
+    if c == "＆"
+        return "&"
+    if c == "｜"
+        return "|"
+    if c == "＾"
+        return "^"
+    if c == "～"
+        return "~"
+    if c == "〜"
+        return "~"
+    if c == "（"
+        return "("
+    if c == "）"
+        return ")"
+    if c == "［"
+        return "["
+    if c == "］"
+        return "]"
+    if c == charfrom(65371)
+        return LBRACE
+    if c == charfrom(65373)
+        return RBRACE
+    if c == "，"
+        return ","
+    if c == "；"
+        return ";"
+    if c == "："
+        return ":"
+    if c == "？"
+        return "?"
+    if c == "。"
+        return "."
+    if c == charfrom(8220)
+        return "\""
+    if c == charfrom(8221)
+        return "\""
+    if c == charfrom(8216)
+        return "'"
+    if c == charfrom(8217)
+        return "'"
+    return c
+
+/* ── 取第 i 个字符，越界给空串（不让 char 报错打断主流程）── */
+function cw(code, i)
+    if i < 0
+        return ""
+    if i >= strlen(code)
+        return ""
+    return char(code, i)
+
+function cc(code, i)
+    /* 第 i 个字符的码点，越界给 -1 */
+    if i < 0
+        return -1
+    if i >= strlen(code)
+        return -1
+    return charcode(code, i)
+
+function is_digit_n(n)
+    return n >= 48 and n <= 57
+
+function is_alpha_n(n)
+    return (n >= 65 and n <= 90) or (n >= 97 and n <= 122)
+
+function is_id_start_n(n)
+    if is_alpha_n(n)
+        return true
+    if n == 95
+        return true
+    if n >= 19968 and n <= 40895
+        return true
+    if n >= 13312 and n <= 19903
+        return true
+    return false
+
+function is_id_part_n(n)
+    if is_id_start_n(n)
+        return true
+    return is_digit_n(n)
+
+function is_hex_n(n)
+    if is_digit_n(n)
+        return true
+    if n >= 97 and n <= 102
+        return true
+    if n >= 65 and n <= 70
+        return true
+    return false
+
+/* ── 从第 i 位起按 halfwidth 归一比较模式串（运算符最长匹配用）── */
+function starts_with_at(code, i, pat)
+    let plen = strlen(pat)
+    let k = 0
+    while k < plen
+        if halfwidth(cw(code, i + k)) != char(pat, k)
+            return false
+        k += 1
+    return true
+
+/* ── 行注释剥离：/* 到行尾，字符串感知（对齐 token.rs 的 code_part）── */
+function strip_line_comment(line)
+    let n = strlen(line)
+    let i = 0
+    let in_str = ""
+    while i < n
+        let c = cw(line, i)
+        if in_str != ""
+            if c == "\\"
+                i += 2
+                continue
+            if halfwidth(c) == in_str
+                in_str = ""
+            i += 1
+            continue
+        if c == "\"" or c == "'"
+            in_str = c
+            i += 1
+            continue
+        if c == "/" and cw(line, i + 1) == "*"
+            return {"code": substr(line, 0, i), "comment": substr(line, i + 2, n - i - 2)}
+        i += 1
+    return {"code": line, "comment": ""}
+
+/* ── 转义输出：\ → \\ 、换行 → \n（字面）、制表 → \t、回车 → \r ── */
+function esc(s)
+    let n = strlen(s)
+    let out = ""
+    let i = 0
+    while i < n
+        let c = cw(s, i)
+        if c == "\\"
+            out = out + "\\\\"
+        elif c == "\n"
+            out = out + "\\n"
+        elif c == "\t"
+            out = out + "\\t"
+        elif c == "\r"
+            out = out + "\\r"
+        else
+            out = out + c
+        i += 1
+    return out
+
+/* ── 关键字与运算符表 ── */
+let KEYWORDS = ["new", "class", "extends", "function", "fn", "return", "import", "super"]
+let OPERATORS = ["===", "!==", "**=", "<<=", ">>=", "==", "!=", "<=", ">=", "&&", "||", "**", "<<", ">>", "+=", "-=", "*=", "/=", "%=", "++", "--", "//", "=>", "+", "-", "*", "/", "%", "<", ">", "!", "~", "&", "|", "^", "=", "?", ":", "@", "#"]
+
+/* ── 十六进制文本 → 数值（raw 已去下划线，形如 0x1F）── */
+function hex_value(raw)
+    let n = strlen(raw)
+    let v = 0
+    let i = 2
+    while i < n
+        let c = char(raw, i)
+        let d = charcode(raw, i)
+        if d >= 48 and d <= 57
+            v = v * 16 + (d - 48)
+        elif d >= 97 and d <= 102
+            v = v * 16 + (d - 87)
+        elif d >= 65 and d <= 70
+            v = v * 16 + (d - 55)
+        else
+            return float("nan")
+        i += 1
+    return v
+
+function push_tok(toks, kind, text, line_no, col, end_col, num)
+    add {"kind": kind, "text": text, "line": line_no, "col": col, "end": end_col, "num": num} to toks
+
+/* ── 主分词：切一行（不含换行符）为 token 流，结尾补 Eof。
+/* 与 token.rs::tokenize_line 语义 1:1。返回 dict：
+/* {ok: true, toks: [...]} 或 {ok: false, err: 消息, eline: 行, ecol: 列}
+function lex_line(code, line_no, start_col)
+    let n = strlen(code)
+    let toks = []
+    let i = 0
+
+    while i < n
+        let raw_c = cw(code, i)
+        let c = halfwidth(raw_c)
+
+        /* 空白 */
+        if c == " " or c == "\t" or c == "　" or c == "\r"
+            i += 1
+            continue
+
+        /* 字符串（含插值括号嵌套与转义） */
+        if c == "\"" or c == "'"
+            let quote = c
+            let col2 = start_col + i
+            let j = i + 1
+            let text = ""
+            let depth = 0
+            let closed = false
+            while j < n
+                let cj = halfwidth(cw(code, j))
+                if cj == quote and depth == 0
+                    closed = true
+                    break
+                if cj == LBRACE
+                    depth += 1
+                elif cj == RBRACE and depth > 0
+                    depth -= 1
+                if cw(code, j) == "\\" and j + 1 < n
+                    let e = cw(code, j + 1)
+                    if e == "n"
+                        text = text + "\n"
+                    elif e == "t"
+                        text = text + "\t"
+                    elif e == "r"
+                        text = text + "\r"
+                    elif e == "0"
+                        text = text + "\0"
+                    elif e == "\\"
+                        text = text + "\\"
+                    elif e == "\""
+                        text = text + "\""
+                    elif e == "'"
+                        text = text + "'"
+                    elif e == LBRACE or e == RBRACE
+                        text = text + "\\" + e
+                    else
+                        text = text + e
+                    j += 2
+                    continue
+                text = text + cw(code, j)
+                j += 1
+            if not closed
+                return {"ok": false, "err": "字符串没有结束引号", "eline": line_no, "ecol": col2}
+            push_tok(toks, "STR", text, line_no, col2, start_col + j + 1, "")
+            i = j + 1
+            continue
+
+        /* 数字：0x 十六进制 / 十进制（含 _ 分隔、小数、科学计数） */
+        let cn = cc(code, i)
+        let next_is_digit = is_digit_n(cc(code, i + 1))
+        if is_digit_n(cn) or (c == "." and next_is_digit)
+            let start = i
+            if c == "0" and (cw(code, i + 1) == "x" or cw(code, i + 1) == "X")
+                i += 2
+                while i < n and (is_hex_n(cc(code, i)) or cw(code, i) == "_")
+                    i += 1
+                let raw = ""
+                let k = start
+                while k < i
+                    if cw(code, k) != "_"
+                        raw = raw + cw(code, k)
+                    k += 1
+                let v = hex_value(raw)
+                push_tok(toks, "NUM", raw, line_no, start_col + start, start_col + i, v)
+                continue
+            while i < n and (is_digit_n(cc(code, i)) or cw(code, i) == "_")
+                i += 1
+            if i < n and cw(code, i) == "." and is_digit_n(cc(code, i + 1))
+                i += 1
+                while i < n and (is_digit_n(cc(code, i)) or cw(code, i) == "_")
+                    i += 1
+            if i < n and (cw(code, i) == "e" or cw(code, i) == "E")
+                let save = i
+                i += 1
+                if i < n and (cw(code, i) == "+" or cw(code, i) == "-")
+                    i += 1
+                if is_digit_n(cc(code, i))
+                    while i < n and is_digit_n(cc(code, i))
+                        i += 1
+                else
+                    i = save
+            let raw = ""
+            let k = start
+            while k < i
+                if cw(code, k) != "_"
+                    raw = raw + cw(code, k)
+                k += 1
+            let v = float(raw)
+            push_tok(toks, "NUM", raw, line_no, start_col + start, start_col + i, v)
+            continue
+
+        /* 标识符 / 关键字（含中文）；and/or/not 转运算符 */
+        if is_id_start_n(cn)
+            let start = i
+            while i < n and is_id_part_n(cc(code, i))
+                i += 1
+            let word = substr(code, start, i - start)
+            if word == "and" or word == "or" or word == "not"
+                let prev_dot = false
+                if len(toks) > 0
+                    let prev = toks[len(toks) - 1]
+                    if prev["kind"] == "OP" and prev["text"] == "."
+                        prev_dot = true
+                if not prev_dot
+                    let op = "&&"
+                    if word == "or"
+                        op = "||"
+                    if word == "not"
+                        op = "!"
+                    push_tok(toks, "OP", op, line_no, start_col + start, start_col + i, "")
+                    continue
+            let kind = "IDENT"
+            if listin(word, KEYWORDS)
+                kind = "KW"
+            push_tok(toks, kind, word, line_no, start_col + start, start_col + i, "")
+            continue
+
+        /* 运算符：长优先 */
+        let matched = ""
+        for op in OPERATORS
+            if matched == "" and starts_with_at(code, i, op)
+                matched = op
+        if matched != ""
+            let mlen = strlen(matched)
+            push_tok(toks, "OP", matched, line_no, start_col + i, start_col + i + mlen, "")
+            i += mlen
+            continue
+
+        /* 标点 */
+        if c == "(" or c == ")" or c == "[" or c == "]" or c == LBRACE or c == RBRACE or c == "," or c == "." or c == ";"
+            push_tok(toks, "PUNC", c, line_no, start_col + i, start_col + i + 1, "")
+            i += 1
+            continue
+
+        /* 未知字符 */
+        let hint = ""
+        let hn = cc(code, i)
+        if (hn >= 65280 and hn <= 65519) or (hn >= 12288 and hn <= 12607)
+            hint = "——这是全角/中文标点，代码里要写半角"
+        return {"ok": false, "err": "无法识别的字符「" + raw_c + "」" + hint, "eline": line_no, "ecol": start_col + i}
+
+    push_tok(toks, "EOF", "", line_no, start_col + n, start_col + n, "")
+    return {"ok": true, "toks": toks}
+
+/* ── 一个 token 的输出行（与 dump_tokens.rs 同格式）── */
+function tok_line(t)
+    let out = str(t["line"]) + " " + str(t["col"]) + " " + str(t["end"]) + " " + t["kind"] + " " + esc(t["text"])
+    if t["num"] != ""
+        out = out + "@" + str(t["num"])
+    return out
+
+/* ── 主流程：读源码 → 逐行剥注释 → 分词 → 打印 token 流 ── */
+function main_lex(path)
+    let src = readfile(path)
+    let lines = split(src, "\n")
+    let total = len(lines)
+    let li = 0
+    while li < total
+        let line_no = li + 1
+        let raw = lines[li]
+        let skip = 0
+        while skip < strlen(raw)
+            let sn = cc(raw, skip)
+            if sn == 32 or sn == 9 or sn == 12288 or sn == 13
+                skip += 1
+            else
+                break
+        let parts = strip_line_comment(raw)
+        let code = parts["code"]
+        if parts["comment"] != ""
+            print("CMT " + str(line_no) + " " + str(skip + 1) + " " + esc(trim(parts["comment"])))
+        let code_trim = trim(code)
+        if strlen(code_trim) == 0
+            li += 1
+            continue
+        let res = lex_line(code_trim, line_no, skip + 1)
+        if not res["ok"]
+            print("ERR " + str(res["eline"]) + " " + str(res["ecol"]) + " " + esc(res["err"]))
+            return ""
+        for t in res["toks"]
+            print(tok_line(t))
+        li += 1
+    return ""
+
+let target = getenv("COPPER_LEX_TARGET")
+main_lex(target)

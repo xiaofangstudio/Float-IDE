@@ -1,0 +1,577 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+/* colang 代码生成层（2c）：把真 AST 发射成 Rust，交给 cargo 编成原生 exe
+/* 约定：全部走 Value（先钉死"能编、能跑、和 VM 逐字节一致"，特化留后面）
+/* 运行时前奏从 COPPER_RT 指向的文件读（就是 AOT 用的那份 prelude）
+/* 注意：Copper 字符串里不能有裸括号，所以括号一律用 charfrom 现造
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+function g_lp()
+    return charfrom(40)
+
+function g_rp()
+    return charfrom(41)
+
+function g_lo()
+    return charfrom(123)
+
+function g_lc()
+    return charfrom(125)
+
+function g_ls()
+    return charfrom(91)
+
+function g_rs()
+    return charfrom(93)
+
+function g_cm()
+    return ","
+
+function g_q()
+    return charfrom(34)
+
+function g_nl()
+    return "\n"
+
+function g_dot()
+    return "."
+
+function g_map(ln)
+    return ".map_err(" + g_lp() + "m" + g_cm() + " fe(" + str(ln) + g_cm() + "1" + g_cm() + "m" + g_rp() + ")" + g_qm()
+
+function g_qm()
+    return "?"
+
+function g_id(name)
+    let n = strlen(name)
+    let out = ""
+    let i = 0
+    while i < n
+        let code = cc(name, i)
+        if code >= 97 and code <= 122
+            out = out + cw(name, i)
+        elif code >= 65 and code <= 90
+            out = out + cw(name, i)
+        elif code >= 48 and code <= 57
+            out = out + cw(name, i)
+        elif code == 95
+            out = out + cw(name, i)
+        else
+            out = out + "_"
+        i += 1
+    return out
+
+function g_p(out, s)
+    add s to out
+    return ""
+
+function g_join(items, acc)
+    let i = 0
+    while i < len(items)
+        acc = acc + items[i]
+        i += 1
+    return acc
+
+/* ── 顶层名字表（全局槽） ── */
+
+function g_collect_globals(body)
+    let names = []
+    add "ans" to names
+    add "__last_ans" to names
+    let i = 0
+    while i < len(body)
+        let s = body[i]
+        if s["k"] == "Decl"
+            if not listin(s["n"], names)
+                add s["n"] to names
+        if s["k"] == "Assign"
+            if s["t"] != null and s["t"]["k"] == "TVar"
+                if not listin(s["t"]["n"], names)
+                    add s["t"]["n"] to names
+        i += 1
+    return names
+
+function g_slot(names, name)
+    let i = 0
+    while i < len(names)
+        if names[i] == name
+            return i
+        i += 1
+    return -1
+
+/* ── 局部名字表（参数 + 体内 Decl + 循环变量） ── */
+
+function g_decls(items, out)
+    if items == null
+        return ""
+    let i = 0
+    while i < len(items)
+        let s = items[i]
+        let k = s["k"]
+        if k == "Decl"
+            if not listin(s["n"], out)
+                add s["n"] to out
+        if k == "If"
+            let j = 0
+            while j < len(s["branches"])
+                g_decls(s["branches"][j][1], out)
+                j += 1
+            g_decls(s["else"], out)
+        if k == "While"
+            g_decls(s["body"], out)
+        if k == "Repeat"
+            g_decls(s["body"], out)
+        if k == "ForRange"
+            if not listin(s["var"], out)
+                add s["var"] to out
+            g_decls(s["body"], out)
+        if k == "ForIn"
+            if not listin(s["var"], out)
+                add s["var"] to out
+            g_decls(s["body"], out)
+        if k == "Group"
+            g_decls(s["list"], out)
+        if k == "Try"
+            g_decls(s["body"], out)
+            g_decls(s["cbody"], out)
+            g_decls(s["fin"], out)
+        i += 1
+    return ""
+
+function g_params(params, out)
+    if params == null
+        return ""
+    let i = 0
+    while i < len(params)
+        if not listin(params[i]["n"], out)
+            add params[i]["n"] to out
+        i += 1
+    return ""
+
+/* ── 上下文 ── */
+
+function g_ctx(globals, locals, fns)
+    return {"g": globals, "l": locals, "f": fns, "err": ""}
+
+function g_var(ctx, name, ln)
+    if listin(name, ctx["l"])
+        return "c_" + g_id(name) + ".clone()"
+    let i = g_slot(ctx["g"], name)
+    if i < 0
+        ctx["err"] = "第 " + str(ln) + " 行：变量 " + name + " 没有声明（AOT 要求先声明再用）"
+        return "V::Null"
+    return "g.v" + g_ls() + str(i) + g_rs() + ".clone()"
+
+function g_dest(ctx, name, ln)
+    if listin(name, ctx["l"])
+        return "c_" + g_id(name)
+    let i = g_slot(ctx["g"], name)
+    if i < 0
+        ctx["err"] = "第 " + str(ln) + " 行：变量 " + name + " 没有声明（AOT 要求先声明再用）"
+        return "c_" + g_id(name)
+    return "g.v" + g_ls() + str(i) + g_rs()
+
+/* ── 字面量 ── */
+
+function g_str(s)
+    return "V::Str(Rc::new(" + g_q() + json_esc(s) + g_q() + g_dot() + "to_string" + g_lp() + g_rp() + g_rp() + g_rp()
+
+function g_num(v)
+    let t = str(v)
+    let i = 0
+    let dot = false
+    while i < strlen(t)
+        if cc(t, i) == 46
+            dot = true
+        i += 1
+    if dot
+        return "V::Float(" + t + ")"
+    return "V::Int(" + t + "i64)"
+
+/* ── 表达式 ── */
+
+function g_args(ctx, items, ln)
+    let out = ""
+    let i = 0
+    while i < len(items)
+        if i > 0
+            out = out + g_cm() + " "
+        out = out + g_lp() + g_expr(ctx, items[i], ln) + g_rp() + g_dot() + "clone" + g_lp() + g_rp()
+        i += 1
+    return out
+
+function g_bin(ctx, op, a, b, ln)
+    let x = g_expr(ctx, a, ln)
+    let y = g_expr(ctx, b, ln)
+    if op == "Add"
+        return "v_add" + g_lp() + "&" + x + g_cm() + " &" + y + g_rp() + g_map(ln)
+    if op == "Sub"
+        return "v_sub" + g_lp() + "&" + x + g_cm() + " &" + y + g_rp() + g_map(ln)
+    if op == "Mul"
+        return "v_mul" + g_lp() + "&" + x + g_cm() + " &" + y + g_rp() + g_map(ln)
+    if op == "Div" or op == "IDiv"
+        return "arith" + g_lp() + "Op::Div" + g_cm() + " &" + x + g_cm() + " &" + y + g_rp() + g_map(ln)
+    if op == "Mod"
+        return "arith" + g_lp() + "Op::Mod" + g_cm() + " &" + x + g_cm() + " &" + y + g_rp() + g_map(ln)
+    if op == "Pow"
+        return "arith" + g_lp() + "Op::Pow" + g_cm() + " &" + x + g_cm() + " &" + y + g_rp() + g_map(ln)
+    if op == "Eq"
+        return "v_cmp" + g_lp() + "Op::Eq" + g_cm() + " &" + x + g_cm() + " &" + y + g_rp() + g_map(ln)
+    if op == "Ne"
+        return "v_cmp" + g_lp() + "Op::Ne" + g_cm() + " &" + x + g_cm() + " &" + y + g_rp() + g_map(ln)
+    if op == "Lt"
+        return "v_cmp" + g_lp() + "Op::Lt" + g_cm() + " &" + x + g_cm() + " &" + y + g_rp() + g_map(ln)
+    if op == "Le"
+        return "v_cmp" + g_lp() + "Op::Le" + g_cm() + " &" + x + g_cm() + " &" + y + g_rp() + g_map(ln)
+    if op == "Gt"
+        return "v_cmp" + g_lp() + "Op::Gt" + g_cm() + " &" + x + g_cm() + " &" + y + g_rp() + g_map(ln)
+    if op == "Ge"
+        return "v_cmp" + g_lp() + "Op::Ge" + g_cm() + " &" + x + g_cm() + " &" + y + g_rp() + g_map(ln)
+    if op == "BitAnd"
+        return "v_bit" + g_lp() + "Op::BitAnd" + g_cm() + " &" + x + g_cm() + " &" + y + g_rp() + g_map(ln)
+    if op == "BitOr"
+        return "v_bit" + g_lp() + "Op::BitOr" + g_cm() + " &" + x + g_cm() + " &" + y + g_rp() + g_map(ln)
+    if op == "BitXor"
+        return "v_bit" + g_lp() + "Op::BitXor" + g_cm() + " &" + x + g_cm() + " &" + y + g_rp() + g_map(ln)
+    if op == "Shl"
+        return "v_bit" + g_lp() + "Op::Shl" + g_cm() + " &" + x + g_cm() + " &" + y + g_rp() + g_map(ln)
+    if op == "Shr"
+        return "v_bit" + g_lp() + "Op::Shr" + g_cm() + " &" + x + g_cm() + " &" + y + g_rp() + g_map(ln)
+    if op == "And"
+        return g_lo() + " let __l = " + x + "; if t" + g_lp() + "&__l" + g_rp() + " " + g_lo() + " " + y + " " + g_lc() + " else " + g_lo() + " __l " + g_lc() + " " + g_lc()
+    if op == "Or"
+        return g_lo() + " let __l = " + x + "; if t" + g_lp() + "&__l" + g_rp() + " " + g_lo() + " __l " + g_lc() + " else " + g_lo() + " " + y + " " + g_lc() + " " + g_lc()
+    ctx["err"] = "第 " + str(ln) + " 行：代码生成暂不支持运算符 " + op
+    return "V::Null"
+
+function g_expr(ctx, e, ln)
+    if e == null
+        return "V::Null"
+    let k = e["k"]
+    if k == "Num"
+        return g_num(e["v"])
+    if k == "Str"
+        return g_str(e["v"])
+    if k == "Bool"
+        if e["v"] == "true" or e["v"] == true
+            return "V::Bool(true)"
+        return "V::Bool(false)"
+    if k == "Null"
+        return "V::Null"
+    if k == "Var"
+        return g_var(ctx, e["v"], ln)
+    if k == "List"
+        let parts = g_args(ctx, e["v"], ln)
+        return "V::List" + g_lp() + "Rc::new" + g_lp() + "std::cell::RefCell::new" + g_lp() + "vec!" + g_ls() + parts + g_rs() + g_rp() + g_rp() + g_rp()
+    if k == "Dict"
+        if len(e["v"]) == 0
+            return "V::Dict" + g_lp() + "Rc::new" + g_lp() + "std::cell::RefCell::new" + g_lp() + "Dict::new" + g_lp() + g_rp() + g_rp() + g_rp() + g_rp()
+        ctx["err"] = "第 " + str(ln) + " 行：代码生成暂不支持非空字典字面量"
+        return "V::Null"
+    if k == "Bin"
+        return g_bin(ctx, e["op"], e["a"], e["b"], ln)
+    if k == "Un"
+        let a = g_expr(ctx, e["a"], ln)
+        let op = e["op"]
+        if op == "Not"
+            return "V::Bool" + g_lp() + "!t" + g_lp() + "&" + a + g_rp() + g_rp()
+        if op == "Neg"
+            return "neg" + g_lp() + "&" + a + g_rp() + g_map(ln)
+        if op == "BitNot"
+            return "v_bit" + g_lp() + "Op::BitXor" + g_cm() + " &" + a + g_cm() + " &V::Int(-1i64)" + g_rp() + g_map(ln)
+        ctx["err"] = "第 " + str(ln) + " 行：代码生成暂不支持一元运算 " + op
+        return "V::Null"
+    if k == "Tern"
+        let c = g_expr(ctx, e["c"], ln)
+        let a = g_expr(ctx, e["a"], ln)
+        let b = g_expr(ctx, e["b"], ln)
+        return g_lo() + " if t" + g_lp() + "&" + c + g_rp() + " " + g_lo() + " " + a + " " + g_lc() + " else " + g_lo() + " " + b + " " + g_lc() + " " + g_lc()
+    if k == "Idx"
+        let o = g_expr(ctx, e["o"], ln)
+        let i = g_expr(ctx, e["i"], ln)
+        return "index_get" + g_lp() + "&" + o + g_cm() + " &" + i + g_rp() + g_map(ln)
+    if k == "Member"
+        let o = g_expr(ctx, e["o"], ln)
+        return "member_get" + g_lp() + "&" + o + g_cm() + " " + g_q() + json_esc(e["n"]) + g_q() + g_rp() + g_map(ln)
+    if k == "Call"
+        let c = e["c"]
+        if c != null and c["k"] == "Var"
+            let nm = c["v"]
+            if listin(nm, ctx["f"])
+                let a = g_args(ctx, e["args"], ln)
+                let head = "cf_" + g_id(nm) + g_lp() + "g"
+                if strlen(a) > 0
+                    return head + g_cm() + " " + a + g_rp() + g_qm()
+                return head + g_rp() + g_qm()
+            let a = g_args(ctx, e["args"], ln)
+            return "call_builtin" + g_lp() + g_q() + json_esc(nm) + g_q() + g_cm() + " &" + g_ls() + a + g_rs() + g_rp() + g_map(ln)
+        ctx["err"] = "第 " + str(ln) + " 行：代码生成暂不支持方法调用（只直接调函数名和内置）"
+        return "V::Null"
+    if k == "Slice"
+        ctx["err"] = "第 " + str(ln) + " 行：代码生成暂不支持切片"
+        return "V::Null"
+    if k == "New"
+        ctx["err"] = "第 " + str(ln) + " 行：代码生成暂不支持 new 建对象"
+        return "V::Null"
+    if k == "Lambda"
+        ctx["err"] = "第 " + str(ln) + " 行：代码生成暂不支持 lambda"
+        return "V::Null"
+    ctx["err"] = "第 " + str(ln) + " 行：不认识的表达式节点 " + k
+    return "V::Null"
+
+/* ── 语句 ── */
+
+function g_stmts(ctx, items, out)
+    if items == null
+        return ""
+    let i = 0
+    while i < len(items)
+        g_stmt(ctx, items[i], out)
+        i += 1
+    return ""
+
+function g_assign(ctx, t, op, v, ln, out)
+    if t == null
+        return ""
+    let tk = t["k"]
+    if tk == "TVar"
+        let dest = g_dest(ctx, t["n"], ln)
+        if op == "Set"
+            g_p(out, dest + " = " + g_lp() + g_expr(ctx, v, ln) + g_rp() + g_dot() + "clone" + g_lp() + g_rp() + ";")
+            return ""
+        let cur = g_var(ctx, t["n"], ln)
+        if op == "Add"
+            g_p(out, dest + " = v_add" + g_lp() + "&" + cur + g_cm() + " &" + g_lp() + g_expr(ctx, v, ln) + g_rp() + g_rp() + g_map(ln) + ";")
+            return ""
+        if op == "Sub"
+            g_p(out, dest + " = v_sub" + g_lp() + "&" + cur + g_cm() + " &" + g_lp() + g_expr(ctx, v, ln) + g_rp() + g_rp() + g_map(ln) + ";")
+            return ""
+        if op == "Mul"
+            g_p(out, dest + " = v_mul" + g_lp() + "&" + cur + g_cm() + " &" + g_lp() + g_expr(ctx, v, ln) + g_rp() + g_rp() + g_map(ln) + ";")
+            return ""
+        if op == "Div"
+            g_p(out, dest + " = arith" + g_lp() + "Op::Div" + g_cm() + " &" + cur + g_cm() + " &" + g_lp() + g_expr(ctx, v, ln) + g_rp() + g_rp() + g_map(ln) + ";")
+            return ""
+        if op == "Mod"
+            g_p(out, dest + " = arith" + g_lp() + "Op::Mod" + g_cm() + " &" + cur + g_cm() + " &" + g_lp() + g_expr(ctx, v, ln) + g_rp() + g_rp() + g_map(ln) + ";")
+            return ""
+        ctx["err"] = "第 " + str(ln) + " 行：代码生成暂不支持复合赋值 " + op
+        return ""
+    if tk == "TIdx" and op == "Set"
+        g_p(out, g_lo() + " let __o = " + g_expr(ctx, t["o"], ln) + "; let __i = " + g_expr(ctx, t["i"], ln) + ";")
+        g_p(out, "  index_set" + g_lp() + "&__o" + g_cm() + " &__i" + g_cm() + " " + g_lp() + g_expr(ctx, v, ln) + g_rp() + g_rp() + g_map(ln) + "; " + g_lc())
+        return ""
+    if tk == "TMember" and op == "Set"
+        g_p(out, g_lo() + " let __o = " + g_expr(ctx, t["o"], ln) + ";")
+        g_p(out, "  member_set" + g_lp() + "&__o" + g_cm() + " " + g_q() + json_esc(t["n"]) + g_q() + g_cm() + " " + g_lp() + g_expr(ctx, v, ln) + g_rp() + g_rp() + g_map(ln) + "; " + g_lc())
+        return ""
+    ctx["err"] = "第 " + str(ln) + " 行：代码生成暂不支持的赋值 " + tk
+    return ""
+
+function g_if(ctx, s, out)
+    let brs = s["branches"]
+    let i = 0
+    while i < len(brs)
+        let cond = g_expr(ctx, brs[i][0], s["ln"])
+        let word = "if"
+        if i > 0
+            word = "elif"
+        g_p(out, word + " t" + g_lp() + "&" + g_lp() + cond + g_rp() + g_rp() + " " + g_lo())
+        g_stmts(ctx, brs[i][1], out)
+        g_p(out, g_lc())
+        i += 1
+    if s["else"] != null
+        g_p(out, "else " + g_lo())
+        g_stmts(ctx, s["else"], out)
+        g_p(out, g_lc())
+    return ""
+
+function g_stmt(ctx, s, out)
+    let k = s["k"]
+    let ln = s["ln"]
+    if k == "Decl"
+        let name = s["n"]
+        let init = "V::Null"
+        if s["init"] != null
+            init = g_lp() + g_expr(ctx, s["init"], ln) + g_rp() + g_dot() + "clone" + g_lp() + g_rp()
+        if listin(name, ctx["l"])
+            g_p(out, "let mut c_" + g_id(name) + ": V = " + init + ";")
+        else
+            g_p(out, g_dest(ctx, name, ln) + " = " + init + ";")
+        return ""
+    if k == "Assign"
+        g_assign(ctx, s["t"], s["op"], s["v"], ln, out)
+        return ""
+    if k == "IncDec"
+        let dest = g_dest(ctx, s["t"]["n"], ln)
+        let one = "V::Int(" + str(s["d"]) + "i64)"
+        if s["p"] == "-"
+            g_p(out, dest + " = v_sub" + g_lp() + "&" + dest + g_dot() + "clone" + g_lp() + g_rp() + g_cm() + " &" + one + g_rp() + g_map(ln) + ";")
+        else
+            g_p(out, dest + " = v_add" + g_lp() + "&" + dest + g_dot() + "clone" + g_lp() + g_rp() + g_cm() + " &" + one + g_rp() + g_map(ln) + ";")
+        return ""
+    if k == "Expr"
+        if s["e"] != null
+            g_p(out, "let _ = " + g_expr(ctx, s["e"], ln) + ";")
+        return ""
+    if k == "Print"
+        let a = g_args(ctx, s["args"], ln)
+        g_p(out, "out_line" + g_lp() + "&show" + g_lp() + "&" + g_ls() + a + g_rs() + g_rp() + g_rp() + ";")
+        return ""
+    if k == "Report"
+        let a = g_args(ctx, s["args"], ln)
+        g_p(out, "out_line" + g_lp() + "&show" + g_lp() + "&" + g_ls() + a + g_rs() + g_rp() + g_rp() + ";")
+        return ""
+    if k == "If"
+        g_if(ctx, s, out)
+        return ""
+    if k == "While"
+        g_p(out, "while t" + g_lp() + "&" + g_lp() + g_expr(ctx, s["cond"], ln) + g_rp() + g_rp() + " " + g_lo())
+        g_stmts(ctx, s["body"], out)
+        g_p(out, g_lc())
+        return ""
+    if k == "Break"
+        g_p(out, "break;")
+        return ""
+    if k == "Continue"
+        g_p(out, "continue;")
+        return ""
+    if k == "Return"
+        if s["e"] == null
+            g_p(out, "return Ok(V::Null);")
+        else
+            g_p(out, "return Ok" + g_lp() + g_expr(ctx, s["e"], ln) + g_rp() + ";")
+        return ""
+    if k == "Stop"
+        g_p(out, "return Ok(V::Null);")
+        return ""
+    if k == "Ask"
+        g_p(out, "let __ans_v = ask_line" + g_lp() + g_rp() + g_qm() + ";")
+        let a = g_slot(ctx["g"], "ans")
+        let b = g_slot(ctx["g"], "__last_ans")
+        if a >= 0
+            g_p(out, "g.v" + g_ls() + str(a) + g_rs() + " = __ans_v.clone();")
+        if b >= 0
+            g_p(out, "g.v" + g_ls() + str(b) + g_rs() + " = __ans_v.clone();")
+        return ""
+    if k == "FuncDef"
+        return ""
+    if k == "Nop"
+        return ""
+    if k == "Group"
+        g_stmts(ctx, s["list"], out)
+        return ""
+    ctx["err"] = "第 " + str(ln) + " 行：代码生成暂不支持语句 " + k
+    return ""
+
+/* ── 函数 ── */
+
+function g_fn(globals, fns, f, out)
+    let name = f["n"]
+    let locals = []
+    g_params(f["params"], locals)
+    g_decls(f["body"], locals)
+    let ctx = g_ctx(globals, locals, fns)
+    let head = "fn cf_" + g_id(name) + g_lp() + "g: &mut Globals"
+    let i = 0
+    while i < len(f["params"])
+        head = head + g_cm() + " mut c_" + g_id(f["params"][i]["n"]) + ": V"
+        i += 1
+    g_p(out, "#[allow(unused_mut)]")
+    g_p(out, head + g_rp() + " -> R<V> " + g_lo())
+    g_p(out, "let _d = enter" + g_lp() + g_q() + json_esc(name) + g_q() + g_rp() + g_qm() + ";")
+    i = 0
+    while i < len(locals)
+        g_p(out, "let mut c_" + g_id(locals[i]) + ": V = V::Null;")
+        i += 1
+    g_stmts(ctx, f["body"], out)
+    g_p(out, "Ok(V::Null)")
+    g_p(out, g_lc())
+    g_p(out, "")
+    return ""
+
+/* ── 整个程序 ── */
+
+function g_program(globals, fns, body, rt_text)
+    let out = []
+    g_p(out, rt_text)
+    g_p(out, "")
+    let i = 0
+    while i < len(fns)
+        g_fn(globals, fns, fns[i], out)
+        i += 1
+    let top = []
+    i = 0
+    while i < len(body)
+        if body[i]["k"] != "FuncDef"
+            add body[i] to top
+        i += 1
+    let ctx = g_ctx(globals, [], fns)
+    let head = "fn run_top" + g_lp() + "g: &mut Globals" + g_rp() + " -> R<V> " + g_lo()
+    g_p(out, "#[allow(unused_mut)]")
+    g_p(out, head)
+    g_stmts(ctx, top, out)
+    if strlen(ctx["err"]) > 0
+        print("colang build：" + ctx["err"])
+        return ""
+    g_p(out, "out_flush" + g_lp() + g_rp() + ";")
+    g_p(out, "Ok(V::Null)")
+    g_p(out, g_lc())
+    g_p(out, "")
+    g_p(out, "fn main" + g_lp() + g_rp() + " " + g_lo() + " let mut g = Globals " + g_lo() + " v: vec!" + g_ls() + "V::Null; " + str(len(globals)) + g_rs() + g_cm() + " gi: vec!" + g_ls() + g_rs() + g_cm() + " err: 0 " + g_lc() + ";")
+    g_p(out, "    if let Err(e) = run_top" + g_lp() + "&mut g" + g_rp() + " " + g_lo() + " out_flush" + g_lp() + g_rp() + "; eprintln!" + g_lp() + g_q() + "出错" + g_q() + g_cm() + " format!" + g_lp() + g_q() + "第 " + g_q() + g_cm() + " e.span.line" + g_rp() + g_rp() + "; std::process::exit" + g_lp() + "1" + g_rp() + " " + g_lc() + " " + g_lc())
+    g_p(out, "")
+    return g_join(out, "")
+
+/* ── 驱动：colang build ── */
+
+function colang_build(target)
+    let rt = getenv("COPPER_RT")
+    if strlen(rt) == 0
+        print("colang build：先设环境变量 COPPER_RT 指向运行时前奏文件")
+        return 6
+    if not hasfile(rt)
+        print("colang build：找不到前奏文件 " + rt)
+        return 6
+    let out = getenv("COLANG_OUT")
+    if strlen(out) == 0
+        print("colang build：先设环境变量 COLANG_OUT 指向构建目录")
+        return 6
+    let crate = getenv("COLANG_CRATE")
+    if strlen(crate) == 0
+        print("colang build：先设环境变量 COLANG_CRATE 指向 float-lang crate 目录")
+        return 6
+    let r = parse_source(target)
+    if not r["ok"]
+        print("colang build：语法有错 —— " + r["err"])
+        return 3
+    let globals = g_collect_globals(r["body"])
+    let fns = []
+    let i = 0
+    while i < len(r["body"])
+        if r["body"][i]["k"] == "FuncDef"
+            add r["body"][i] to fns
+        i += 1
+    let code = g_program(globals, fns, r["body"], readfile(rt))
+    if strlen(code) == 0
+        return 5
+    runcmd("mkdir " + out + " 2> nul")
+    runcmd("mkdir " + out + "\\src 2> nul")
+    writefile(pathjoin(out, "src\\main.rs"), code)
+    let toml = g_ls() + "package" + g_rs() + g_nl()
+    toml = toml + "name = " + g_q() + "copper_build" + g_q() + g_nl()
+    toml = toml + "version = " + g_q() + "0.1.0" + g_q() + g_nl()
+    toml = toml + "edition = " + g_q() + "2021" + g_q() + g_nl() + g_nl()
+    toml = toml + g_ls() + g_ls() + "bin" + g_rs() + g_rs() + g_nl()
+    toml = toml + "name = " + g_q() + "app" + g_q() + g_nl()
+    toml = toml + "path = " + g_q() + "src/main.rs" + g_q() + g_nl() + g_nl()
+    toml = toml + g_ls() + "dependencies" + g_rs() + g_nl()
+    toml = toml + "float-lang = " + g_lo() + " path = " + g_q() + crate + g_q() + " " + g_lc() + g_nl()
+    writefile(pathjoin(out, "Cargo.toml"), toml)
+    print("colang build：已发射 Rust 源码，开始编译……")
+    runcmd("cd /d " + out + " && cargo build --release")
+    let exe = pathjoin(out, "target\\release\\app.exe")
+    if not hasfile(exe)
+        print("colang build：编译失败（看上面的 rustc 输出）")
+        return 7
+    print("colang build：完成 -> " + exe)
+    return 0

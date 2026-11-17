@@ -1,0 +1,8 @@
+/* 最小复现 2：函数里读顶层 let 列表
+let KS = ["a", "b"]
+function f(w)
+    if listin(w, KS)
+        return "yes"
+    return "no"
+print(f("a"))
+print(f("z"))

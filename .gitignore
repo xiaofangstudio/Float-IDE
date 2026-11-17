@@ -42,3 +42,17 @@ scaffold/tests/.p2.*
 scaffold/tests/parity/.run-ts.mjs
 scaffold/tests/parity/rust.json
 scaffold/tests/parity/ts.json
+
+# ===== AOT 本地调试输出（不入库）=====
+scaffold/src-tauri/float-lang/*.txt
+
+# ===== 自举中间产物：只留 .co 源码，二进制与导出文本不入库 =====
+scaffold/src-tauri/float-lang/bootstrap/*.exe
+scaffold/src-tauri/float-lang/bootstrap/*.json
+scaffold/src-tauri/float-lang/bootstrap/*.txt
+scaffold/src-tauri/float-lang/bootstrap/*.rs
+scaffold/src-tauri/float-lang/bootstrap/*.ps1
+scaffold/src-tauri/float-lang/bootstrap/*.py
+
+# ===== Copper 环境里的二进制（走 Releases 分发，源码与脚本入库）=====
+copper_env/bin/*.exe

@@ -1,0 +1,20 @@
+/* 词法对拍样本：覆盖全部词法特性
+int 血量 = 100
+list xs = [1, 2.5, 0x1F, 1_000, 1.5e3, 0Xff]
+dict d = {"名": "值\n转义\"引", '单': '引\'号\{brace}'}
+str s = "http://a" /* 行尾注释
+let t = 7 // 2
+血量 += 1
+if 血量 >= 100 and t == 3
+    print(s)
+fn add(a, b = a * 2) {
+    return a ** b
+}
+x = new 点(3, 4)
+y = !true or false and not x
+z = "全角（括号）＝号"
+w = 1e10
+v = 3.
+u = .5
+q = "tab\there"
+r = x.不是关键字

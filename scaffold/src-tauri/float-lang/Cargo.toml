@@ -12,6 +12,10 @@ license = "MIT"
 name = "float_lang"
 path = "src/lib.rs"
 
+[features]
+# 排障用：打印整型函数特化的推断结果
+aot_debug_int = []
+
 [dependencies]
 
 [profile.release]

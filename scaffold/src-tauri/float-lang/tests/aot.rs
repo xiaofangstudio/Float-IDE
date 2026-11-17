@@ -42,14 +42,19 @@ fn 未定义变量在翻译期就报() {
 }
 
 #[test]
-fn 回调式高阶函数在_AOT_明确拒绝() {
-    // data.map 等 9 个 HOF 只在 VM 里编译期内联展开，stdlib 运行时没有实现。
-    // AOT 不能生成 call_builtin("data.map", …)（会编译通过但运行报错），
-    // 必须明确拒绝并交回 F5。
+fn 回调式高阶函数与内联函数能翻成_rust() {
+    // data.* 9 个高阶函数已从「VM 编译期内联展开」补齐为 prelude 运行时实现
+    // （hof_run/hof_dispatch），回调经 dcall 静态表 / 注册表间接调用；
+    // 内联函数 fn(x) return … 编译成隐藏函数 __lambda_行_列，发射 V::Native。
     let src = "list xs = [1, 2]\nfn twice(x)\n    return x * 2\nprint(data.map(xs, twice))\n";
-    let e = emit(src).expect_err("高阶函数应该拒绝");
-    assert!(e.message.contains("高阶函数"), "原因要说清楚：{}", e.message);
-    assert!(e.message.contains("F5"), "要给出改法：{}", e.message);
+    let r = emit(src).expect("高阶函数应该能翻");
+    assert!(r.contains("hof_dispatch") || r.contains("hof_run"), "缺 hof 运行时:{}", r.len());
+    assert!(r.contains("data.map"), "缺高阶函数调用");
+    // 内联函数：lambda 要登记成隐藏函数并发射 V::Native 引用
+    let src2 = "print(data.map([1,2,3], fn(x) return x * 2))\n";
+    let r2 = emit(src2).expect("lambda 应该能翻");
+    assert!(r2.contains("__lambda_"), "缺隐藏函数");
+    assert!(r2.contains("V::Native(\"__lambda_"), "缺函数值引用");
 }
 
 #[test]
