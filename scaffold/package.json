@@ -22,7 +22,10 @@
     "test:pointer": "esbuild tests/pointer.test.ts --bundle --platform=node --format=esm --external:@tauri-apps/* --outfile=tests/.ptr.mjs --log-level=warning && node tests/.ptr.mjs",
     "test:ptrwords": "esbuild tests/pointer-words.test.ts --bundle --platform=node --format=esm --external:@tauri-apps/* --outfile=tests/.pw.mjs --log-level=warning && node tests/.pw.mjs",
     "test:stdlib": "esbuild tests/stdlib.test.ts --bundle --platform=node --format=esm --external:@tauri-apps/* --outfile=tests/.stdlib.mjs --log-level=warning && node tests/.stdlib.mjs",
-    "test:tutorial": "esbuild tests/tutorial.test.ts --bundle --platform=node --format=esm --external:@tauri-apps/* --outfile=tests/.tut.mjs --log-level=warning && node tests/.tut.mjs"
+    "test:tutorial": "esbuild tests/tutorial.test.ts --bundle --platform=node --format=esm --external:@tauri-apps/* --outfile=tests/.tut.mjs --log-level=warning && node tests/.tut.mjs",
+    "test:rust": "cd src-tauri/float-lang && cargo test --release",
+    "test:parity": "bash tests/parity-all.sh",
+    "test:everything": "npm run test:lang && npm run test:index && npm run test:stress && npm run test:rust && npm run test:parity"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

@@ -238,3 +238,124 @@ export function codePart(line: string, legacyLine = 0): { code: string; comment:
   }
   return { code: line, comment: null };
 }
+
+/* ─────────────────────── 块注释预处理 ───────────────────────
+ *
+ * 注释有两种写法（2026-11-17 新增块注释）：
+ *   「/* 文字」        行注释，到行尾，不用闭合（codePart 逐行剥，行为不变）
+ *   「/** 文字 ＊/」   块注释，跨行；闭合符可以省——省了就一口气吃到文件末尾（给 warning）
+ *
+ * 三条边界规则：
+ *   1. 块注释开头必须顶行（前面只允许空白）。行内写它直接报错——
+ *      行内已经有行注释了，再让块注释行内开块，会把半行代码吞掉。
+ *   2. 不闭合不报错，但发 warning：块注释从第 N 行开始没有闭合，已读到文件末尾。
+ *      既不拦你，也不让你在静默里丢一屏代码。
+ *   3. 不支持嵌套，块里的第二个块注释开头当普通文字；块里的字符串也不特殊，
+ *      星杠一到就闭合。
+ *
+ * 实现：按字符扫整份源码，字符串感知，把块注释区间的字符替换成空格
+ * （行列号原样保住，诊断和续行合并都不受影响），再交给原来的逐行流程。
+ */
+
+export type BlockCommentMark = { line: number; col: number; message: string };
+
+export type BlockCommentScan = {
+  /** 预处理后的源码：块注释区间的字符替换成空格，换行原样保留 */
+  text: string;
+  warnings: BlockCommentMark[];
+  errors: BlockCommentMark[];
+};
+
+export function stripBlockComments(src: string): BlockCommentScan {
+  const warnings: BlockCommentMark[] = [];
+  const errors: BlockCommentMark[] = [];
+  const lines = src.split('\n');
+  const outLines: string[] = [];
+  let inBlock = false;
+  let blockStart: { line: number; col: number } | null = null;
+
+  for (let li = 0; li < lines.length; li++) {
+    const line = lines[li];
+    const cs = Array.from(line);
+    // 先放原字符，块注释区间再逐位覆写成空格——没写到的位置保持原样
+    const buf: string[] = cs.slice();
+    let i = 0;
+    // 本行在块注释开始之前是否出现过非空白字符（顶行判定用）
+    let sawContent = false;
+
+    while (i < cs.length) {
+      const c = cs[i];
+      if (inBlock) {
+        // 块里只找 */（字符串不特殊、/** 不嵌套），找到为止；找不到整行都是注释
+        if (c === '*' && cs[i + 1] === '/') {
+          buf[i] = ' ';
+          buf[i + 1] = ' ';
+          i += 2;
+          inBlock = false;
+          blockStart = null;
+          continue; // */ 后面同一行还能有代码，继续扫
+        }
+        buf[i] = ' ';
+        i += 1;
+        continue;
+      }
+      // 字符串感知（中文引号和 codePart 一样归一）：字符串里的块注释开头不算
+      {
+        const n = normChar(c);
+        if (n === '"' || n === "'") {
+          const q = n;
+          buf[i] = c;
+          i += 1;
+          while (i < cs.length) {
+            if (cs[i] === '\\') { buf[i] = cs[i]; if (i + 1 < cs.length) { buf[i + 1] = cs[i + 1]; } i += 2; continue; }
+            buf[i] = cs[i];
+            if (normChar(cs[i]) === q) { i += 1; break; }
+            i += 1;
+          }
+          sawContent = true;
+          continue;
+        }
+      }
+      if (c === '/' && cs[i + 1] === '*' && cs[i + 2] === '*') {
+        const topOfLine = !sawContent;
+        if (topOfLine) {
+          // 顶行开块：/** 三个字符替换成空格，进入块状态
+          buf[i] = ' '; buf[i + 1] = ' '; buf[i + 2] = ' ';
+          i += 3;
+          inBlock = true;
+          blockStart = { line: li + 1, col: i - 2 };
+          continue;
+        }
+        // 行内 /**：报错，这里不再替换——后面的 codePart 会把它当行注释剥到行尾
+        errors.push({
+          line: li + 1,
+          col: i + 1,
+          message: '行内的 /** 不支持开块注释（会把半行代码吞掉）——顶格写 /** 才是块注释，行内注释用 /* 到行尾'
+        });
+        sawContent = true;
+        i += 3;
+        continue;
+      }
+      if (c === '/' && cs[i + 1] === '*') {
+        // 行内 /* 行注释：留给 codePart 处理，这里只标记"本行有内容"
+        sawContent = true;
+        buf[i] = c;
+        i += 1;
+        continue;
+      }
+      if (!/\s/.test(c)) sawContent = true;
+      buf[i] = c;
+      i += 1;
+    }
+    outLines.push(buf.join(''));
+  }
+
+  if (inBlock && blockStart) {
+    warnings.push({
+      line: blockStart.line,
+      col: blockStart.col,
+      message: `块注释从第 ${blockStart.line} 行开始没有闭合（*/），已读到文件末尾`
+    });
+  }
+  return { text: outLines.join('\n'), warnings, errors };
+}

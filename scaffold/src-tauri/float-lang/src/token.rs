@@ -540,3 +540,121 @@ mod tests {
         assert!(comment.is_none());
     }
 }
+
+/* ─────────────────────── 块注释预处理 ───────────────────────
+ *
+ * 注释有两种写法：
+ *   「slash星 文字」        行注释，到行尾，不用闭合（code_part 逐行剥，行为不变）
+ *   「slash星星 文字 闭合」  块注释，跨行；闭合可省——省了就一口气吃到文件末尾（给 warning）
+ *
+ * 三条边界规则（与 src/lang/token.ts 的 stripBlockComments 对齐）：
+ *   1. 块注释开头必须顶行（前面只允许空白）。行内写它直接报错。
+ *   2. 不闭合不报错，但发 warning。
+ *   3. 不支持嵌套，块里的字符串也不特殊，星杠一到就闭合。
+ *
+ * 实现：按字符扫整份源码，字符串感知，把块注释区间的字符替换成空格
+ * （行列号原样保住），再交给原来的逐行流程。
+ */
+
+/// 块注释扫描结果：(清理后的源码, 警告(行,列,消息), 错误(行,列,消息))
+pub struct BlockCommentScan {
+    pub text: String,
+    pub warnings: Vec<(u32, u32, String)>,
+    pub errors: Vec<(u32, u32, String)>,
+}
+
+pub fn strip_block_comments(src: &str) -> BlockCommentScan {
+    let mut warnings = Vec::new();
+    let mut errors = Vec::new();
+    let mut out = String::with_capacity(src.len());
+    let mut in_block = false;
+    let mut block_start: Option<(u32, u32)> = None;
+    let mut line_no: u32 = 1;
+    let mut col: u32 = 1;
+    let mut saw_content = false;
+    let mut chars = src.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\n' {
+            out.push(c);
+            line_no += 1;
+            col = 1;
+            saw_content = false;
+            continue;
+        }
+        let this_col = col;
+        col += 1;
+        if in_block {
+            if c == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                out.push_str("  ");
+                col += 1;
+                in_block = false;
+                block_start = None;
+                continue;
+            }
+            out.push(' ');
+            continue;
+        }
+        // 字符串感知（中文引号归一与 code_part 一致）
+        let n = halfwidth(c);
+        if n == '"' || n == '\'' {
+            out.push(c);
+            saw_content = true;
+            while let Some(c2) = chars.next() {
+                if c2 == '\n' {
+                    // 字符串里不该有裸换行，但保守起见：退回行处理
+                    out.push(c2);
+                    line_no += 1;
+                    col = 1;
+                    break;
+                }
+                out.push(c2);
+                col += 1;
+                if c2 == '\\' {
+                    if let Some(c3) = chars.next() {
+                        out.push(c3);
+                        col += 1;
+                    }
+                    continue;
+                }
+                if halfwidth(c2) == n {
+                    break;
+                }
+            }
+            continue;
+        }
+        if c == '/' {
+            let mut lookahead = chars.clone();
+            let a = lookahead.next();
+            let b = lookahead.next();
+            if a == Some('*') && b == Some('*') {
+                if saw_content {
+                    errors.push((line_no, this_col,
+                        "行内的块注释不支持开块（会把半行代码吞掉）——顶格写才是块注释，行内注释用行注释到行尾".to_string()));
+                } else {
+                    // 顶行开块：三个字符替换成空格
+                    chars.next();
+                    chars.next();
+                    out.push_str("   ");
+                    col += 2;
+                    in_block = true;
+                    block_start = Some((line_no, this_col));
+                    saw_content = true;
+                    continue;
+                }
+            }
+        }
+        if !c.is_whitespace() {
+            saw_content = true;
+        }
+        out.push(c);
+    }
+
+    if in_block {
+        if let Some((l, c)) = block_start {
+            warnings.push((l, c, format!("块注释从第 {} 行开始没有闭合，已读到文件末尾", l)));
+        }
+    }
+    BlockCommentScan { text: out, warnings, errors }
+}

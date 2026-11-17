@@ -300,4 +300,6 @@ pub struct Program {
     pub body: Vec<Stmt>,
     /// 编译期的硬错误（词法/语法）；非空时不应该拿去执行
     pub errors: Vec<crate::error::FloatError>,
+    /// 非致命提示（块注释没闭合之类的 warning）；不影响执行
+    pub warnings: Vec<crate::error::FloatError>,
 }

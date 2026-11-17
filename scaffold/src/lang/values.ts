@@ -315,3 +315,28 @@ export class ThrownValue extends Error {
     this.name = 'ThrownValue';
   }
 }
+
+/** 带类型声明的初始化要过一道强制检查（与 Rust 内核 bytecode.rs 的 check_decl_type 对齐）：
+ *  int x = "abc" 报错、int x = 3.7 报错（要转换用 int() / str() 显式转）、
+ *  float 拿整数放行。只查「右边是字面量」的情况——变量、函数返回值这些
+ *  静态看不出类型的，两边都不查，保持一致。 */
+export function checkDeclType(
+  name: string,
+  ty: TypeName | null,
+  init: Expr | null,
+  fail: (msg: string) => void
+): void {
+  if (!init || !ty) return;
+  if (ty === 'var' || ty === 'ptr') return;
+  let got: string;
+  switch (init.k) {
+    case 'str': got = 'str'; break;
+    case 'bool': got = 'bool'; break;
+    case 'list': got = 'list'; break;
+    case 'dict': got = 'dict'; break;
+    case 'num': got = Number.isInteger(init.v) && Number.isFinite(init.v) ? 'int' : 'float'; break;
+    default: return;
+  }
+  if (ty === got || (ty === 'float' && got === 'int')) return;
+  fail(`${name} 是 ${ty}，但右边给的是 ${got}`);
+}

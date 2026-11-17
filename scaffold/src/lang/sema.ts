@@ -186,3 +186,100 @@ export function semanticDiagnostics(file: string, body: Stmt[]): Diagnostic[] {
   }
   return out;
 }
+
+/** 方法里参数 / 局部变量与字段同名且被赋值：赋值只改局部，字段不会变。
+ *  这是静默坑——本意改 self.hp 结果只改了局部。只提示，不改行为
+ *  （方法内先找局部再找字段是有意设计）。 */
+export function shadowDiagnostics(file: string, body: Stmt[]): Diagnostic[] {
+  const out: Diagnostic[] = [];
+  const clsMap = new Map<string, Extract<Stmt, { k: 'classDef' }>>();
+
+  const gather = (list: Stmt[]): void => {
+    for (const s of list) {
+      if (s.k === 'classDef') {
+        clsMap.set(s.name, s);
+        gather(s.methods);
+      }
+    }
+  };
+  gather(body);
+
+  /** 字段集 = 自己的 + 沿 extends 链收上来的（继承字段也识别） */
+  const fieldsOf = (name: string): Set<string> | null => {
+    const cls = clsMap.get(name);
+    if (!cls) return null;
+    const all = new Set(cls.fields.map((f) => f.name));
+    let base = cls.base;
+    const seen = new Set([name]);
+    while (base && !seen.has(base)) {
+      seen.add(base);
+      const b = clsMap.get(base);
+      if (!b) break;
+      for (const f of b.fields) all.add(f.name);
+      base = b.base;
+    }
+    return all;
+  };
+
+  for (const cls of clsMap.values()) {
+    const fields = fieldsOf(cls.name);
+    if (!fields || fields.size === 0) continue;
+    for (const m of cls.methods) {
+      if (m.k !== 'funcDef') continue;
+      const params = new Set(m.params.map((p) => p.name));
+      const locals = new Set<string>();
+      const warned = new Set<string>();
+      const warnAt = (name: string, role: string, span: Span): void => {
+        if (warned.has(name)) return;
+        warned.add(name);
+        out.push({
+          severity: 'warning',
+          code: 'shadow-field',
+          message: `方法「${m.name}」里的${role}「${name}」和字段 self.${name} 同名：` +
+            `这里的赋值只改${role}，self.${name} 不会变（要改字段就写 self.${name} = …）`,
+          span: { file, line: span.line, col: span.col, endLine: span.endLine, endCol: span.endCol }
+        });
+      };
+      const scan = (list: Stmt[]): void => {
+        for (const s of list) {
+          switch (s.k) {
+            case 'decl':
+              if (fields.has(s.name) && !params.has(s.name) && !locals.has(s.name)) {
+                warnAt(s.name, '局部变量', s);
+              }
+              locals.add(s.name);
+              break;
+            case 'assign':
+            case 'incdec':
+              if (s.target.k === 'var') {
+                const n = s.target.name;
+                if (fields.has(n) && params.has(n)) warnAt(n, '参数', s);
+                else if (fields.has(n) && locals.has(n)) warnAt(n, '局部变量', s);
+              }
+              break;
+            case 'if':
+              for (const b of s.branches) scan(b.body);
+              if (s.elseBody) scan(s.elseBody);
+              break;
+            case 'while':
+            case 'repeat':
+            case 'forever':
+            case 'forRange':
+            case 'forIn':
+              scan(s.body);
+              break;
+            case 'try':
+              scan(s.body);
+              if (s.catchBody) scan(s.catchBody);
+              if (s.finallyBody) scan(s.finallyBody);
+              break;
+            default:
+              break;
+          }
+        }
+      };
+      scan(m.body);
+    }
+  }
+  return out;
+}

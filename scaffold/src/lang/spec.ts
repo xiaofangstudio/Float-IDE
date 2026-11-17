@@ -44,6 +44,8 @@ export const INSTRUCTIONS: InstDoc[] = [
   /* 变量 */
   { name: 'var decl', args: 'int a = 1 / str s = "x" / Person p = new Person()', insert: 'int ${1:名字} = $0', desc: '声明变量；右边可以是任意表达式，也可以省略类型直接写 名称 = 值', category: '变量' },
   { name: 'assign', args: 'a = 表达式 / a += 1 / a++', desc: '赋值、复合赋值、自增自减；也支持 p.hp -= 10、xs[0] = 9', category: '变量' },
+  { name: '三元', args: '条件 ? 值1 : 值2', insert: '${1:条件} ? ${2:值1} : ${3:值2}', desc: '三元条件表达式：条件为真取值1，否则取值2。优先级最低（比 || 还松），适合给默认值：d.名字 ? d.名字 : "无名"', category: '变量' },
+  { name: '注释', args: '/* 文字 / 顶格 /** 文字 …', desc: '/* 行注释写到行尾；顶格 /** 是块注释，可跨行，闭合符可省（省了注释到文件末尾并给提醒）。行内注释用 /*', category: '变量' },
 
   /* 输入输出 */
   { name: 'print', args: 'print 值, 值 … / print(值, 值 …)', desc: '输出到控制台，多个值用逗号或空格隔开；括号可写可不写', category: '输入输出', insert: 'print $0' },

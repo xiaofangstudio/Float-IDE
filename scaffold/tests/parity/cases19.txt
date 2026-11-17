@@ -1,0 +1,118 @@
+### 块注释：跨行
+/** 这是一个
+    跨行的说明 */
+print(1)
+
+### 块注释：不闭合吃到文件末尾
+print(2)
+/** 后面全是注释
+print(3)
+
+### 块注释：单行顶格闭合后还能接代码
+/** 一句话 */ print(4)
+print(5)
+
+### 块注释：行内开块报错
+print(6)
+x = 1 /** 注 */
+print(7)
+
+### 块注释：字符串里的不算
+print("a /** b")
+
+### 块注释：文件末尾不闭合（只给 warning，不拦运行）
+print(8)
+/** 最后一行注释
+
+### 行尾分号忽略
+print(9);
+int n = 1;
+n += 1;
+print(n)
+
+### 一行多句仍然报错
+print(10); print(11)
+
+### 类型声明 int 拿字符串报错
+int x = "abc"
+
+### 类型声明 int 拿浮点报错
+int y = 3.7
+
+### 类型声明 float 拿整数放行
+float f = 3
+print(f)
+
+### 类型声明 str 拿数字报错
+str s = 5
+
+### 类型声明正常对照
+int a = 3
+str b = "hi"
+bool c = true
+list d = [1, 2]
+dict e = {"k": 1}
+print(a, b, c, len(d), e["k"])
+
+### 类型声明 var 不检查
+var v = "abc"
+print(v)
+
+### 函数返回值不查类型（静态看不出，两边一致）
+fn g() return "abc"
+int q = g()
+print(q)
+
+### 内联花括号体 if-else 报错
+if (1 < 2) { print("a") } else { print("b") }
+
+### 内联花括号体 单分支报错
+if (1 > 2) { print("a") }
+print("after")
+
+### 换行花括号块正常
+if 1 < 2 {
+    print("ok")
+}
+print("done")
+
+### 换行花括号块 + } else { 正常
+if 1 > 2 {
+    print("a")
+} else {
+    print("b")
+}
+
+### 函数签名后面多了内容报错
+fn h() return "abc"
+
+### 三元条件表达式
+int 分 = 72
+str 等级 = 分 >= 60 ? "及格" : "不及格"
+print(等级)
+print(1 > 2 ? "a" : "b")
+
+### 三元嵌套与优先级
+int x = 1
+print(x == 1 ? "one" : x == 2 ? "two" : "many")
+print(true ? 1 : 2 == 2 ? 3 : 4)
+
+### 方法参数遮蔽字段：赋值只改局部
+class P
+    int hp = 10
+    fn hit(hp)
+        hp = 99
+        return hp
+p = new P()
+print(p.hit(5))
+print(p.hp)
+
+### 方法里裸写字段名改的是字段
+class Q
+    int mp = 7
+    fn cast()
+        mp = 3
+        return mp
+q = new Q()
+print(q.cast())
+print(q.mp)

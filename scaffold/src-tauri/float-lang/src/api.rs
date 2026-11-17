@@ -94,11 +94,19 @@ pub fn analyze_source(src: &str) -> Vec<sema::Diag> {
         Err(_) => return Vec::new(),
     };
     let prog = parser::parse_program("main.cw", &source);
+    // 块注释没闭合这类 warning：就算语法没过也照样报，别静默
+    let mut out: Vec<sema::Diag> = prog.warnings.iter().map(|w| sema::Diag {
+        severity: sema::Severity::Warning,
+        message: w.message.clone(),
+        line: w.span.line,
+        col: w.span.col,
+    }).collect();
     if !prog.errors.is_empty() {
         // 语法都没过就别做语义分析了，免得报一堆假的
-        return Vec::new();
+        return out;
     }
-    sema::analyze(&prog)
+    out.extend(sema::analyze(&prog));
+    out
 }
 
 /// 编译并运行一段 CW Script 源码。

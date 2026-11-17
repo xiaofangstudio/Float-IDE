@@ -13,7 +13,7 @@ import {
   type Diagnostic, type Expr, type IfBranch, type Param, type Program, type Span,
   type Stmt, type Target, type TypeName, type AssignOp, type FieldDecl
 } from './ast';
-import { codePart, describeTok, LexError, tokenizeLine, type Token } from './token';
+import { codePart, describeTok, LexError, stripBlockComments, tokenizeLine, type Token } from './token';
 import { LIMITS } from './limits';
 import { isNamespace, isStdlibFn } from './stdlib';
 
@@ -720,6 +720,59 @@ function isBlockBrace(code: string): boolean {
   return true;
 }
 
+/** 头部行内联花括号体检查：`if (a) { print(1) }` 这种把块体挤在头部的写法
+ *  以前会被静默丢掉（或者错位报成下一行"缩进不够"），这里提前拦住、指对路。
+ *  不算内联体的：字典字面量（内容有 `:`，或只有裸键/逗号）、`f{…}` 拼接、
+ *  括号里的 `{`、行尾单独开块的 `{`（那个在 splitSource 已经剥掉了）。 */
+export function findInlineBraceBody(code: string): number | null {
+  let inStr: string | null = null;
+  let depth = 0;
+  for (let i = 0; i < code.length; i++) {
+    const c = code[i];
+    if (inStr) {
+      if (c === '\\') { i++; continue; }
+      if (c === inStr) inStr = null;
+      continue;
+    }
+    if (c === '"' || c === "'") { inStr = c; continue; }
+    if (c === '(' || c === '[') { depth++; continue; }
+    if (c === ')' || c === ']') { depth--; continue; }
+    if (c !== '{' || depth > 0) continue;
+    const before = code.slice(0, i).trimEnd();
+    if (/(^|[^A-Za-z0-9_\u4e00-\u9fa5])f$/.test(before)) continue; // f{ 拼接
+    let d2 = 0;
+    let s2: string | null = null;
+    let hasColon = false;
+    let hasCode = false;
+    let bareKeys = true;
+    let j = i + 1;
+    for (; j < code.length; j++) {
+      const c2 = code[j];
+      if (s2) {
+        if (c2 === '\\') { j++; continue; }
+        if (c2 === s2) s2 = null;
+        continue;
+      }
+      if (c2 === '"' || c2 === "'") { s2 = c2; bareKeys = false; continue; }
+      if (c2 === '{') { d2++; bareKeys = false; continue; }
+      if (c2 === '}') {
+        if (d2 === 0) break;
+        d2--;
+        continue;
+      }
+      if (d2 === 0) {
+        if (c2 === ':') hasColon = true;
+        if (!/\s/.test(c2)) hasCode = true;
+        if (!/[A-Za-z0-9_\u4e00-\u9fa5,]/.test(c2)) bareKeys = false;
+      }
+    }
+    if (j >= code.length) continue; // 没配对：不是同行内联体
+    if (hasColon || bareKeys) continue; // 字典字面量
+    if (hasCode) return i + 1;
+  }
+  return null;
+}
+
 function splitSource(src: string): Line[] {
   const out: Line[] = [];
   const text = src.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
@@ -732,7 +785,10 @@ function splitSource(src: string): Line[] {
     // `//` 不是注释，它是整除运算符。
     const { code, comment } = codePart(trimmed, idx + 1);
     const isComment = code.trim() === '';
-    const raw = code.trim();
+    // 行尾分号忽略（core.json 承诺「行尾 ; 可选」）：`print(3);` 合法，
+    // 但一行多句 `print(1); print(2)` 不支持——中间的分号不在行尾，照旧报错。
+    const noSemi = code.replace(/;+\s*$/, '').trim();
+    const raw = isComment ? code.trim() : noSemi;
     const cleaned = isComment ? ''
       : (isBlockBrace(raw) ? raw.replace(/\{\s*$/, '').trim() : raw);
     // 多行字面量：上一行括号还没闭合，就把它接到上一行后面。
@@ -753,7 +809,9 @@ function splitSource(src: string): Line[] {
 }
 
 export function parseProgram(file: string, src: string): Program {
-  const aliasInfo = expandAliases(src);
+  // 块注释先剥掉（字符替换成空格，行列号不变），再走别名展开和逐行流程
+  const bc = stripBlockComments(src);
+  const aliasInfo = expandAliases(bc.text);
   const lines = splitSource(aliasInfo.text);
   const diagnostics: Diagnostic[] = [];
   let i = 0;
@@ -764,6 +822,12 @@ export function parseProgram(file: string, src: string): Program {
 
   const spanAt = (line: number, col: number, endCol = col + 1): Span => ({ file, line, col, endLine: line, endCol });
 
+  for (const e of bc.errors) {
+    diag('error', e.message, spanAt(e.line, e.col, e.col + 2), 'block-comment');
+  }
+  for (const w of bc.warnings) {
+    diag('warning', w.message, spanAt(w.line, w.col, w.col + 2), 'block-comment');
+  }
   for (const e of aliasInfo.errors) {
     diag('error', e.message, spanAt(e.line, 1, 2), 'alias');
   }
@@ -775,6 +839,17 @@ export function parseProgram(file: string, src: string): Program {
   const tokensOf = (ln: Line, code = ln.code, col = ln.indent + 1): Token[] => {
     const toks = tokenizeLine(code, ln.no, col);
     return toks.slice(0, -1); // 去掉 eof，按需补
+  };
+
+  /** 块体挤在头部同一行（`if x { print(1) }`）会被静默丢掉，这里定向拦住指路 */
+  const checkInlineBraceBody = (ln: Line, first: Token, kw: string): void => {
+    if (findInlineBraceBody(ln.code) !== null) {
+      throw new ParseError(
+        `${kw} 这一行把块体写在了花括号里——块体要另起一行多缩进 1 格写；` +
+        `行尾单独一个 { 可以开块，} else { 可以接分支，但 { 语句 } 挤在同一行不支持`,
+        first, 'inline-block'
+      );
+    }
   };
 
   const parserFor = (toks: Token[]): ExprParser => {
@@ -844,12 +919,21 @@ export function parseProgram(file: string, src: string): Program {
        * 函数体允许为空（什么都不做 = 返回 null），allowEmpty=true 时不报。 */
       const nxt = lines[i];
       if (nxt && nxt.indent <= indent && nxt.code) {
-        diag(
-          'error',
-          `第 ${nxt.no} 行缩进不够：上一行缩进 ${indent} 个空格，这一行只有 ${nxt.indent} 个；` +
-          `属于上一行块里的代码要再多缩进至少 ${indent + 1 - nxt.indent} 个空格`,
-          { file, line: nxt.no, col: 1, endLine: nxt.no, endCol: nxt.indent + 1 }
-        );
+        if (nxt.indent === indent) {
+          diag(
+            'error',
+            `第 ${nxt.no} 行缩进不够：这一行和上一行缩进相同（都是 ${indent} 个空格），` +
+            `但上一行开了一个块，属于块里的代码要再多缩进 1 格以上`,
+            { file, line: nxt.no, col: 1, endLine: nxt.no, endCol: nxt.indent + 1 }
+          );
+        } else {
+          diag(
+            'error',
+            `第 ${nxt.no} 行缩进不够：上一行缩进 ${indent} 个空格，这一行只有 ${nxt.indent} 个；` +
+            `属于上一行块里的代码要再多缩进至少 ${indent + 1 - nxt.indent} 个空格`,
+            { file, line: nxt.no, col: 1, endLine: nxt.no, endCol: nxt.indent + 1 }
+          );
+        }
       }
     }
     return body;
@@ -980,6 +1064,14 @@ export function parseProgram(file: string, src: string): Program {
     const isIdent = first.k === 'ident' || first.k === 'kw';
 
     if (isIdent) {
+      /* legacy 黄提示：旧写法保持兼容（README 对照表），但新代码请用正式名。
+       * 只在真的当函数定义/continue 用的时候提示，别把叫这些名字的变量误伤。 */
+      if (FUNC_WORDS.has(word) && word !== 'fn' && toks[1]?.k === 'ident') {
+        const what = toks[2]?.v === '=' ? '函数别名' : '函数定义';
+        diag('warning', `${what}的旧写法「${word}」还能用，正式写法是 fn（行为完全一样）`, stmtSpan(ln), 'legacy');
+      } else if (word === 'balo' && toks.length === 1) {
+        diag('warning', '「balo」是旧写法，正式写法是 continue', stmtSpan(ln), 'legacy');
+      }
       switch (word) {
         case 'class': return parseClass(ln, toks);
         case 'if': return parseIf(ln, toks);
@@ -1215,6 +1307,7 @@ export function parseProgram(file: string, src: string): Program {
     }
     // 光秃秃的 if 不能默默放行：那样整段分支会变成永远不执行的死代码
     if (!cond) throw new ParseError('if 后面要跟条件，例如 if (a > 1)', toks[0], 'if-no-cond');
+    checkInlineBraceBody(ln, toks[0], 'if');
     const branches: IfBranch[] = [{ cond, body: parseBodyOf(ln.indent), line: ln.no }];
     const elseBox: { body: Stmt[] | null } = { body: null };
     mergeBranches(branches, ln.indent, elseBox);
@@ -1223,18 +1316,21 @@ export function parseProgram(file: string, src: string): Program {
 
   const parseWhile = (ln: Line, toks: Token[]): Stmt => {
     i++;
+    checkInlineBraceBody(ln, toks[0], 'while');
     const cond = parserFor(toks.slice(1)).parseExpr(0);
     return { k: 'while', cond, body: parseBodyOf(ln.indent), ...stmtSpan(ln) };
   };
 
   const parseRepeat = (ln: Line, toks: Token[]): Stmt => {
     i++;
+    checkInlineBraceBody(ln, toks[0], 'repeat');
     const count = parserFor(toks.slice(1)).parseExpr(0);
     return { k: 'repeat', count, body: parseBodyOf(ln.indent), ...stmtSpan(ln) };
   };
 
   const parseForever = (ln: Line): Stmt => {
     i++;
+    checkInlineBraceBody(ln, { k: 'kw', v: 'forever', line: ln.no, col: ln.indent + 1, endCol: ln.indent + 8 }, 'forever');
     return { k: 'forever', body: parseBodyOf(ln.indent), ...stmtSpan(ln) };
   };
 
@@ -1288,6 +1384,7 @@ export function parseProgram(file: string, src: string): Program {
 
   const parseFor = (ln: Line, toks: Token[]): Stmt => {
     i++;
+    checkInlineBraceBody(ln, toks[0], 'for');
     const varTok = toks[1];
     if (!varTok || varTok.k !== 'ident') throw new ParseError('for 后面要跟循环变量名', toks[0], 'for');
 
@@ -1525,10 +1622,19 @@ export function parseProgram(file: string, src: string): Program {
     cursor++;
 
     let params: Param[] = [];
+    let afterParams = toks.length;
     if (toks[cursor]?.v === '(') {
       const close = findClose(toks, cursor);
       params = parseParams(toks.slice(cursor + 1, close));
+      afterParams = close + 1;
+    } else if (toks[cursor]) {
+      // 没写括号：函数名后面还有东西（fn g return "abc"）→ 和 Rust 一样报错，别静默吞掉
+      afterParams = cursor;
     }
+    if (toks[afterParams]) {
+      throw new ParseError('函数签名后面多了内容——函数体另起一行缩进写', toks[afterParams], 'func-extra');
+    }
+    checkInlineBraceBody(ln, toks[0], '函数定义');
 
     return { k: 'funcDef', name: nameTok.v, nameCol: nameTok.col, params, retType, body: parseBodyOf(ln.indent, true), ...stmtSpan(ln) };
   };
@@ -1582,6 +1688,7 @@ export function parseProgram(file: string, src: string): Program {
 
   const parseClass = (ln: Line, toks: Token[]): Stmt => {
     i++;
+    checkInlineBraceBody(ln, toks[0], 'class');
     const nameTok = toks[1];
     if (!nameTok || nameTok.k !== 'ident') throw new ParseError('class 后面要跟类名', toks[0], 'class');
     let base: string | null = null;

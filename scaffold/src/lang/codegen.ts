@@ -16,7 +16,7 @@ import type { Expr, Param, Program, Stmt, Target, TypeName } from './ast';
 import { LIMITS, guardDict, guardList, guardString } from './limits';
 import { builtinList, getBuiltin } from './builtins';
 import {
-  cloneVal, deepEq, dict, fmtVal, isDict, isInstance, isList, toNum, toStr, truthy, typeName, ThrownValue,
+  checkDeclType, cloneVal, deepEq, dict, fmtVal, isDict, isInstance, isList, toNum, toStr, truthy, typeName, ThrownValue,
   type Val, isPtr } from './values';
 import { callBuiltinMethod, MethodError } from './methods';
 import { isNamespace, isStdlibFn } from './stdlib';
@@ -828,6 +828,7 @@ ${body}
         throw new CompileError('无法识别的语句');
 
       case 'decl': {
+        checkDeclType(s.name, s.type, s.init, (msg) => { throw new CompileError(msg); });
         const val = s.init ? genExpr(s.init, ctx) : defaultLiteral(s.type);
         if (ctx.top || !ctx.locals.has(s.name)) return `${ln}$.v[${JSON.stringify(s.name)}] = ${val};\n`;
         return `${ln}${s.name} = ${val};\n`;

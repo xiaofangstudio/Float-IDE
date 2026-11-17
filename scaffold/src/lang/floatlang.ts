@@ -178,7 +178,10 @@ export function registerFloatLanguage(): void {
     types: TYPE_WORDS,
     tokenizer: {
       root: [
-        // 注释：/* 到行尾（不用闭合）；字符串里的 /* 不算（Monarch 先匹配字符串规则）。
+        // 块注释：顶行 /** 开块，*/ 闭合（可跨行；不闭合吃到文件末尾，解析器给 warning）。
+        // 行内的 /** 会被解析器报错，这里按行注释上色兜底。
+        [/^\/\*\*/, { token: 'comment', next: '@blockComment' }],
+        // 行注释：/* 到行尾（不用闭合）；字符串里的 /* 不算（Monarch 先匹配字符串规则）。
         // `--` 是自减运算符、`//` 是整除运算符，都按 operator 上色，不当注释。
         [/\/\*.*$/, 'comment'],
         [/"(?:[^"\\]|\\.)*"/, 'string'],
@@ -196,13 +199,18 @@ export function registerFloatLanguage(): void {
         [/[{}()[\]]/, '@brackets'],
         [/[+\-*/%<>=!&|^~?]+/, 'operator'],
         [/[;,.]/, 'delimiter']
+      ],
+      blockComment: [
+        [/[^*]+/, 'comment'],
+        [/\*\//, { token: 'comment', next: '@pop' }],
+        [/[\s\S]/, 'comment']
       ]
     }
   });
 
   monaco.languages.setLanguageConfiguration(LANG_ID, {
-    // 注释只有 `/*`（`//` 是整除运算符，拿它当注释会直接把代码变成算式）
-    comments: { lineComment: '/*' },
+    // 行注释 /*（到行尾不用闭合）+ 块注释 /** ＊/（顶行开块，闭合可省）
+    comments: { lineComment: '/*', blockComment: ['/**', '*/'] },
     brackets: [['{', '}'], ['(', ')'], ['[', ']']],
     autoClosingPairs: [
       { open: '{', close: '}' }, { open: '(', close: ')' }, { open: '[', close: ']' },

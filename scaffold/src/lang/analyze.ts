@@ -5,7 +5,7 @@
 
 import type { Diagnostic, Expr, Param, Program, Stmt } from './ast';
 import { parseProgram } from './parse';
-import { semanticDiagnostics } from './sema';
+import { semanticDiagnostics, shadowDiagnostics } from './sema';
 import { checkTypes } from './types';
 
 export type FuncSym = {
@@ -182,11 +182,12 @@ export function analyze(file: string, src: string): Analysis {
 
   walk(program.body, null, 0);
 
-  // 语法错误、语义（未定义）、类型三路诊断合成一份
+  // 语法错误、语义（未定义）、类型、方法遮蔽字段四路诊断合成一份
   const diagnostics = [
     ...program.diagnostics,
     ...semanticDiagnostics(file, program.body),
-    ...checkTypes(file, program.body)
+    ...checkTypes(file, program.body),
+    ...shadowDiagnostics(file, program.body)
   ];
   return { program, funcs, classes, vars, outline, diagnostics };
 }

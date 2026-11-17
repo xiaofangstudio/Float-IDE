@@ -19,7 +19,7 @@ import { callBuiltinMethod, MethodError } from './methods';
 /** import 最大嵌套层数（和 Rust 内核一致：超过就报错，不让递归吃栈） */
 const MAX_IMPORT_DEPTH = LIMITS.importDepth;
 import {
-  cloneVal, collectFields, deepEq, dict, findMethod, fmtVal, instance, isDict, isFn, isInstance,
+  checkDeclType, cloneVal, collectFields, deepEq, dict, findMethod, fmtVal, instance, isDict, isFn, isInstance,
   isList, toNum, toStr, truthy, typeName, ThrownValue,
   aliasPtr, cellPtr, shiftPtr,
   type ClassDef, type FnVal, type FuncDef, type Instance, type PtrVal, type Val, isPtr } from './values';
@@ -671,6 +671,7 @@ export class Runner {
       case 'decl': {
         yield { kind: 'stmt', node: s, depth };
         const v = s.init ? yield* this.evalExpr(s.init, env) : defaultValue(s.type);
+        checkDeclType(s.name, s.type, s.init, (msg) => { throw new FloatError(msg, s); });
         env.define(s.name, v);
         return 'normal';
       }

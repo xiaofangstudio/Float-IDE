@@ -60,16 +60,20 @@ fn split_source(src: &str) -> (Vec<Line>, Option<(u32, String)>) {
             }
         };
         let is_comment = code.trim().is_empty();
+        // 行尾分号忽略（core.json 承诺「行尾 ; 可选」）：`print(3);` 合法，
+        // 但一行多句 `print(1); print(2)` 不支持——中间的分号不在行尾，照旧报错。
+        let code_trimmed = code.trim().trim_end_matches(|c: char| c == ';' || c.is_whitespace())
+            .trim_end().to_string();
+        let c = if is_comment { String::new() } else { code_trimmed };
         let cleaned = if is_comment {
             String::new()
         } else {
-            let c = code.trim();
             // 行尾的 { 只在「块开始」时删掉（`if x {` / `fn f() {`）。
             // `dict cfg = {` / `print({` / `"键": {` 这种是字典字面量开头，
             // 必须留着：下面的 bracket_depth 会算出 1，续行合并自动生效。
             // 以前无条件删，导致字典只能挤在一行里写完。
-            if is_block_brace(c) {
-                c.strip_suffix('{').map(|s| s.trim_end()).unwrap_or(c).trim().to_string()
+            if is_block_brace(&c) {
+                c.strip_suffix('{').map(|s| s.trim_end()).unwrap_or(&c).trim().to_string()
             } else {
                 c.trim().to_string()
             }
@@ -133,6 +137,76 @@ fn is_block_brace(code: &str) -> bool {
         }
     }
     true
+}
+
+/// 头部行内联花括号体检查：`if (a) { print(1) }` 这种把块体挤在头部的写法
+/// 会被静默丢掉（或错位报成下一行"缩进不够"），这里提前拦住指路。
+/// 不算内联体的：字典字面量（内容有 `:`，或只有裸键/逗号）、`f{…}` 拼接、
+/// 括号里的 `{`、行尾单独开块的 `{`（那个在 split_source 已经剥掉了）。
+/// 返回 Some(列号) 表示发现了内联花括号体。与 parse.ts 的 findInlineBraceBody 对齐。
+fn find_inline_brace_body(code: &str) -> Option<usize> {
+    let chars: Vec<char> = code.chars().collect();
+    let ident_part = |c: char| c.is_alphanumeric() || c == '_' || (c >= '\u{4e00}' && c <= '\u{9fa5}');
+    let mut in_str: Option<char> = None;
+    let mut depth = 0i32;
+    let mut i = 0usize;
+    while i < chars.len() {
+        let c = chars[i];
+        if let Some(q) = in_str {
+            if c == '\\' { i += 2; continue; }
+            if c == q { in_str = None; }
+            i += 1;
+            continue;
+        }
+        if c == '"' || c == '\'' { in_str = Some(c); i += 1; continue; }
+        if c == '(' || c == '[' { depth += 1; i += 1; continue; }
+        if c == ')' || c == ']' { depth -= 1; i += 1; continue; }
+        if c != '{' || depth > 0 { i += 1; continue; }
+        // f{ 拼接：f 紧贴 {
+        let mut before_end = i;
+        while before_end > 0 && chars[before_end - 1].is_whitespace() { before_end -= 1; }
+        if before_end > 0 && chars[before_end - 1] == 'f' {
+            let prev_ok = before_end == 1 || (before_end >= 2 && !ident_part(chars[before_end - 2]));
+            if prev_ok { i += 1; continue; }
+        }
+        // 找配对的 }，顺带判断是不是字典（有 `:` 或只有裸键/逗号）
+        let mut d2 = 0i32;
+        let mut s2: Option<char> = None;
+        let mut has_colon = false;
+        let mut has_code = false;
+        let mut bare_keys = true;
+        let mut j = i + 1;
+        while j < chars.len() {
+            let c2 = chars[j];
+            if let Some(q) = s2 {
+                if c2 == '\\' { j += 2; continue; }
+                if c2 == q { s2 = None; }
+                j += 1;
+                continue;
+            }
+            if c2 == '"' || c2 == '\'' { s2 = Some(c2); bare_keys = false; j += 1; continue; }
+            if c2 == '{' { d2 += 1; bare_keys = false; j += 1; continue; }
+            if c2 == '}' {
+                if d2 == 0 { break; }
+                d2 -= 1;
+                j += 1;
+                continue;
+            }
+            if d2 == 0 {
+                if c2 == ':' { has_colon = true; }
+                if !c2.is_whitespace() { has_code = true; }
+                if !(c2.is_alphanumeric() || c2 == '_' || c2 == ',' || (c2 >= '\u{4e00}' && c2 <= '\u{9fa5}')) { bare_keys = false; }
+            }
+            j += 1;
+        }
+        if j >= chars.len() { i += 1; continue; } // 没配对：不是同行内联体
+        if has_colon || bare_keys { i += 1; continue; } // 字典字面量（有键值分隔，或只有裸键/逗号）
+        if has_code {
+            return Some(code.chars().take(i).map(|c| c.len_utf8()).sum::<usize>() + 1);
+        }
+        i += 1;
+    }
+    None
 }
 
 /// 数一行里"没闭合的括号"（字符串里的不算）
@@ -999,7 +1073,11 @@ const MAX_EXPR_DEPTH: usize = 64;
 /// 入口：把源码解析成 Program
 pub fn parse_program(file: &str, src: &str) -> Program {
     let file: Rc<str> = Rc::from(file);
-    let (lines, lex_err) = split_source(src);
+    // 块注释先剥掉（字符替换成空格，行列号不变），再走逐行流程。
+    // 行内开块报 error（后面照旧按行注释处理，不中断整个文件的解析）；
+    // 没闭合给 warning。
+    let bc = crate::token::strip_block_comments(src);
+    let (lines, lex_err) = split_source(&bc.text);
     let mut p = Parser {
         class_fields: std::collections::HashMap::new(),
         file: Rc::clone(&file),
@@ -1008,14 +1086,21 @@ pub fn parse_program(file: &str, src: &str) -> Program {
         errors: Vec::new(),
         depth: 0,
     };
+    let mut warnings = Vec::new();
+    for (l, c, msg) in &bc.errors {
+        p.errors.push(FloatError::new(msg.clone(), Span::new(&file, *l, *c, *c + 2)));
+    }
+    for (l, c, msg) in &bc.warnings {
+        warnings.push(FloatError::new(msg.clone(), Span::new(&file, *l, *c, *c + 2)));
+    }
     if let Some((no, msg)) = lex_err {
         // 老式 `--` 注释：报错带改法，程序体不再解析
         p.errors.push(FloatError::new(msg, Span::new(&file, no, 1, 1)));
         let body = Vec::new();
-        return Program { file, body, errors: p.errors };
+        return Program { file, body, errors: p.errors, warnings };
     }
     let body = p.parse_block(0);
-    Program { file, body, errors: p.errors }
+    Program { file, body, errors: p.errors, warnings }
 }
 
 impl Parser {
@@ -1053,6 +1138,7 @@ impl Parser {
     /// - 方法体里裸写字段名（`hp -= damage`）会自动补成 `self.hp`
     fn parse_class(&mut self, ln: &Line, toks: &[Token]) -> Result<Stmt, FloatError> {
         let span = self.line_span(ln);
+        self.check_inline_brace_body(ln, "class")?;
         let cname: Rc<str> = match toks.get(1) {
             Some(t) if t.kind == TokKind::Ident || t.kind == TokKind::Kw => Rc::from(t.text.as_str()),
             _ => return Err(FloatError::new("class 后面要写类名", span.clone())),
@@ -1715,6 +1801,22 @@ impl Parser {
         self.parse_block(indent + 1)
     }
 
+    /// 块体挤在头部同一行（`if x { print(1) }`）会被静默丢掉，这里定向拦住指路。
+    /// 与 parse.ts 的 checkInlineBraceBody 对齐。
+    fn check_inline_brace_body(&self, ln: &Line, kw: &str) -> Result<(), FloatError> {
+        if let Some(col) = find_inline_brace_body(&ln.code) {
+            let col = col as u32;
+            return Err(FloatError::new(
+                format!(
+                    "{} 这一行把块体写在了花括号里——块体要另起一行多缩进 1 格写；行尾单独一个 {{ 可以开块，}} else {{ 可以接分支，但 {{ 语句 }} 挤在同一行不支持",
+                    kw
+                ),
+                Span::new(&self.file, ln.no, col, col + 1),
+            ));
+        }
+        Ok(())
+    }
+
     /// 遇到这版 VM 还没实现的语法时用：明确报错，而不是静默失败
     #[allow(dead_code)]
     fn unsupported(&mut self, ln: &Line, what: &str) -> Stmt {
@@ -1782,24 +1884,28 @@ impl Parser {
                 }
                 "while" => {
                     self.pos += 1;
+                    self.check_inline_brace_body(ln, "while")?;
                     let cond = self.expr_of(&toks[1..])?;
                     let body = self.parse_body_of(ln.indent);
                     return Ok(Some(Stmt::new(StmtKind::While { cond, body }, self.line_span(ln))));
                 }
                 "repeat" => {
                     self.pos += 1;
+                    self.check_inline_brace_body(ln, "repeat")?;
                     let count = self.expr_of(&toks[1..])?;
                     let body = self.parse_body_of(ln.indent);
                     return Ok(Some(Stmt::new(StmtKind::Repeat { count, body }, self.line_span(ln))));
                 }
                 "forever" => {
                     self.pos += 1;
+                    self.check_inline_brace_body(ln, "forever")?;
                     let body = self.parse_body_of(ln.indent);
                     let cond = Expr::new(ExprKind::Bool(true), self.line_span(ln));
                     return Ok(Some(Stmt::new(StmtKind::While { cond, body }, self.line_span(ln))));
                 }
                 "main" if toks.get(1).map(|t| t.text == "loop").unwrap_or(false) => {
                     self.pos += 1;
+                    self.check_inline_brace_body(ln, "main loop")?;
                     let body = self.parse_body_of(ln.indent);
                     let cond = Expr::new(ExprKind::Bool(true), self.line_span(ln));
                     return Ok(Some(Stmt::new(StmtKind::While { cond, body }, self.line_span(ln))));
@@ -2321,6 +2427,7 @@ impl Parser {
             return Ok(Stmt::new(StmtKind::IfOut(cond), self.line_span(ln)));
         }
         let cond = cond.ok_or_else(|| FloatError::new("if 后面要跟条件，例如 if (a > 1)", self.line_span(ln)))?;
+        self.check_inline_brace_body(ln, "if")?;
         let mut branches = vec![(Some(cond), self.parse_body_of(ln.indent))];
         let mut else_body = None;
         self.merge_branches(&mut branches, &mut else_body, ln.indent);
@@ -2396,6 +2503,7 @@ impl Parser {
 
     fn parse_for(&mut self, ln: &Line, toks: &[Token]) -> EResult<Stmt> {
         self.pos += 1;
+        self.check_inline_brace_body(ln, "for")?;
         let var_tok = toks.get(1).cloned().ok_or_else(|| FloatError::new("for 后面要跟循环变量名", self.line_span(ln)))?;
         if !var_tok.is_ident() {
             return Err(FloatError::new("for 后面要跟循环变量名", self.line_span(ln)));
@@ -2489,6 +2597,7 @@ impl Parser {
 
     fn parse_func_def(&mut self, ln: &Line, toks: &[Token]) -> EResult<Stmt> {
         self.pos += 1;
+        self.check_inline_brace_body(ln, "函数定义")?;
         /* 两种写法都认：
          *   `fn int add(a, b)`  —— 返回类型跟在 fn 后面（老写法）
          *   `int add(a, b)`     —— 返回类型写在函数名前面（和变量声明一致）
