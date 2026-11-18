@@ -33,6 +33,8 @@ pub struct CopperEnvInfo {
     pub source: String,
     /// 环境里记录的版本号（copper.json 里写的）
     pub version: String,
+    /// 环境里备好了二进制的平台列表（bin/ 下的子目录，如 windows-x64 / linux-x64）
+    pub platforms: Vec<String>,
 }
 
 fn exe_suffix() -> &'static str {
@@ -107,14 +109,57 @@ fn home_candidates() -> Vec<(PathBuf, &'static str)> {
 fn looks_like_env(dir: &Path) -> bool {
     dir.join("copper.json").is_file()
         || dir.join("bin").join(format!("copper{}", exe_suffix())).is_file()
+        || compiler_in(dir, &platform_tag()).is_file()
 }
 
-fn compiler_in(home: &Path) -> PathBuf {
+/// 环境里的编译器路径。两种摆法都认，顺序如下：
+///   1. 多平台布局：`bin/<platform>/copper[.exe]`（新，跨平台用这个）
+///   2. 平铺布局：  `bin/copper[.exe]`（老环境照旧能用，不砸已有的安装）
+fn compiler_in(home: &Path, platform: &str) -> PathBuf {
+    let plat = home
+        .join("bin")
+        .join(platform)
+        .join(format!("copper{}", exe_suffix()));
+    if plat.is_file() {
+        return plat;
+    }
     home.join("bin").join(format!("copper{}", exe_suffix()))
 }
 
-fn compiler_self_in(home: &Path) -> PathBuf {
+fn compiler_self_in(home: &Path, platform: &str) -> PathBuf {
+    let plat = home
+        .join("bin")
+        .join(platform)
+        .join(format!("copper-self{}", exe_suffix()));
+    if plat.is_file() {
+        return plat;
+    }
     home.join("bin").join(format!("copper-self{}", exe_suffix()))
+}
+
+/// 环境里到底备了哪几个平台的二进制（`bin/` 下的子目录名）。
+/// 让"设置"面板能一眼看出这台机器能编什么、还缺什么。
+fn platforms_in(home: &Path) -> Vec<String> {
+    let bin = home.join("bin");
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&bin) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if !p.is_dir() {
+                continue;
+            }
+            let has = p.join(format!("copper{}", exe_suffix())).is_file()
+                || p.join("copper").is_file()
+                || p.join("copper.exe").is_file();
+            if has {
+                if let Some(name) = p.file_name() {
+                    out.push(name.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 fn runtime_in(home: &Path) -> PathBuf {
@@ -151,7 +196,7 @@ pub fn resolve_env() -> CopperEnvInfo {
         if !looks_like_env(&dir) {
             continue;
         }
-        let compiler = compiler_in(&dir);
+        let compiler = compiler_in(&dir, &platform);
         let ok = compiler.is_file();
         if !ok {
             // 目录在但二进制缺：报 found=false，但把路径带回去，前端能显示"缺什么"
@@ -159,22 +204,24 @@ pub fn resolve_env() -> CopperEnvInfo {
                 found: false,
                 home: dir.display().to_string(),
                 compiler: compiler.display().to_string(),
-                compiler_self: compiler_self_in(&dir).display().to_string(),
+                compiler_self: compiler_self_in(&dir, &platform).display().to_string(),
                 runtime: runtime_in(&dir).display().to_string(),
                 platform,
                 source: src.to_string(),
                 version: read_version(&dir),
+                platforms: platforms_in(&dir),
             };
         }
         return CopperEnvInfo {
             found: true,
             home: dir.display().to_string(),
             compiler: compiler.display().to_string(),
-            compiler_self: compiler_self_in(&dir).display().to_string(),
+            compiler_self: compiler_self_in(&dir, &platform).display().to_string(),
             runtime: runtime_in(&dir).display().to_string(),
             platform,
             source: src.to_string(),
             version: read_version(&dir),
+            platforms: platforms_in(&dir),
         };
     }
     CopperEnvInfo {

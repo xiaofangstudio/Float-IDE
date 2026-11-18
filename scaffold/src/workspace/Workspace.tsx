@@ -448,6 +448,58 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
     }
   }, [projectDir, meta, pushLine]);
 
+  /* ── Copper 环境（第 3 步）────────────────────────────────────────────
+   * IDE 不再自带一套编译：查环境 → 用环境里的编译器把 .co 编成原生 exe。
+   * 环境缺失时只说"没找到环境"，绝不静默退回内置实现（那样等于骗人）。 */
+  const doCopperEnv = useCallback(async (): Promise<void> => {
+    setDockOpen(true);
+    setDockTab('console');
+    try {
+      const info = await api.copperEnvInfo();
+      if (!info.found) {
+        pushLine({ kind: 'err', text: `没找到可用的 Copper 环境${info.home ? `（${info.home}）` : ''}` });
+        pushLine({ kind: 'info', text: '把环境放进 <IDE目录>/copper_env，或设 COPPER_HOME 指向环境根目录（里面有 copper.json 和 bin/）' });
+        return;
+      }
+      pushLine({ kind: 'info', text: `Copper 环境：${info.home}` });
+      pushLine({
+        kind: 'out',
+        text: `平台 ${info.platform}｜环境里备了：${info.platforms.join(' / ') || '（无）'}｜版本 ${info.version || '未标'}｜来源 ${info.source}`
+      });
+      pushLine({ kind: 'out', text: `编译器 ${info.compiler}` });
+      pushLine({ kind: 'out', text: `自举版 ${info.compiler_self}` });
+      pushLine({ kind: 'out', text: `运行时前奏 ${info.runtime}` });
+    } catch (e) {
+      pushLine({ kind: 'err', text: `查环境失败：${String(e)}` });
+    }
+  }, [pushLine]);
+
+  const doCopperBuild = useCallback(async (): Promise<void> => {
+    const p = bus.current.editor?.currentPath();
+    setDockOpen(true);
+    setDockTab('console');
+    if (!p) {
+      pushLine({ kind: 'err', text: '先打开一个 .co 文件再编' });
+      return;
+    }
+    if (!p.toLowerCase().endsWith('.co')) {
+      pushLine({ kind: 'err', text: '只有 .co 文件能编成原生 exe' });
+      return;
+    }
+    pushLine({ kind: 'info', text: `交给 Copper 环境编译：${p}` });
+    try {
+      const r = await api.copperBuild(p);
+      if (!r.ok) {
+        pushLine({ kind: 'err', text: `编译失败（${(r.millis / 1000).toFixed(1)} s），日志末尾：` });
+        for (const l of r.log.split('\n').slice(-30)) if (l.trim()) pushLine({ kind: 'err', text: l });
+        return;
+      }
+      pushLine({ kind: 'info', text: `编译完成 ${(r.millis / 1000).toFixed(1)} s → ${r.exe}` });
+    } catch (e) {
+      pushLine({ kind: 'err', text: `编译失败：${String(e)}` });
+    }
+  }, [pushLine]);
+
   /* 递归收集工程内全部 Copper 源码（.co 为主，.cw 兼容），供解释器 import */
   const collectSources = useCallback(async (): Promise<Map<string, string>> => {
     const out = new Map<string, string>();
@@ -1183,6 +1235,8 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
     { id: 'term', title: '打开终端', hint: 'Ctrl+`', run: () => { setDockOpen(true); setDockTab('terminal'); } },
     { id: 'reveal', title: '在文件资源管理器中显示工程目录', run: () => void api.openPath(projectDir).catch(() => {}) },
     { id: 'export', title: '导出工程包（.floatzip）', run: () => void doExport() },
+    { id: 'copper-env', title: '查看 Copper 环境（在哪、哪个平台、有哪些编译器）', run: () => void doCopperEnv() },
+    { id: 'copper-build', title: '编成原生 exe（用环境里的 Copper 编译器）', run: () => void doCopperBuild() },
     { id: 'clear', title: '清空控制台', run: () => setLines([]) },
     { id: 'exit', title: '关闭工程，返回欢迎页', run: () => { doStop(); onExit(); } },
     { id: 'tutorial', title: '学习中心（Copper 教程）', hint: 'Ctrl+Shift+H', run: () => openTutorial() },
@@ -1244,6 +1298,9 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
       items: [
         { label: '运行', hint: 'F5', run: () => void startRun('run') },
         { label: '调试', hint: 'F6', run: () => void startRun('debug') },
+        { sep: true, label: 's0c' },
+        { label: '编成原生 exe（Copper 环境）', run: () => void doCopperBuild() },
+        { label: '查看 Copper 环境', run: () => void doCopperEnv() },
         { sep: true, label: 's1' },
         { label: '继续', hint: 'F8', disabled: ctl !== 'paused', run: doResume },
         { label: '单步跳过', hint: 'F10', disabled: ctl !== 'paused', run: () => doStep('over') },
@@ -1362,9 +1419,9 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
               execPos={execPos}
               onCursor={(line, col) => setCursor({ line, col })}
               onProblems={(items) => setProblems(items)}
-              onActiveFile={(name) => {
+              onActiveFile={(name, path) => {
                 setActiveName(name);
-                setActivePath(bus.current.editor?.currentPath() ?? null);
+                setActivePath(path);
                 syncPanel();
               }}
               onBuffersChange={syncPanel}

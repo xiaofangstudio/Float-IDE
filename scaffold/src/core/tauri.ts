@@ -147,5 +147,41 @@ export const api = {
   /* 文件关联（Windows 用户级注册表）：让资源管理器给 .co 显示图标、双击能打开 */
   assocStatus: () => invoke<boolean>('assoc_status'),
   assocRegister: () => invoke<void>('assoc_register'),
-  assocUnregister: () => invoke<void>('assoc_unregister')
+  assocUnregister: () => invoke<void>('assoc_unregister'),
+
+  /* Copper 环境（第 3 步）：IDE 不再自带一套编译，而是读环境里的编译器。
+   * 三件事：查环境、列环境里的编译器、用环境把 .co 编成原生 exe。
+   * 环境缺失时后端返回 found=false，前端要明说"先装环境"，不准静默退回内置实现。 */
+  copperEnvInfo: () => invoke<CopperEnvInfo>('copper_env_info'),
+  copperEnvCompilers: () => invoke<CopperCompilerInfo[]>('copper_env_compilers'),
+  copperBuild: (file: string, outDir?: string, useSelf?: boolean) =>
+    invoke<CopperBuildResult>('copper_build', {
+      file,
+      outDir: outDir ?? null,
+      useSelf: useSelf ?? false
+    })
+};
+
+/** Copper 环境解析结果（对应后端 CopperEnvInfo） */
+export type CopperEnvInfo = {
+  found: boolean;
+  home: string;
+  compiler: string;
+  compiler_self: string;
+  runtime: string;
+  platform: string;
+  source: string;
+  version: string;
+  /** bin/ 下备了二进制的平台，如 ['windows-x64'] */
+  platforms: string[];
+};
+
+export type CopperCompilerInfo = { path: string; bytes: number; kind: string };
+
+export type CopperBuildResult = {
+  ok: boolean;
+  exe: string;
+  log: string;
+  compiler: string;
+  millis: number;
 };

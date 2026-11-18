@@ -2,15 +2,32 @@
   "name": "copper",
   "version": "1.0.0",
   "language": "Copper 1.0",
-  "platform": "windows-x64",
   "layout": {
     "bin": "bin",
-    "lib": "lib"
+    "lib": "lib",
+    "platforms": "bin/<platform>"
+  },
+  "platforms": {
+    "windows-x64": {
+      "env": "bin/windows-x64/copper.exe",
+      "self": "bin/windows-x64/copper-self.exe",
+      "status": "ready"
+    },
+    "linux-x64": {
+      "env": "bin/linux-x64/copper",
+      "self": "bin/linux-x64/copper-self",
+      "status": "ready"
+    },
+    "macos-arm64": {
+      "env": "bin/macos-arm64/copper",
+      "self": "bin/macos-arm64/copper-self",
+      "status": "todo"
+    }
   },
   "compilers": {
     "env": "bin/copper.exe",
     "self": "bin/copper-self.exe"
   },
   "runtime": "lib/colang_rt.rs",
-  "notes": "copper.exe 是 Copper 源码 colang.co 经 Rust-AOT 编出的环境编译器；copper-self.exe 是 colang.exe 再次编出来的自举版（两者输出逐字节一致）。换平台只需把对应平台的二进制放进 bin/ 并把 platform 改成 macos-arm64 / linux-x64。"
+  "notes": "多平台布局：各平台二进制放 bin/<platform>/，后端按当前机器自动挑；bin/ 下的平铺那份是给老安装留的兼容路径。copper.exe 是 Rust-AOT 编出的环境编译器，copper-self.exe 是自举版（两者输出逐字节一致）。macos-arm64 目前没有二进制，需要在 Mac 上编一次后放进 bin/macos-arm64/。"
 }
