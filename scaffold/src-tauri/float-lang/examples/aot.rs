@@ -112,13 +112,18 @@ fn verbose() -> bool {
 
 /// 回落到 VM 时的提示（静默版：默认什么都不打）
 fn notice_fallback(reason: Option<&str>) {
-    if !verbose() {
-        return;
+    /* 「静默回落」把「新功能失效」伪装成「功能生效」，这条吃过一次：
+     * 高阶函数发射错、编译失败、一个字都不打，输出还完全正确。
+     * 现在默认给一行提示（能看见是哪条路在跑），细节仍然要 COPPER_AOT_VERBOSE=1。 */
+    match reason {
+        Some(r) => eprintln!("[AOT] 没编成，已回落 VM（COPPER_AOT_VERBOSE=1 看原因）：{}", r),
+        None => eprintln!("[AOT] 已回落 VM 运行（结果不变）"),
     }
     if let Some(r) = reason {
-        eprintln!("{}", r);
+        if verbose() {
+            eprintln!("{}", r);
+        }
     }
-    eprintln!("── 回落 VM 运行，结果不变 ──");
 }
 
 fn main() {
@@ -235,9 +240,21 @@ fn main() {
     let out_exe = match built {
         Ok(p) => p,
         Err(e) => {
-            // 本机编译失败（工具链问题）也照样静默回落；排障时开 COPPER_AOT_VERBOSE=1
-            let why = if verbose() { Some(format!("本机编译失败：{}", e)) } else { None };
-            notice_fallback(why.as_deref());
+            // 生成的 Rust 编不过，说明 AOT 发射出了坏代码——这不是"工具链问题"，
+            // 是 AOT 自己的问题。默认就要把原因打出来，绝不能只留一行"结果不变"，
+            // 否则用户以为拿到了原生 exe，实际跑的是 VM。
+            let full = format!("{}", e);
+            // 只要 error 那几行：cargo 的 warning 一大片，会把真正的原因淹掉
+            let mut why = full
+                .lines()
+                .filter(|l| l.trim_start().starts_with("error"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            if why.trim().is_empty() {
+                why = full.lines().rev().take(3).collect::<Vec<_>>().join(" ");
+            }
+            let why: String = why.chars().take(400).collect();
+            notice_fallback(Some(&why));
             run_vm(&script, &src, base.as_deref());
             return;
         }
@@ -287,6 +304,16 @@ fn run_vm(script: &Path, src: &str, base: Option<&Path>) {
     }
 }
 
+/// 产物文件名按平台取：Windows 要 .exe，Unix 不要后缀。
+/// 这条原来是硬编码 ".exe"，导致 Linux/macOS 上分块构建永远"找不到产物"。
+fn exe_name(stem: &str) -> String {
+    if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    }
+}
+
 fn build_native(rust_src: &str, script: &Path) -> Result<PathBuf, String> {
     let stem = script
         .file_stem()
@@ -319,7 +346,7 @@ fn build_native(rust_src: &str, script: &Path) -> Result<PathBuf, String> {
     if !st.status.success() {
         return Err(format!("cargo build 失败：\n{}", String::from_utf8_lossy(&st.stderr)));
     }
-    let exe = dir.join("target").join("release").join(format!("{}.exe", safe_stem));
+    let exe = dir.join("target").join("release").join(exe_name(&safe_stem));
     if !exe.exists() {
         return Err("编译完了但找不到产物".into());
     }
@@ -350,7 +377,7 @@ fn compile_baseline() -> Option<PathBuf> {
     let prog = parser::parse_program("baseline.co", src);
     let rust = aot::emit(&prog).ok()?;
     let fake = PathBuf::from("baseline.co");
-    build_native(&rust, &fake).ok().map(|_| dir.join("target/release/baseline.exe"))
+    build_native(&rust, &fake).ok().map(|_| dir.join("target/release").join(exe_name("baseline")))
 }
 
 /// 分块构建：把 workspace 的文件写进构建目录（内容没变就不动，保住 cargo 缓存），然后编译
@@ -395,7 +422,7 @@ fn build_split(files: &[aot::SplitFile], script: &Path) -> Result<PathBuf, Strin
         let e: Vec<&str> = err.lines().filter(|l| l.starts_with("error")).collect();
         return Err(if e.is_empty() { err } else { e.join(" | ") });
     }
-    let exe = shared_target.join("release").join(format!("{}.exe", safe_stem));
+    let exe = shared_target.join("release").join(exe_name(&safe_stem));
     if !exe.exists() {
         return Err("编译完了但找不到产物".into());
     }

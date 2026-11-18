@@ -337,6 +337,9 @@ fn rhs_int_shaped(e: &Expr, ints: &HashSet<Rc<str>>) -> bool {
         ExprKind::Var(n) => ints.contains(n),
         ExprKind::Un { op: Op::Neg, a } => rhs_int_shaped(a, ints),
         ExprKind::Bin { op: Op::Add | Op::Sub | Op::Mul, a, b } => rhs_int_shaped(a, ints) && rhs_int_shaped(b, ints),
+        // 取模：整数 % 整数 结果还是整数（VM 侧 arith(Mod) 对 Int/Int 返回 Int）。
+        // 除法一律不放行：Copper 的 `/` 会掉进浮点世界，特化成 i64 就回不来了。
+        ExprKind::Bin { op: Op::Mod, a, b } => rhs_int_shaped(a, ints) && rhs_int_shaped(b, ints),
         _ => false,
     }
 }
@@ -348,8 +351,26 @@ fn classify_int_vars(body: &[Stmt]) -> HashSet<Rc<str>> {
     fn find_cands(body: &[Stmt], out: &mut HashSet<Rc<str>>) {
         for s in body {
             match &s.kind {
-                StmtKind::Decl { ty: crate::TypeName::Int, name, .. } => {
-                    out.insert(Rc::clone(name));
+                // 显式 `let i: int` 当然算；`let i = 0` 这种推断型的（TypeName::Var）
+                // 只要初始值是整型形状也算——不认它，顶层循环变量永远进不了 gi，
+                // 整个 run_top 就一直在 V 枚举上做装箱算术（实测 1 亿次循环 3.5 s）。
+                StmtKind::Decl { ty, name, init } => {
+                    let declared_int = matches!(
+                        ty,
+                        crate::TypeName::Int | crate::TypeName::Var | crate::TypeName::Named
+                    );
+                    if declared_int {
+                        let empty: HashSet<Rc<str>> = HashSet::new();
+                        let init_ok = match init {
+                            Some(e) => rhs_int_shaped(e, &empty),
+                            None => false,
+                        };
+                        if init_ok {
+                            out.insert(Rc::clone(name));
+                        }
+                    } else if matches!(ty, crate::TypeName::Int) {
+                        out.insert(Rc::clone(name));
+                    }
                 }
                 // for 变量是 range 产生的整数；for-in 的变量来源不定，不算
                 StmtKind::ForRange { var, body, .. } => {
@@ -675,8 +696,15 @@ fn scan_expr(e: &Expr) -> Result<(), AotError> {
             scan_expr(index)
         }
         ExprKind::Slice { obj, from, to } => {
-            // AOT 这版先不跟切片：明确报「没实现」，别生成跑不对的代码
-            Err(AotError::unsupported("切片 xs[a:b]（AOT 暂不支持，用 F5 跑）", e.span.line))
+            // 切片已经能用 VM 的 slice_value 发射了，这里只做递归检查
+            scan_expr(obj)?;
+            if let Some(f) = from {
+                scan_expr(f)?;
+            }
+            if let Some(t) = to {
+                scan_expr(t)?;
+            }
+            Ok(())
         }
         ExprKind::Member { obj, .. } => scan_expr(obj),
         ExprKind::Call { callee, args } => {
@@ -1629,10 +1657,15 @@ pub fn emit(prog: &Program) -> Result<String, AotError> {
     doc.push("            std::process::exit(1);".into());
     doc.push("        }".into());
     doc.push("    }".into());
-    // 整型特化路径的错误出口：err=2 是整数溢出，其余是递归超限
+    // 整型特化路径的错误出口：err=2 整数溢出、err=3 除零，其余是递归超限
     doc.push("    if g.err == 2 {".into());
     doc.push("        use std::io::Write as _; let _ = std::io::stdout().flush();".into());
     doc.push("        eprintln!(\"出错：整数溢出（超出 i64 范围）\");".into());
+    doc.push("        std::process::exit(1);".into());
+    doc.push("    }".into());
+    doc.push("    if g.err == 3 {".into());
+    doc.push("        use std::io::Write as _; let _ = std::io::stdout().flush();".into());
+    doc.push("        eprintln!(\"出错：除数不能是 0\");".into());
     doc.push("        std::process::exit(1);".into());
     doc.push("    }".into());
     doc.push("    if g.err != 0 {".into());
@@ -2392,6 +2425,16 @@ fn int_expr(cg: &mut Cg, e: &Expr) -> Option<String> {
                 ))
             }
             // 移位用 wrapping 对齐 VM：移位量超 64 位不 panic（和 VM 位运算一致）
+            Op::Mod => {
+                // 取模也走 i64 直算，但除零与 i64::MIN % -1 必须按 VM 的语义报错，
+                // 不能让 Rust 原地 panic：err=3 除零，err=2 溢出。
+                let x = int_expr(cg, a)?;
+                let y = int_expr(cg, b)?;
+                Some(format!(
+                    "{{ let __n = ({}); let __d = ({}); if __d == 0 {{ g.err = 3; 0i64 }} else {{ match __n.checked_rem(__d) {{ Some(__v) => __v, None => {{ g.err = 2; 0i64 }} }} }} }}",
+                    x, y
+                ))
+            }
             Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr => {
                 let x = int_expr(cg, a)?;
                 let y = int_expr(cg, b)?;
@@ -2713,8 +2756,19 @@ fn emit_expr(cg: &mut Cg, e: &Expr) -> Result<String, AotError> {
             let ii = emit_expr(cg, index)?;
             Ok(format!("index_get(&({}), &({})){}", oo, ii, em(e)))
         }
-        ExprKind::Slice { .. } => {
-            Err(AotError::unsupported("切片 xs[a:b]（AOT 暂不支持，用 F5 跑）", e.span.line))
+        ExprKind::Slice { obj, from, to } => {
+            // 切片直接复用 VM 的 slice_value：字符串按字符切、列表按元素切，
+            // 越界/反向的语义跟解释器逐字对齐（以前这里是"不支持"，静默回落 VM）。
+            let oo = emit_expr(cg, obj)?;
+            let ff = match from {
+                Some(x) => emit_expr(cg, x)?,
+                None => "V::Null".to_string(),
+            };
+            let tt = match to {
+                Some(x) => emit_expr(cg, x)?,
+                None => "V::Null".to_string(),
+            };
+            Ok(format!("slice_value(&({}), &({}), &({})){}", oo, ff, tt, em(e)))
         }
         ExprKind::Member { obj, name } => {
             let oo = emit_expr(cg, obj)?;
@@ -2912,7 +2966,22 @@ fn emit_call(cg: &mut Cg, name: &str, args: &[Expr], e: &Expr) -> Result<String,
         for i in aa.len().min(m.arity)..m.arity {
             match m.defaults.get(i).and_then(|d| d.clone()) {
                 Some(d) => {
-                    let dv = emit_expr(cg, &d)?;
+                    // 默认值目前只在**调用点**求值。要是它引用了被调函数自己的参数
+                    // （`fn area(w, h = w)`），调用点根本没有 w —— 以前这里报一句
+                    // "变量没有定义"，看着像用户代码写错，其实是 AOT 的能力缺口。
+                    let dv = emit_expr(cg, &d).map_err(|e| {
+                        if e.message.contains("没有定义") {
+                            AotError {
+                                message: format!(
+                                    "AOT 暂不支持：参数默认值引用了前一个参数（{}），默认值只能在调用点算，调用点没有这个参数",
+                                    e.message
+                                ),
+                                line: e.line.max(d.span.line),
+                            }
+                        } else {
+                            e
+                        }
+                    })?;
                     pre.push_str(&format!("let __d{} = ({});\n", i, dv));
                     call.push_str(&format!(", __d{}", i));
                 }
@@ -2969,7 +3038,10 @@ fn emit_call_i64(cg: &mut Cg, e: &Expr) -> Result<String, AotError> {
         ExprKind::Var(n) => Rc::clone(n),
         _ => return Err(AotError::msg("内部错误：整型调用的目标必须是函数名")),
     };
-    emit_call_i64_code(cg, &name, args, e, "__d + 1", "return 0")
+    // 出错出口的返回值必须和函数签名同类型：浮点特化函数签名是 f64，
+    // 这里以前硬写 "return 0"，rustc 直接 E0308（生成代码编不过 → 静默回落 VM）。
+    let on_err = if cg.float_mode { "return 0.0" } else { "return 0" };
+    emit_call_i64_code(cg, &name, args, e, "__d + 1", on_err)
 }
 
 /// 统一的整型调用发射器：生成"i64 进、i64 出"的调用块。
@@ -4229,7 +4301,7 @@ fn gen_dcall(meta: &HashMap<Rc<str>, FnMeta>) -> String {
         ("data.find_index", 2),
     ] {
         s.push_str(&format!(
-            "        (\"{}\", {}) => hof_dispatch(g, \"{}\", args.clone(), ln, cl).unwrap_or_else(|| call_builtin(\"{}\", &args).map_err(|m| fe(ln, cl, m))),\n",
+            "        (\"{}\", {}) => hof_dispatch(g, \"{}\", args.clone(), ln, cl).unwrap_or_else(|| call_builtin(\"{}\", &args)),\n",
             hn, harity, hn, hn
         ));
     }
@@ -4252,7 +4324,7 @@ pub use std::rc::Rc;
 pub use float_lang::builtins::{call_builtin, str_method, list_method, dict_method};
 pub use float_lang::value::Dict;
 pub use float_lang::bytecode::Op;
-pub use float_lang::vm::{arith, compare, compound_value, index_get, index_set, member_get, member_set};
+pub use float_lang::vm::{arith, compare, compound_value, index_get, index_set, member_get, member_set, slice_value};
 
 thread_local! {
     pub static DEPTH: std::cell::Cell<u32> = std::cell::Cell::new(0);
