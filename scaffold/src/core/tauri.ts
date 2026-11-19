@@ -78,6 +78,23 @@ export const api = {
   /** 把 ask 的答案送回正在阻塞等待的那次运行 */
   langInput: (runId: string, answer: string) =>
     invoke<boolean>('lang_input', { runId, answer }),
+  /** 停止当前运行（Shift+F5 / 红色停止按钮）：VM 在循环检查点上退出 */
+  langStop: () => invoke<boolean>('lang_stop'),
+  /** AOT 运行：编成原生 exe 再跑（设置里 F5 可选 VM / AOT），按内容缓存产物 */
+  copperRunAot: (file: string, forceRebuild = false) =>
+    invoke<{
+      ok: boolean;
+      exe: string;
+      millis: number;
+      code: number;
+      error: string;
+      compiled: boolean;
+      compile_ms: number;
+    }>('copper_run_aot', { file, forceRebuild }),
+  /** AOT 产物的 ask 回填：写进子进程 stdin */
+  copperAotInput: (runId: string, answer: string) =>
+    invoke<boolean>('copper_aot_input', { runId, answer }),
+  copperAotStop: () => invoke<boolean>('copper_aot_stop'),
   /** 当前进程占用内存（字节）：状态栏右下角那个"多少 MB" */
   sysinfoMem: () => invoke<number>('sysinfo_mem'),
   langCheck: (file: string, source: string) =>
@@ -160,6 +177,14 @@ export const api = {
   copperEnvClear: () => invoke<CopperEnvInfo>('copper_env_clear'),
   /** 从下载的安装包（zip）铺开环境；不给路径就自己在下载/桌面里找最新的 Copper*.zip */
   copperEnvInstall: (zip?: string) => invoke<CopperEnvInfo>('copper_env_install', { zip: zip ?? null }),
+  /** 手选一个 colang exe 绑上（设置页「查找 Copper」）。解释器叫 colang，不叫 copper */
+  copperEnvBindCompiler: (path: string) => invoke<CopperEnvInfo>('copper_env_bind_compiler', { path }),
+  /** 解除手选，回到自动查找 */
+  copperEnvUnbindCompiler: () => invoke<CopperEnvInfo>('copper_env_unbind_compiler'),
+  /** 环境里的文档清单（教程 / 关于 Copper 都由环境提供） */
+  copperEnvAssets: () => invoke<{ rel: string; bytes: number }[]>('copper_env_assets'),
+  /** 读一份环境文档（只允许 docs/ 下的相对路径） */
+  copperEnvReadAsset: (rel: string) => invoke<string>('copper_env_read_asset', { rel }),
   copperBuild: (file: string, outDir?: string, useSelf?: boolean) =>
     invoke<CopperBuildResult>('copper_build', {
       file,
@@ -180,9 +205,24 @@ export type CopperEnvInfo = {
   version: string;
   /** bin/ 下备了二进制的平台，如 ['windows-x64'] */
   platforms: string[];
+  /** 编译器显示名，统一 `colang 1.9.2.exe` */
+  compiler_name: string;
+  /** 编译器版本（文件名优先，其次 copper.json） */
+  compiler_version: string;
+  /** 环境带不带文档（docs/）：教程与「关于 Copper」都读这里 */
+  docs: boolean;
 };
 
-export type CopperCompilerInfo = { path: string; bytes: number; kind: string };
+export type CopperCompilerInfo = {
+  path: string;
+  bytes: number;
+  kind: string;
+  version: string;
+  /** `colang 1.9.2.exe` */
+  name: string;
+  /** 列表里最新的那个 */
+  recommended: boolean;
+};
 
 export type CopperBuildResult = {
   ok: boolean;

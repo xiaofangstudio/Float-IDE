@@ -1,43 +1,41 @@
 import * as monaco from 'monaco-editor';
 import { INSTRUCTIONS, SPECIAL_VARS, KEYWORDS, TYPE_WORDS, SNIPPETS, BUILTIN_METHODS, LANG_ID } from './spec';
-import { buildCompletions, completionPosition, visibleCompletions, type CompletionKind } from './completions';
+import { buildCompletions, capCompletions, completionPosition, visibleCompletions, type CompletionKind } from './completions';
 import { contextAt } from './context';
 import { isTauriEnv } from '../core/tauri';
 import { loadSettings, SETTINGS_EVENT } from '../ui/settings';
-import { scopeVariables, smartRank, trainModel, type SmartModel } from './smartComplete';
+import { predictNext, scopeVariables, smartRank, smartCorpus, type SmartModel } from './smartComplete';
 
-/* ── 本地超小补全模型（Beta）─────────────────────────────────────────
- * 默认关闭。开启后只用工程里打开的 .co/.cw 训练一张内存里的计数表，
- * 同一档内按上下文重排候选；关着时走老补全（老补全自己也做了上下文感知）。
- * 语料签名（文件数 + 总长度）变了才重建，不会每敲一个键就重新训练。 */
-let smartModel: SmartModel | null = null;
-let smartSig = '';
+/* ── 本地超小补全模型（智能补全）────────────────────────────────────
+ * 只用工程里打开的 .co/.cw 学一张内存里的计数表，同一档内按上下文重排候选；
+ * 不联网、不上传、不含源码原文，只有词对计数。
+ *
+ * 关键：**不再每敲一个键就全量重训**。每个文件一张自己的表，
+ * 改哪个就只重算哪个（空闲 220 ms 后才算，打字过程中用上一版，手感优先），
+ * 单文件成本 ~1 ms，大工程也不会把 CPU 拉起来。 */
 let smartEnabled = loadSettings().smartComplete;
+let inlineEnabled = loadSettings().inlineSuggest;
 if (typeof window !== 'undefined') {
   window.addEventListener(SETTINGS_EVENT, () => {
-    smartEnabled = loadSettings().smartComplete;
-    smartModel = null;
-    smartSig = '';
+    const s = loadSettings();
+    smartEnabled = s.smartComplete;
+    inlineEnabled = s.inlineSuggest;
   });
 }
 
-function currentSmartModel(): SmartModel {
-  const texts: string[] = [];
-  let len = 0;
+/** 把打开的 Copper 文件登记进增量语料库（内容没变就是一次字符串比较，零解析） */
+function feedCorpus(): void {
   for (const m of monaco.editor.getModels()) {
     const name = decodeURIComponent(m.uri.path);
     if (!/\.(co|cw)$/i.test(name)) continue;
-    const t = m.getValue();
-    const clipped = t.length > 120_000 ? t.slice(0, 120_000) : t;
-    texts.push(clipped);
-    len += clipped.length;
+    const text = modelText(m).text;
+    smartCorpus.setText(name.replace(/\\/g, '/'), text.length > 120_000 ? text.slice(0, 120_000) : text);
   }
-  const sig = `${texts.length}:${len}`;
-  if (!smartModel || sig !== smartSig) {
-    smartModel = trainModel(texts);
-    smartSig = sig;
-  }
-  return smartModel;
+}
+
+function currentSmartModel(): SmartModel {
+  feedCorpus();
+  return smartCorpus.get();
 }
 
 /* 插件贡献的片段与关键词。插件系统启动后调用 setPluginContributions 注入，
@@ -59,6 +57,8 @@ import {
 } from './analyze';
 import { parseProgram } from './parse';
 import { toplevelNames } from './sema';
+import { diagnoseAsync } from './diagnoseClient';
+import type { Diagnostic } from './ast';
 
 /* Copper（原 CW Script）编辑器支持：Monarch 高亮、AST 驱动的补全 / 悬停 / 签名提示 / 实时诊断 / 大纲。
  *
@@ -75,11 +75,45 @@ const BUILTINS = builtinList();
 
 const cache = new WeakMap<monaco.editor.ITextModel, { version: number; analysis: Analysis }>();
 
+/** 模型文本 + 行数组，按版本缓存。
+ *  以前一次补全里 getValue() 调好几次、split('\n') 再切一遍 150 KB，
+ *  每击键几毫秒纯浪费；现在同一版本只取一次。 */
+const textCache = new WeakMap<monaco.editor.ITextModel, { version: number; text: string; lines: string[] }>();
+
+function modelText(model: monaco.editor.ITextModel): { text: string; lines: string[] } {
+  const version = model.getVersionId();
+  const hit = textCache.get(model);
+  if (hit && hit.version === version) return hit;
+  const text = model.getValue();
+  const entry = { version, text, lines: text.split('\n') };
+  textCache.set(model, entry);
+  return entry;
+}
+
+/* ── 工程总表（由索引那边灌进来） ──
+ * 用户的规矩：先本文件 → 再 import 链一层层翻；整个工程里已经定义过的名字，
+ * 就不该在某个文件里被标「没有定义」。所以这里留一个工程级的名字总表，
+ * 诊断时和 import 链的结果合起来用。 */
+let projectNameTable: Set<string> | null = null;
+
+export function setProjectNames(names: Iterable<string> | null): void {
+  projectNameTable = names ? new Set(names) : null;
+}
+
+function mergedNames(model: monaco.editor.ITextModel): Set<string> | undefined {
+  const imported = importNamesOf(model);
+  if (!projectNameTable) return imported;
+  if (!imported) return new Set(projectNameTable);
+  const merged = new Set(projectNameTable);
+  for (const n of imported) merged.add(n);
+  return merged;
+}
+
 export function analysisOf(model: monaco.editor.ITextModel): Analysis {
   const hit = cache.get(model);
   const version = model.getVersionId();
   if (hit && hit.version === version) return hit.analysis;
-  const analysis = analyze(model.uri.path.split('/').pop() || 'main.co', model.getValue(), importNamesOf(model));
+  const analysis = analyze(model.uri.path.split('/').pop() || 'main.co', modelText(model).text, mergedNames(model));
   cache.set(model, { version, analysis });
   return analysis;
 }
@@ -92,14 +126,16 @@ export function analysisOf(model: monaco.editor.ITextModel): Analysis {
 const importNamesCache = new WeakMap<monaco.editor.ITextModel, { key: string; names: Set<string> | null }>();
 
 function importNamesOf(model: monaco.editor.ITextModel): Set<string> | undefined {
-  const code = model.getValue();
+  const code = modelText(model).text;
   if (!/^[\t ]*import[ \t]+/m.test(code)) return undefined;
 
   const srcs: string[] = [];
   const seen = new Set<string>();
   let complete = true;
   const walk = (src: string, depth: number): void => {
-    if (depth > 4) return;
+    // 名字查找顺序就是用户的直觉：先本文件 → 再看 import → import 的文件里再 import 的，逐层往里翻。
+    // 以前只翻 4 层，链式库（a 引 b 引 c 引 d）第 5 层开始的符号就被当成"没定义"。
+    if (depth > 8) return;
     const re = /^[\t ]*import[ \t]+["']?([^"'\s;)]+)/gm;
     let m: RegExpExecArray | null;
     while ((m = re.exec(src)) !== null) {
@@ -151,7 +187,7 @@ function findImported(model: monaco.editor.ITextModel, want: string): string | n
   for (const m of monaco.editor.getModels()) {
     const p = decodeURIComponent(m.uri.path).replace(/\\/g, '/').toLowerCase();
     const name = p.split('/').pop() || '';
-    if (name === base || name === `${base}.co` || name === `${base}.cw` || p.endsWith(`/${wantPath}`)) return m.getValue();
+    if (name === base || name === `${base}.co` || name === `${base}.cw` || p.endsWith(`/${wantPath}`)) return modelText(m).text;
   }
   const dir = modelDir(model);
   const key = `${dir}/${want}`.replace(/\\/g, '/');
@@ -175,34 +211,111 @@ function findImported(model: monaco.editor.ITextModel, want: string): string | n
   return null;
 }
 
+/* ── 补全专用的"符号表分析" ──
+ * 补全只需要变量 / 函数 / 类 / 大纲，不需要三路诊断。
+ * 而且允许**落后一次击键**：版本变了的瞬间先用上一版（打字途中名字还没打完，
+ * 差一个字符不影响候选），300 ms 空闲后再补算 —— 这样每敲一个键都不会整文件重分析。
+ * 100 KB 的方岛物语：整份分析 70 ms，符号表版一次十来毫秒，而且不再是每击键一次。 */
+const symbolsCache = new WeakMap<monaco.editor.ITextModel, { version: number; a: Analysis }>();
+const refreshing = new WeakSet<monaco.editor.ITextModel>();
+const SYMBOL_IDLE_MS = 300;
+
+function symbolsOf(model: monaco.editor.ITextModel, force = false): Analysis {
+  const version = model.getVersionId();
+  const hit = symbolsCache.get(model);
+  if (hit && hit.version === version && !force) return hit.a;
+  if (hit && !force) {
+    if (!refreshing.has(model)) {
+      refreshing.add(model);
+      setTimeout(() => {
+        refreshing.delete(model);
+        symbolsOf(model, true);
+      }, SYMBOL_IDLE_MS);
+    }
+    return hit.a;
+  }
+  const name = model.uri.path.split('/').pop() || 'main.co';
+  const a = analyze(name, modelText(model).text, undefined, { symbolsOnly: true });
+  symbolsCache.set(model, { version, a });
+  return a;
+}
+
+/* 依赖文件的分析缓存：按「文件名 + 内容指纹」存，LRU 48。
+ * 以前每敲一个键就把 import 进来的文件重新 parse 一遍 —— 多文件工程就是这么烫起来的。 */
+const depCache = new Map<string, { key: string; a: Analysis }>();
+const DEP_CACHE_MAX = 48;
+
+function hashText(s: string): string {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(36);
+}
+
+function depAnalysis(name: string, src: string): { a: Analysis; key: string } {
+  const key = `${src.length}|${hashText(src)}`;
+  const hit = depCache.get(name);
+  if (hit && hit.key === key) {
+    depCache.delete(name); depCache.set(name, hit); // LRU touch
+    return hit;
+  }
+  const a = analyze(name, src);
+  const entry = { key, a };
+  depCache.set(name, entry);
+  if (depCache.size > DEP_CACHE_MAX) depCache.delete(depCache.keys().next().value as string);
+  return entry;
+}
+
+/** 合并结果按 (本文件版本 + 依赖指纹) 缓存。
+ *  而且**绝不原地改** analysisOf 的缓存对象：以前这里往 a.vars 里 push，
+ *  缓存的分析结果会被越塞越多，补全一次改一次，越用越慢。 */
+const mergedCache = new WeakMap<monaco.editor.ITextModel, { base: Analysis; key: string; a: Analysis }>();
+
 /** 当前文件 + 它 import 进来的文件，合成一份符号表 */
 export function analysisWithImports(model: monaco.editor.ITextModel): Analysis {
-  const a = analysisOf(model);
+  const base = symbolsOf(model);
+  const code = modelText(model).text;
+  if (!/^[\t ]*import[ \t]+/m.test(code)) return base;
+
+  const deps: { name: string; src: string }[] = [];
   const seen = new Set<string>();
-  const visit = (code: string, depth: number): void => {
+  const collect = (src: string, depth: number): void => {
     if (depth > 4) return;
     const re = /^[\t ]*import[ \t]+["']?([^"'\s;)]+)/gm;
     let m: RegExpExecArray | null;
-    while ((m = re.exec(code)) !== null) {
+    while ((m = re.exec(src)) !== null) {
       const want = m[1];
       if (seen.has(want)) continue;
       seen.add(want);
-      const src = findImported(model, want);
-      if (!src) continue;
-      const sub = analyze(want, src);
-      for (const f of sub.funcs) {
-        if (!a.funcs.some((x) => x.name === f.name)) a.funcs.push({ ...f, doc: `来自 ${want}` });
-      }
-      for (const c of sub.classes) {
-        if (!a.classes.some((x) => x.name === c.name)) a.classes.push(c);
-      }
-      for (const v of sub.vars) {
-        if (!a.vars.some((x) => x.name === v.name)) a.vars.push(v);
-      }
-      visit(src, depth + 1);
+      const text = findImported(model, want);
+      if (!text) continue;
+      deps.push({ name: want, src: text });
+      collect(text, depth + 1);
     }
   };
-  visit(model.getValue(), 0);
+  collect(code, 0);
+  if (deps.length === 0) return base;
+
+  const key = deps.map((d) => `${d.name}:${hashText(d.src)}`).join(',');
+  const hit = mergedCache.get(model);
+  if (hit && hit.base === base && hit.key === key) return hit.a;
+  /* 浅拷贝：只复制数组外壳，符号对象本身共享（只读） */
+  const a: Analysis = { ...base, funcs: [...base.funcs], classes: [...base.classes], vars: [...base.vars] };
+  for (const d of deps) {
+    const sub = depAnalysis(d.name, d.src).a;
+    for (const f of sub.funcs) {
+      if (!a.funcs.some((x) => x.name === f.name)) a.funcs.push({ ...f, doc: `来自 ${d.name}` });
+    }
+    for (const c of sub.classes) {
+      if (!a.classes.some((x) => x.name === c.name)) a.classes.push(c);
+    }
+    for (const v of sub.vars) {
+      if (!a.vars.some((x) => x.name === v.name)) a.vars.push(v);
+    }
+  }
+  mergedCache.set(model, { base, key, a });
   return a;
 }
 
@@ -277,6 +390,7 @@ export function registerFloatLanguage(): void {
   });
 
   registerCompletion();
+  registerInline();
   registerHover();
   registerSignatureHelp();
 }
@@ -288,6 +402,7 @@ function registerCompletion(): void {
     triggerCharacters: ['.'],
     provideCompletionItems: (model, position, context) => {
       const a = analysisWithImports(model);
+      const text = modelText(model);
       const word = model.getWordUntilPosition(position);
       const range = {
         startLineNumber: position.lineNumber, startColumn: word.startColumn,
@@ -296,7 +411,7 @@ function registerCompletion(): void {
 
       /* 光标语义只问一处：context.ts 用词法 + AST 判断
        * （在注释里？在字符串里？在起名字？在 `对象.` 后面？） */
-      const ctx = contextAt(model.getValue(), position.lineNumber, position.column, a);
+      const ctx = contextAt(text.text, position.lineNumber, position.column, a, text.lines);
 
       // import "…" 里补工程里的文件名
       if (ctx.kind === 'importPath') {
@@ -339,8 +454,7 @@ function registerCompletion(): void {
       const explicit = ctxKind === 1; // CompletionTriggerKind.Invoke
       if (!explicit && ctx.kind !== 'member' && word.word === '') return { suggestions: [] };
 
-      const fullText = model.getValue();
-      const allLines = fullText.split('\n');
+      const allLines = text.lines;
       const lineBefore = (allLines[position.lineNumber - 1] ?? '').slice(0, position.column - 1);
       const scopeVars = scopeVariables(a, allLines, position.lineNumber);
 
@@ -350,6 +464,8 @@ function registerCompletion(): void {
         context: ctx,
         position: completionPosition(lineBefore, word.word),
         scopeVars,
+        /* 光标之前才存在的变量参与候选；后面才声明的先不列（候选少一半，也不用每键重排） */
+        maxLine: position.lineNumber,
         plugins: { snippets: pluginSnippets, keywords: pluginKeywords }
       });
 
@@ -359,6 +475,7 @@ function registerCompletion(): void {
       if (smartEnabled) {
         candidates = smartRank(currentSmartModel(), candidates, lineBefore, scopeVars, word.word);
       }
+      candidates = capCompletions(candidates);
 
       const kinds: Record<CompletionKind, monaco.languages.CompletionItemKind> = {
         variable: monaco.languages.CompletionItemKind.Variable,
@@ -396,6 +513,51 @@ function registerCompletion(): void {
 
 function both(title: string, body: string): string {
   return `\`\`\`float\n${title}\n\`\`\`\n\n${body}`;
+}
+
+/* ───────────────────────────── 行内续写 ─────────────────────────────
+ * 光标停在行尾（刚打完一个空格）时，给"下一个词"的灰色幽灵建议：
+ * 数据来源就是同一张本地计数表（不联网、不含源码原文），一次查表 O(1)。
+ * Tab 接受、Esc 忽略；置信度不够就什么都不出，不会每敲一键就闪一下。 */
+function registerInline(): void {
+  const langs = monaco.languages as unknown as {
+    registerInlineCompletionsProvider?: (
+      id: string,
+      provider: {
+        provideInlineCompletions: (
+          model: monaco.editor.ITextModel,
+          position: monaco.Position
+        ) => { items: { insertText: string; range: monaco.IRange }[] } | null;
+        freeInlineCompletions?: () => void;
+      }
+    ) => void;
+  };
+  if (!langs.registerInlineCompletionsProvider) return; // 老版 Monaco 没有这个 API 就不注册
+
+  langs.registerInlineCompletionsProvider(LANG_ID, {
+    provideInlineCompletions: (model, position) => {
+      if (!smartEnabled || !inlineEnabled) return { items: [] };
+      /* 只有"行尾"才猜：光标后面还有内容就不适合插词 */
+      const line = model.getLineContent(position.lineNumber);
+      if (position.column - 1 !== line.length) return { items: [] };
+      const lineBefore = line.slice(0, position.column - 1);
+      if (!/\s$/.test(lineBefore)) return { items: [] };
+
+      feedCorpus();
+      const word = predictNext(smartCorpus.get(), lineBefore);
+      if (!word) return { items: [] };
+      return {
+        items: [{
+          insertText: word,
+          range: {
+            startLineNumber: position.lineNumber, startColumn: position.column,
+            endLineNumber: position.lineNumber, endColumn: position.column
+          }
+        }]
+      };
+    },
+    freeInlineCompletions: () => { /* 单条短文本，无需释放 */ }
+  });
 }
 
 /* ───────────────────────────── 悬停 ───────────────────────────── */
@@ -576,7 +738,13 @@ function paramNamesFromSig(sig: string): string[] {
 export function validateModel(model: monaco.editor.ITextModel): void {
   if (model.getLanguageId() !== LANG_ID) return;
   const a = analysisOf(model);
-  const markers: monaco.editor.IMarkerData[] = a.diagnostics.map((d) => ({
+  applyDiagnostics(model, a.diagnostics, model.getVersionId());
+}
+
+/** 把诊断画到编辑器上；version 用来丢弃过期结果（worker 回来时文件可能又改过了） */
+function applyDiagnostics(model: monaco.editor.ITextModel, diagnostics: Diagnostic[], version: number): void {
+  if (model.isDisposed() || model.getVersionId() !== version) return;
+  const markers: monaco.editor.IMarkerData[] = diagnostics.map((d) => ({
     severity: d.severity === 'error' ? monaco.MarkerSeverity.Error
       : d.severity === 'warning' ? monaco.MarkerSeverity.Warning
       : monaco.MarkerSeverity.Info,
@@ -591,11 +759,27 @@ export function validateModel(model: monaco.editor.ITextModel): void {
   monaco.editor.setModelMarkers(model, 'float-script', markers);
 }
 
+/** 后台校验：解析 + 三路诊断丢给 worker，主线程不卡。
+ *  worker 不可用时退回同步（结果一样，只是占主线程）。 */
+export async function validateModelAsync(model: monaco.editor.ITextModel): Promise<void> {
+  if (model.getLanguageId() !== LANG_ID || model.isDisposed()) return;
+  const version = model.getVersionId();
+  const text = modelText(model).text;
+  const names = mergedNames(model);
+  const res = await diagnoseAsync(
+    model.uri.path.split('/').pop() || 'main.co',
+    text,
+    names
+  );
+  applyDiagnostics(model, res.diagnostics, version);
+}
+
 /* ───────────────────────────── 大纲 ───────────────────────────── */
 
 /** 供右侧大纲面板使用：AST 驱动，包含类 / 方法 / 字段的层级 */
 export function extractOutline(src: string): OutlineItem[] {
-  return analyze('main.co', src).outline;
+  // 只要大纲，不要诊断：symbolsOnly 走的是快路径（四成时间省下来）
+  return analyze('main.co', src, undefined, { symbolsOnly: true }).outline;
 }
 
 /** 文件统计，状态栏用 */

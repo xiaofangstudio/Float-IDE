@@ -5,7 +5,7 @@ import jsonWorker from 'monaco-editor/esm/vs/language/json/json.worker?worker';
 import { api, isTauriEnv } from '../core/tauri';
 import { normPath, setSourceProvider } from '../core/sources';
 import type { ProblemItem } from '../core/types';
-import { registerFloatLanguage, LANG_ID, validateModel } from '../lang/floatlang';
+import { registerFloatLanguage, LANG_ID, validateModelAsync } from '../lang/floatlang';
 import { isCopperFile } from '../lang/spec';
 import { MdPreview } from './MdPreview';
 import { loadSettings, SETTINGS_EVENT, type Settings } from '../ui/settings';
@@ -280,7 +280,11 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
   /** 把当前模型的诊断数量报给状态栏 */
   const reportProblems = useCallback((m: monaco.editor.ITextModel, path: string): void => {
     const marks = monaco.editor.getModelMarkers({ resource: m.uri });
-    const items: ProblemItem[] = marks.map((k) => ({
+    const items: ProblemItem[] = marks
+      // info 级（旧写法建议这类）只留编辑器里的蓝色下划线，不往「问题」列表里塞：
+      // 列表是让人一眼看到"哪里真有问题"的地方，不是建议簿。
+      .filter((k) => k.severity !== monaco.MarkerSeverity.Info)
+      .map((k) => ({
       severity: k.severity === monaco.MarkerSeverity.Error ? 'error'
         : k.severity === monaco.MarkerSeverity.Warning ? 'warning' : 'info',
       message: k.message,
@@ -375,7 +379,10 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
       acceptSuggestionOnEnter: 'on',
       tabCompletion: 'on',
       wordBasedSuggestions: 'off',
-      snippetSuggestions: 'top'
+      snippetSuggestions: 'top',
+      /* 行内续写（灰色幽灵字）：具体出不出由 floatlang 的行内 provider 决定，
+       * 设置里关掉后 provider 直接返回空，这里保持开启即可。 */
+      inlineSuggest: { enabled: true }
     });
     edRef.current = ed;
     const diffEd = monaco.editor.createDiffEditor(diffHostRef.current, {
@@ -764,12 +771,16 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
            * 留着会让人把整段删了还看到「参数列表要闭合」。 */
           onEditRef.current?.(path);
           if (timer) window.clearTimeout(timer);
+          /* 大文件把等待放宽：4000 行的 colang.co 整份分析 ~100 ms，
+           * 停在 280 ms 会跟打字抢主线程；800 ms 后再说，手感优先。
+           * 并且校验本身在 worker 里跑（validateModelAsync），主线程只画标记。 */
+          const bigFile = m.getValueLength() > 120_000;
           timer = window.setTimeout(() => {
             if (m.isDisposed()) return;   // 文件已经关了，别再碰它
-            validateModel(m); reportProblems(m, path);
+            void validateModelAsync(m).then(() => { if (!m.isDisposed()) reportProblems(m, path); });
             // 缓冲区内容变了：大纲 / 搜索索引跟着内存走，不等保存
             buffersChangeRef.current?.();
-          }, 280);
+          }, bigFile ? 800 : 280);
           // 自动保存（设置里可关）——走和手动保存同一条串行通道，避免互相踩
           if (loadSettings().autoSave && /\.(co|cw|md|txt|in)$/i.test(path)) {
             if (saveTimer) window.clearTimeout(saveTimer);
@@ -780,7 +791,8 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
           }
         });
         modelsRef.current.set(path, model);
-        if (lang === LANG_ID) { validateModel(model); reportProblems(model, path); }
+        const m0 = model;
+        if (lang === LANG_ID && m0) { void validateModelAsync(m0).then(() => { if (!m0.isDisposed()) reportProblems(m0, path); }); }
       } catch (e) { setStatus('打开失败：' + String(e)); }
       })();
       pendingOpens.current.set(path, open);

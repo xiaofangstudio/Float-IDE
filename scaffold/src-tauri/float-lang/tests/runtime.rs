@@ -574,3 +574,17 @@ fn 极端表达式不爆栈() {
     let m2 = run_big(deep_if).unwrap_err();
     assert!(m2.contains("嵌套") && m2.contains("太深"), "深 if 报错不对：{}", m2);
 }
+
+
+/* ── 停止（Shift+F5）：合作式取消 ────────────────────────────────────────
+ * 以前 VM 里没有取消通道，界面按停止只是丢掉回调，VM 线程照跑到天荒地老。
+ * 现在 vm.rs 在循环回跳的 fuel 检查点上查一个原子标志；这里把标志置上，
+ * 死循环必须在"很快"之内带着「已停止」退出，而不是撞到 2 亿步上限。 */
+#[test]
+fn 停止标记能让死循环提前退出() {
+    float_lang::cancel::request_stop();
+    let r = float_lang::api::run_source("int n = 0\nwhile (true)\n    n = n + 1\n");
+    float_lang::cancel::clear_stop();
+    let e = r.expect_err("死循环居然跑完了");
+    assert!(e.message.contains("已停止"), "停止报错文案不对：{}", e.message);
+}

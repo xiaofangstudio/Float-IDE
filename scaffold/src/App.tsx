@@ -104,6 +104,32 @@ export default function App() {
     else setPage({ kind: 'welcome' });
   }, [startup, openTarget]);
 
+  /* 已经在跑的窗口收到第二次启动传来的路径时，直接切到那个文件。 */
+  useEffect(() => {
+    if (!isTauri()) return;
+    let alive = true;
+    let un: (() => void) | undefined;
+    void import('@tauri-apps/api/event')
+      .then((m) => m.listen<string>('float://open-path', (e) => {
+        if (alive && e.payload) openTarget(e.payload);
+      }))
+      .then((fn) => { un = fn; })
+      .catch(() => { /* 事件系统不可用就算了，主流程不受影响 */ });
+    return () => { alive = false; un?.(); };
+  }, [openTarget]);
+
+  /* 启动参数可能比加载页晚到（`startup_path` 是异步的）。
+   * 晚到时如果已经停在欢迎页，就直接把文件打开，别让人看着欢迎页发呆——
+   * 以前这里只判断一次，所以双击 .co 经常"打开了但没开文件"。 */
+  useEffect(() => {
+    if (!startup) return;
+    setPage((p) => {
+      if (p.kind !== 'welcome') return p;
+      const t = resolveTarget(startup);
+      return { kind: 'ws', dir: t.dir, openFile: t.openFile };
+    });
+  }, [startup]);
+
   return (
     <div className="app-shell">
       <div className="app-bg" />

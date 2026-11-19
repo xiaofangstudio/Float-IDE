@@ -47,6 +47,9 @@ export type CompletionInput = {
   scopeVars?: string[];
   /** 光标所在位置：语句开头 / 表达式中间。表达式里不给控制流关键字 */
   position?: 'statement' | 'expression';
+  /** 光标所在行号：只把**光标之前**声明过的变量放进候选。
+   *  后面才声明的还没轮到用，列出来既没用又要多算一遍排序。 */
+  maxLine?: number;
   plugins?: PluginContrib;
 };
 
@@ -198,6 +201,8 @@ export function buildCompletions(input: CompletionInput): Completion[] {
    * 当前作用域里正在用的变量（尤其 for 循环变量）单独降一档，
    * 这样「for s in 成绩」下面打 s，第一个候选一定是 s，不会是 if 或某个内建函数。 */
   for (const v of a.vars) {
+    /* 光标之后才声明的变量先不列（除非它其实是函数参数/全局，行号本来就在前面） */
+    if (input.maxLine != null && v.line > input.maxLine) continue;
     push(v.name, 'variable', scope.has(v.name) ? TIER.scope : TIER.local,
       v.cls ? v.cls : v.type,
       `变量 \`${v.name}\`${v.cls ? `，类型 ${v.cls}` : `，类型 ${v.type}`}（第 ${v.line} 行）`);
@@ -268,6 +273,15 @@ export const SNIPPET_MIN_WORD = 3;
  *  以前这个判断散在 Monaco provider 里，改坏了没人发现。 */
 export function visibleCompletions(items: Completion[], word: string): Completion[] {
   return word.length >= SNIPPET_MIN_WORD ? items : items.filter((it) => it.kind !== 'snippet');
+}
+
+/** 一次补全最多交这么多条给 Monaco。
+ *  候选上千条时，Monaco 渲染列表 + 我们建对象才是真正的开销；
+ *  排在后面的本来就很少被翻到，砍掉不影响使用，还能让列表秒开。 */
+export const MAX_SUGGESTIONS = 450;
+
+export function capCompletions(items: Completion[], max = MAX_SUGGESTIONS): Completion[] {
+  return items.length <= max ? items : items.slice(0, max);
 }
 
 /** 变量属于哪个"内建类型家族"，用来过滤内建方法 */

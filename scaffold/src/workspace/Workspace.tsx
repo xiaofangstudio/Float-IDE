@@ -8,7 +8,7 @@ import { Runner, type CtlState, type OutLine } from '../lang/interp';
 import { setFsBridge } from '../lang/builtins';
 import type { ConsoleLine, ProblemItem, ProjectMeta, VarRow, ReportRow } from '../core/types';
 import { analyze } from '../lang/analyze';
-import { setPluginContributions } from '../lang/floatlang';
+import { setPluginContributions, setProjectNames } from '../lang/floatlang';
 import { EditorPane, openBuffers, type EditorHandle, type DocTab } from '../ide/EditorPane';
 import { readSource } from '../core/sources';
 import { FileTree } from '../ide/FileTree';
@@ -70,7 +70,7 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
    * entrySrc/entryFile 只是"编辑器还没打开任何文件"时的兜底（工程刚打开那一瞬间）。 */
   const [panelFile, setPanelFile] = useState('');
   const [panelSrc, setPanelSrc] = useState('');
-  const [execMode, setExecMode] = useState<'编译执行' | '解释执行'>('编译执行');
+  const [execMode, setExecMode] = useState<'编译执行' | 'AOT 编译执行' | '解释执行'>('编译执行');
   const [activeName, setActiveName] = useState('');
   const [activePath, setActivePath] = useState<string | null>(null);
 
@@ -215,7 +215,7 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
     indexRef.current = new ProjectIndex(
       projectDir,
       (p) => api.fsRead(p),
-      async (d) => (await api.fsList(d)).map((e) => ({ name: e.name, isDir: e.isDir, relPath: e.relPath }))
+      async (d) => (await api.fsList(d)).map((e) => ({ name: e.name, isDir: e.isDir, relPath: e.relPath, size: e.size }))
     );
   }
   const [indexSize, setIndexSize] = useState(0);
@@ -279,6 +279,19 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
   const pushLine = useCallback((l: OutLine): void => {
     setLines((ls) => [...ls.slice(-500), { kind: l.kind, text: l.text, ts: Date.now() }]);
   }, []);
+  /* AOT 运行（选 AOT 时 F5）：产物是独立 exe，输出逐行从后端推过来。
+   * 只认当前这一次 runId，旧进程的尾巴不能糊到新一次运行的控制台上。 */
+  const aotActiveRef = useRef(false);
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlisten: (() => void) | null = null;
+    void listen<{ runId: string; kind: string; text: string }>('float-aot-line', (e) => {
+      if (!aotActiveRef.current) return;
+      pushLine({ kind: e.payload.kind === 'err' ? 'err' : 'out', text: e.payload.text });
+    }).then((fn) => { unlisten = fn; });
+    return () => { unlisten?.(); };
+  }, [pushLine]);
+
 
   /* 工程元信息 + 入口文件内容（大纲用） */
   const reloadEntry = useCallback(async (): Promise<void> => {
@@ -400,6 +413,7 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
    * 顺便把所有打开的文件（不只是当前这个）都灌进搜索索引：
    * 搜索、跳转定义、重命名看到的同样是屏幕上的代码，哪怕还没存盘。 */
   const indexedVerRef = useRef<Map<string, string>>(new Map());
+  const indexTimer = useRef<number>(0);
   const syncPanel = useCallback((): void => {
     const ed = bus.current.editor;
     const path = ed?.currentPath() ?? null;
@@ -410,17 +424,26 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
     setPanelSrc(src);
     const idx = indexRef.current;
     if (!idx) return;
-    // 刷索引：内容没变就别重复 analyze（打字时 280ms 一刷，不防抖会卡）
-    let dirty = false;
-    for (const b of ed.allBuffers()) {
-      const seen = indexedVerRef.current.get(b.path);
-      if (seen === b.text) continue;
-      indexedVerRef.current.set(b.path, b.text);
-      idx.put(b.path, b.text);
-      dirty = true;
-    }
-    if (dirty) setIndexSize(idx.size);
-  }, []);
+    /* 刷索引改成「停手 400 ms 后一次」：
+     * 边打字边重建符号表是最亏的事——屏幕上还没定稿，算出来的东西马上又废。
+     * 400 ms 内的连续改动合并成一次，内容没变的不重算。 */
+    if (indexTimer.current) window.clearTimeout(indexTimer.current);
+    indexTimer.current = window.setTimeout(() => {
+      const ed2 = bus.current.editor;
+      const idx2 = indexRef.current;
+      if (!ed2 || !idx2) return;
+      let dirty = false;
+      for (const b of ed2.allBuffers()) {
+        if (indexedVerRef.current.get(b.path) === b.text) continue;
+        indexedVerRef.current.set(b.path, b.text);
+        idx2.put(b.path, b.text);
+        dirty = true;
+      }
+      if (dirty) {
+        setIndexSize(idx2.size);
+        setProjectNames(idx2.allNames());
+      }
+    }, 400);  }, []);
 
   /* 代码一改，上一次「运行」报的错就作废。不这么做的话：整段删掉以后，
    * 问题面板还挂着旧运行的「参数列表要闭合」，看着像修了没生效。 */
@@ -428,13 +451,37 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
     setRunProblems((prev) => (prev.length ? [] : prev));
   }, []);
 
-  /* 打开工程时先建一次索引（异步，不阻塞界面） */
+  /* 打开工程时先建一次索引（后台线程池，不阻塞界面）
+   * 进度回报到「控制台上方的蓝条」：大工程一眼能看到加载到哪了。 */
+  const [loading, setLoading] = useState<{ done: number; total: number; file: string } | null>(null);
   useEffect(() => {
     const idx = indexRef.current;
     if (!idx) return;
     let alive = true;
-    void idx.refresh().then((n) => { if (alive) setIndexSize(n); }).catch(() => {});
-    return () => { alive = false; };
+    let lastTick = Date.now();
+    setLoading({ done: 0, total: 0, file: '' });
+    // 看门狗：6 秒没有任何进展就把蓝条收掉。
+    // 读盘卡在某个文件上时，进度条会永远停在 30% 左右，看着就像"卡死"。
+    const watchdog = window.setInterval(() => {
+      if (alive && Date.now() - lastTick > 6000) setLoading(null);
+    }, 1000);
+    void idx
+      .refresh((p) => {
+        if (!alive) return;
+        lastTick = Date.now();
+        setLoading(p.total === 0 ? null : { done: p.done, total: p.total, file: p.file });
+      })
+      .then((n) => {
+        if (!alive) return;
+        window.clearInterval(watchdog);
+        setIndexSize(n);
+        // 工程名字总表交给诊断层：整个工程里定义过的名字，不该在某个文件里被标「没定义」
+        setProjectNames(idx.allNames());
+        // 留一点尾巴让人看到"完了"，然后收起
+        setTimeout(() => { if (alive) setLoading(null); }, 600);
+      })
+      .catch(() => { if (alive) setLoading(null); });
+    return () => { alive = false; window.clearInterval(watchdog); };
   }, [projectDir]);
 
   /* 导出工程包（.floatzip），与欢迎页「导入工程包」配对 */
@@ -467,9 +514,11 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
         kind: 'out',
         text: `平台 ${info.platform}｜环境里备了：${info.platforms.join(' / ') || '（无）'}｜版本 ${info.version || '未标'}｜来源 ${info.source}`
       });
-      pushLine({ kind: 'out', text: `编译器 ${info.compiler}` });
+      pushLine({ kind: 'out', text: `编译器 ${info.compiler_name || info.compiler}${info.compiler_version ? `（版本 ${info.compiler_version}）` : ''}` });
+      pushLine({ kind: 'out', text: `文件 ${info.compiler}` });
       pushLine({ kind: 'out', text: `自举版 ${info.compiler_self}` });
       pushLine({ kind: 'out', text: `运行时前奏 ${info.runtime}` });
+      pushLine({ kind: 'info', text: `环境文档：${info.docs ? '有（教程 + 关于 Copper 由环境提供）' : '没有 docs/，教程用 IDE 内置副本'}` });
     } catch (e) {
       pushLine({ kind: 'err', text: `查环境失败：${String(e)}` });
     }
@@ -483,8 +532,9 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
       return;
     }
     pushLine({ kind: 'info', text: `Copper 环境：${info.home}（${info.source}）` });
-    pushLine({ kind: 'out', text: `平台 ${info.platform}｜备了：${info.platforms.join(' / ') || '（无）'}｜版本 ${info.version || '未标'}` });
-    pushLine({ kind: 'out', text: `编译器 ${info.compiler}` });
+    pushLine({ kind: 'out', text: `平台 ${info.platform}｜备了：${info.platforms.join(' / ') || '（无）'}｜版本 ${info.compiler_version || info.version || '未标'}` });
+    pushLine({ kind: 'out', text: `编译器 ${info.compiler_name || info.compiler}` });
+    pushLine({ kind: 'info', text: `环境文档：${info.docs ? '有（教程 + 关于 Copper 由环境提供）' : '没有 docs/，教程用 IDE 内置副本'}` });
   }, [pushLine]);
 
   /* 从下载的安装包铺开环境（zip 不给路径就自己在下载/桌面里找最新的） */
@@ -684,6 +734,34 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
        * ask 是阻塞式的：内核停在提问处等界面回传答案，答完从原地继续——
        * 不再补进 inputs 从头重跑，所以同一个脚本里问多次、rand / time / 写文件都只发生一次。 */
       const entrySrc = sources.get(normEntry) ?? '';
+      /* 设置里选了 AOT：编成原生 exe 再跑（真正"另选一个解释器"）。
+       * 编的是磁盘上的文件，前面 saveAll 已经把缓冲区写盘了。 */
+      if (mode === 'run' && isTauri() && loadSettings().runMode === 'aot') {
+        setCtl('running');
+        setExecMode('AOT 编译执行');
+        aotActiveRef.current = true;
+        pushLine({ kind: 'info', text: `AOT：编译并运行 ${normEntry}（首次 10~20 s，之后按内容缓存）…` });
+        try {
+          const r = await api.copperRunAot(normEntry);
+          if (!alive()) return;
+          if (r.compiled) pushLine({ kind: 'info', text: `AOT 编译完成 ${(r.compile_ms / 1000).toFixed(1)} s` });
+          if (!r.ok) {
+            for (const l of r.error.split('\n')) if (l.trim()) pushLine({ kind: 'err', text: l });
+            setRunProblems([{ severity: 'error', message: r.error.split('\n')[0] || 'AOT 运行失败', file: normEntry, line: 1, col: 1, from: 'run' }]);
+            setCtl('done');
+            return;
+          }
+          pushLine({ kind: 'info', text: `运行结束（AOT · 总 ${(r.millis / 1000).toFixed(1)} s）` });
+          setCtl('done');
+        } catch (e) {
+          pushLine({ kind: 'err', text: `AOT 没跑起来：${String(e)}` });
+          setCtl('done');
+        } finally {
+          aotActiveRef.current = false;
+          setAskQ(null);
+        }
+        return;
+      }
       const canNative = mode === 'run' && isTauri();
       if (canNative) {
         try {
@@ -759,6 +837,13 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
     runTokenRef.current += 1;
     runnerRef.current?.stop();
     runnerRef.current = null;
+    /* F5 走的是 Rust 内核：它跑在带 64MB 栈的阻塞线程里，前端 Runner 停不了。
+     * 发一条停止请求，VM 在循环检查点退出（正卡在 ask 上也塞空答案唤醒）。 */
+    if (isTauri()) void api.langStop().catch(() => { /* 没有可停的运行就算了 */ });
+    if (isTauri() && aotActiveRef.current) {
+      aotActiveRef.current = false;
+      void api.copperAotStop().catch(() => {});
+    }
     setCtl('idle');
     setExecPos(null);
     setAskQ(null);
@@ -1533,7 +1618,9 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
             const runId = inputRunRef.current;
             if (runId !== null) {
               inputRunRef.current = null;
-              void api.langInput(runId, a);
+              // AOT 产物的 ask：答案写进子进程 stdin；VM：送回阻塞线程
+              if (runId.startsWith('aot-')) void api.copperAotInput(runId, a);
+              else void api.langInput(runId, a);
               return;
             }
             // F6 / 旧解释器：断点或 ask 暂停，resume 接着走
@@ -1543,6 +1630,7 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
           }}
           running={running}
           stateText={stateText}
+          progress={loading}
           tab={dockTab}
           onTab={setDockTab}
           projectDir={projectDir}

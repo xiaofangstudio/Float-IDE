@@ -2,9 +2,23 @@
  * 这几个都是用户明确点名的毛病，任何时候回退都要在这里炸出来。 */
 
 import { analyze } from '../src/lang/analyze';
-import { buildCompletions, completionPosition, visibleCompletions, type Completion } from '../src/lang/completions';
+import { buildCompletions, capCompletions, completionPosition, visibleCompletions, type Completion } from '../src/lang/completions';
 import { contextAt } from '../src/lang/context';
-import { scopeVariables, smartRank, trainModel } from '../src/lang/smartComplete';
+import { scopeVariables, smartRank, predictNext, trainModel, SmartCorpus, type SmartModel } from '../src/lang/smartComplete';
+
+/** 两张模型表逐词对比（增量 vs 全量必须完全一致） */
+function sameModel(x: SmartModel, y: SmartModel): boolean {
+  const keys = new Set([...x.next.keys(), ...y.next.keys()]);
+  for (const k of keys) {
+    const a = x.next.get(k);
+    const b = y.next.get(k);
+    if ((a?.size ?? 0) !== (b?.size ?? 0)) return false;
+    for (const [w, n] of a ?? []) if ((b?.get(w) ?? 0) !== n) return false;
+  }
+  if (x.varTypes.size !== y.varTypes.size) return false;
+  for (const [k, v] of x.varTypes) if (y.varTypes.get(k) !== v) return false;
+  return true;
+}
 
 let pass = 0;
 let fail = 0;
@@ -231,22 +245,25 @@ function labels(list: Completion[]): string[] {
   const ranked = smartRank(model, items, lineBefore, scopeVars, 's');
   eq('模型重排后循环变量仍是第一', ranked[0]?.label, 's');
 
-  /* 新语法已喂给小模型：空工程（不传任何源码）也能从 SEED 学到这些搭配 */
+  /* 新语法已喂给小模型：空工程（不传任何源码）也能从 SEED 学到这些搭配。
+   * 注意：模型把"自己起的名字"统一归一成 <id>（见 normalizeTokens），
+   * 所以以前能查到 'i' / 'g' / 'AND2' 的地方，现在查的是 <id>。 */
   const seed = trainModel([]);
-  ok('SEED 教了 f{} 拼接', (seed.next.get('\u001ff')?.get('{') ?? 0) > 0);
-  ok('SEED 教了 for 双变量', (seed.next.get('for\u001fi')?.get(',') ?? 0) > 0);
+  ok('SEED 教了 f{} 拼接', (seed.next.get('\u001f<id>')?.get('{') ?? 0) > 0);
+  ok('SEED 教了 for 双变量', (seed.next.get('for\u001f<id>')?.get(',') ?? 0) > 0);
   ok('SEED 教了 data.require', (seed.next.get('data\u001f.')?.get('require') ?? 0) > 0);
-  ok('SEED 教了函数当值', (seed.next.get('\u001ffn')?.get('g') ?? 0) > 0);
+  ok('SEED 教了函数当值', (seed.next.get('\u001ffn')?.get('<id>') ?? 0) > 0);
   /* 闭包 / lambda / lazy / HOF 已落地，一并喂给模型 */
   ok('SEED 教了 lambda', (seed.next.get('\u001ffn')?.get('(') ?? 0) > 0);
   ok('SEED 教了 lazy 参数', (seed.next.get('\u001flazy')?.get('bool') ?? 0) > 0);
-  ok('SEED 教了 AND2', (seed.next.get('bool\u001fAND2')?.get('(') ?? 0) > 0);
+  ok('SEED 教了 AND2', (seed.next.get('bool\u001f<id>')?.get('(') ?? 0) > 0);
   const dataDot = seed.next.get('data\u001f.');
   ok('SEED 教了 data.map/filter', (dataDot?.get('map') ?? 0) > 0 && (dataDot?.get('filter') ?? 0) > 0);
 
-  /* 方岛物语烘焙表：空工程也学到真实游戏代码的搭配 */
-  ok('烘焙表让 for 大概率跟 i', (seed.next.get('\u001ffor')?.get('i') ?? 0) > 0);
-  ok('烘焙表教了 for i in range', (seed.next.get('i\u001fin')?.get('range') ?? 0) > 0);
+  /* 真实语料烘焙表：空工程也学到真实代码的搭配（含出厂编译器本体） */
+  ok('烘焙表让 for 后面跟变量', (seed.next.get('\u001ffor')?.get('<id>') ?? 0) > 0);
+  ok('烘焙表教了 for 变量 in range', (seed.next.get('<id>\u001fin')?.get('range') ?? 0) > 0);
+  ok('三元表训到了 for X in', (seed.next.get('for\u001f<id>\u001fin')?.get('range') ?? 0) > 0);
   ok('烘焙表教了 print 后跟括号', (seed.next.get('\u001fprint')?.get('(') ?? 0) > 0);
   ok('SEED 教了默认函数 sqrt/str/len 搭配',
     (seed.next.get('\u001fsqrt')?.get('(') ?? 0) > 0
@@ -264,6 +281,93 @@ function labels(list: Completion[]): string[] {
   /* 排序不越档：类型加权后局部变量仍压在最前 */
   const typedRanked = smartRank(typed, items, 'print(背包)', [], '');
   ok('类型加权不改档位铁律', typedRanked.every((c, i) => i === 0 || Number(c.sortText[0]) >= Number(typedRanked[0].sortText[0])));
+}
+
+/* ── 11. 增量语料库：结果必须和全量训练一模一样（不然就是"越学越歪"） ── */
+{
+  const A = 'int 甲 = 1\nprint(甲)\nfor i in range(3)\n    print(i)\n';
+  const B = 'fn 乙(x)\n    return x + 1\n';
+  const B2 = 'fn 乙(x)\n    return x + 2\nlist 丙 = [1, 2]\n';
+
+  const corpus = new SmartCorpus();
+  corpus.setText('a.co', A);
+  corpus.setText('b.co', B);
+  corpus.flush();
+  ok('增量模型 == 全量模型（初建）', sameModel(corpus.get(), trainModel([A, B])));
+
+  corpus.setText('b.co', B2);
+  corpus.flush();
+  ok('改一个文件后仍等于全量重训', sameModel(corpus.get(), trainModel([A, B2])));
+  ok('旧文件的统计没被抹掉', (corpus.get().next.get('\u001fint')?.get('<id>') ?? 0) > 0);
+  ok('被删掉的旧搭配不会残留', (corpus.get().next.get('\u001freturn')?.get('<id>') ?? 0) > 0);
+
+  /* 内容没变就不该重建：连续 setText 同一份内容，builds 不涨 */
+  const before = corpus.builds;
+  corpus.setText('b.co', B2);
+  corpus.setText('b.co', B2);
+  corpus.flush();
+  ok('内容没变不重建', corpus.builds === before + 1);
+}
+
+/* ── 12. 候选预算 & 只看光标之前的变量 ── */
+{
+  const laterSrc = 'print(后面的)\nint 后面的 = 1\n';
+  const a = analyze('t.co', laterSrc);
+  const at = buildCompletions({
+    word: '', analysis: a, context: contextAt(laterSrc, 1, 9, a), maxLine: 1
+  });
+  ok('光标之后的变量不进候选', !labels(at).includes('后面的'));
+
+  const earlySrc = 'int 前面的 = 1\nprint(前面的)\n';
+  const a2 = analyze('t.co', earlySrc);
+  const at2 = buildCompletions({
+    word: '', analysis: a2, context: contextAt(earlySrc, 2, 9, a2), maxLine: 2
+  });
+  ok('光标之前的变量照常进候选', labels(at2).includes('前面的'));
+
+  const many = Array.from({ length: 600 }, (_, i) => ({
+    label: `v${i}`, kind: 'variable' as const, insertText: `v${i}`,
+    labelDetail: '', detail: '', doc: '', sortText: `1${i}`
+  }));
+  eq('候选上限 450 条', capCompletions(many).length, 450);
+}
+
+/* ── 13. 不发热：全量重训 vs 单文件增量 ── */
+{
+  const big = Array.from({ length: 3000 }, (_, i) =>
+    `int 变量${i} = ${i}\nprint(变量${i})\nfor j in range(10)\n    print(j)\n`).join('\n');
+
+  const t0 = performance.now();
+  trainModel([big]);
+  const fullMs = performance.now() - t0;
+
+  const corpus = new SmartCorpus();
+  corpus.setText('big.co', big);
+  corpus.flush();
+  corpus.setText('big.co', big + '\nprint(新的一行)\n');
+  const t1 = performance.now();
+  corpus.flush();
+  const incMs = performance.now() - t1;
+
+  console.log(`  语料 ${big.length} 字节：全量重建 ${fullMs.toFixed(1)} ms，改一行后增量 ${incMs.toFixed(1)} ms`);
+  ok('增量重建比全量便宜 10 倍以上', incMs * 10 < fullMs);
+  ok('增量重建本身够快（< 8 ms）', incMs < 8);
+}
+
+/* ── 14. 行内续写：只在行尾空格后、置信度够高才猜；能连着猜几个词 ── */
+{
+  const m = trainModel([]);
+  eq('for i in 后面猜出 range(', predictNext(m, 'for i in '), 'range(');
+  /* 连续猜：range( 之后就交给用户填参数，不再瞎猜 */
+  ok('括号后面不再往下猜', (predictNext(m, 'for i in ') ?? '').includes('range('));
+  eq('没有空格不猜', predictNext(m, 'for i in'), null);
+  eq('点后面不猜（交给成员补全）', predictNext(m, 'xs.'), null);
+  eq('样本太少不猜', predictNext(m, '甲乙丙 丁'), null);
+  eq('空行不猜', predictNext(m, ' '), null);
+  /* 猜出来的东西必须是"代码长相"的词序列：不含引号、不含占位符、不超长 */
+  const guesses = ['for i in ', 'print(总数', 'if 总数 > 0 ', 'list xs = ['].map((s) => predictNext(m, s));
+  ok('猜出来的是词序列，不是占位符/引号',
+    guesses.every((g) => g === null || (g.length <= 40 && !/[<>"']/.test(g))));
 }
 
 console.log(`\n通过 ${pass} 项，失败 ${fail} 项`);

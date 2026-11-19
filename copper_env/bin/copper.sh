@@ -31,8 +31,15 @@ esac
 TAG="$os_tag-$arch_tag"
 
 pick() {
-  # $1 = env|self。优先查按平台分的子目录（bin/<tag>/），再查平铺的兼容路径——
-  # 和 Windows 的 copper.cmd 同一套顺序，不写死某一种布局。
+  # $1 = env|self。编译器统一命名 `colang <版本>`（自举版 `colang-self <版本>`）：
+  # 先在 bin/<tag>/ 里按版本排序取最新，再退到平铺目录，最后才用旧的 copper 名字兜底。
+  local pre
+  if [ "$1" = "self" ]; then pre='colang-self '; else pre='colang '; fi
+  local hit
+  for d in "$HERE/$TAG" "$HERE"; do
+    hit="$(ls -1 "$d/"$pre* 2>/dev/null | sort -V | tail -1 || true)"
+    if [ -n "$hit" ] && [ -x "$hit" ]; then echo "$hit"; return 0; fi
+  done
   if [ "$1" = "self" ]; then name=copper-self; else name=copper; fi
   if [ -x "$HERE/$TAG/$name" ]; then echo "$HERE/$TAG/$name"; return 0; fi
   if [ -x "$HERE/$name" ]; then echo "$HERE/$name"; return 0; fi

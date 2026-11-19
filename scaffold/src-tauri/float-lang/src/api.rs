@@ -156,6 +156,8 @@ pub fn run_blocking(
     overlay: std::collections::HashMap<String, String>,
     input_cb: Box<dyn FnMut(&str) -> String>,
 ) -> FResult<RunOutcome> {
+    // 新的一轮开始：清掉上一轮可能留下的"停止"标记
+    crate::cancel::clear_stop();
     crate::host::set_base(base);
     let chunk = compile_source_with(file, src, base, overlay)?;
     let mut vm = Vm::new(chunk);

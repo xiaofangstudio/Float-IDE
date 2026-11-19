@@ -5,8 +5,13 @@
 //! 2. **语义零漂移**——算术、比较、下标、成员、方法全部复用 VM 的实现
 //!    （`arith` / `compare` / `index_get` / `member_get` / `*_method`），
 //!    生成代码只是"换了种方式调用同一批函数"；
-//! 3. **不支持的特性编译期明确报告**（指针 / ask / wait / time read / 嵌套函数等），
-//!    由调用方回落 VM 运行——AOT 永远是快路径，VM 永远是兜底。
+//! 3. **不支持的特性编译期明确报告**，由调用方回落 VM 运行——AOT 永远是快路径，
+//!    VM 永远是兜底。
+//!    已支持：指针（`&x` / `*p` 读`*p` 写）、`ask` 语句、内联 fn 捕获外层局部变量、
+//!    `wait until`、`time read/reset`、按位取反 `~`、`if out`、try/catch/finally。
+//!    仍会明确拒绝的边角：循环外的 break/continue、`&` 作用于非变量非列表元素、
+//!    函数引用「块外」的外层变量（同一块内没问题）。
+//!    注意 `ask` 是**语句**（`ask "问题"`），不是函数调用（`ask("问题")` 会被拒）。
 //!
 //! 翻译模型：
 //! - 全局变量 → `Globals { v, gi }` 槽位；函数内声明 → Rust 局部变量
@@ -1030,7 +1035,13 @@ fn scan_expr(e: &Expr) -> Result<(), AotError> {
         ExprKind::Call { callee, args } => {
             if let ExprKind::Var(n) = &callee.kind {
                 if &**n == "ask" {
-                    return Err(AotError::unsupported("ask（需要交互宿主）", e.span.line));
+                    return Err(AotError {
+                        message: format!(
+                            "ask 是语句，不是函数：请写成 `ask \"问题\"`，别写 `ask(\"问题\")`（第 {} 行）",
+                            e.span.line
+                        ),
+                        line: e.span.line,
+                    });
                 }
             }
             scan_expr(callee)?;
@@ -1145,8 +1156,11 @@ fn scan_body(body: &[Stmt], fns: &mut Vec<(Rc<str>, Vec<crate::ast::Param>, Vec<
             }
             StmtKind::Ask(Some(e)) => scan_expr(e)?,
             StmtKind::Ask(None) => {}
-            StmtKind::WaitUntil { .. } => return Err(AotError::unsupported("wait until", s.span.line)),
-            StmtKind::TimeRead | StmtKind::TimeReset => return Err(AotError::unsupported("time read / time reset", s.span.line)),
+            StmtKind::WaitUntil { cond, body } => {
+                scan_expr(cond)?;
+                scan_body(body, fns)?;
+            }
+            StmtKind::TimeRead | StmtKind::TimeReset => {}
             _ => {}
         }
     }
@@ -2485,15 +2499,50 @@ fn emit_stmt(cg: &mut Cg, s: &Stmt, top_level: bool) -> Result<(), AotError> {
              * 结果写进 ans / __last_ans 两个特殊全局。AOT 照这个语义发。 */
             if let Some(e) = prompt {
                 let v = emit_expr(cg, e)?;
-                cg.w(format!("out_line(&show(&[({}).clone()]));", v));
+                cg.w(format!("let __pr = show(&[({}).clone()]);", v));
+                /* 单独跑 exe 时 ask_mark 什么都不做；IDE 设了 COPPER_ASK_MARK 时
+                 * 往 stderr 打一行标记，界面就知道"现在在等输入"。 */
+                cg.w("ask_mark(&__pr);".into());
+                cg.w("out_line(&__pr);".into());
             }
             cg.w(format!("let __ans_v = ask_line({}, {})?;", s.span.line, s.span.col));
             cg.assign_var("ans", "__ans_v");
             cg.assign_var("__last_ans", "__ans_v");
             Ok(())
         }
-        StmtKind::WaitUntil { .. } => Err(AotError::unsupported("wait until", s.span.line)),
-        StmtKind::TimeRead | StmtKind::TimeReset => Err(AotError::unsupported("time read / time reset", s.span.line)),
+        StmtKind::WaitUntil { cond, body } => {
+            /* wait until (条件)：等价于 `while !条件 { 块 }`（VM 就是这么翻的）。
+             * 加一个判断次数护栏，防止条件永远不成立时把机器拖死。 */
+            let cc = emit_cond(cg, cond)?;
+            cg.w("{".into());
+            cg.indent += 1;
+            cg.w("let mut __wu: u64 = 0;".into());
+            cg.w("loop {".into());
+            cg.indent += 1;
+            cg.w(format!("if {} {{ break; }}", cc));
+            cg.w(format!(
+                "if __wu > 200_000_000u64 {{ return Err(fe({}, 1, \"wait until 等太久（条件一直不成立？）\")); }}",
+                s.span.line
+            ));
+            cg.w("__wu += 1;".into());
+            cg.loop_depth += 1;
+            emit_stmts_owned(cg, body, top_level)?;
+            cg.loop_depth -= 1;
+            cg.indent -= 1;
+            cg.w("}".into());
+            cg.indent -= 1;
+            cg.w("}".into());
+            Ok(())
+        }
+        StmtKind::TimeRead => {
+            /* 距上次 time reset 的秒数，写进 __last_time（和 VM 的 TimeRead 一致） */
+            cg.assign_var("__last_time", "V::Float(time_read())");
+            Ok(())
+        }
+        StmtKind::TimeReset => {
+            cg.w("time_reset();".into());
+            Ok(())
+        }
         StmtKind::FuncDef { .. } => Ok(()), // 已单独生成
         StmtKind::Unsupported { what } => Err(AotError::unsupported(what, s.span.line)),
     }
@@ -3194,7 +3243,10 @@ fn emit_expr(cg: &mut Cg, e: &Expr) -> Result<String, AotError> {
                         aa, e.span.line, e.span.col
                     ))
                 }
-                Op::BitNot => Err(AotError::unsupported("按位取反 ~", e.span.line)),
+                Op::BitNot => {
+                    let aa = emit_expr(cg, a)?;
+                    Ok(format!("bit_not(&({}).clone(), {})?", aa, e.span.line))
+                }
                 _ => Ok(format!("{{ let __a = ({}).clone(); arith(Op::{:?}, &V::Int(0), &__a){} }}", aa, op, em(e))),
             }
         }
@@ -5252,6 +5304,34 @@ pub fn fe(line: u32, col: u32, msg: impl Into<String>) -> FE {
 }
 #[inline(always)]
 pub fn t(v: &V) -> bool { v.truthy() }
+/// 按位取反：和 VM 的 Op::BitNot 一致，只接受整数
+pub fn bit_not(a: &V, ln: u32) -> R<V> {
+    match a.as_int() {
+        Some(x) => Ok(V::Int(!x)),
+        None => Err(fe(ln, 1, "按位取反需要整数")),
+    }
+}
+/// time read / time reset 的计时基准（和 VM 的 time_base 同语义）
+thread_local! {
+    static __TIME_BASE: std::cell::Cell<std::time::Instant> =
+        std::cell::Cell::new(std::time::Instant::now());
+}
+pub fn time_reset() { __TIME_BASE.with(|c| c.set(std::time::Instant::now())); }
+pub fn time_read() -> f64 { __TIME_BASE.with(|c| c.get().elapsed().as_secs_f64()) }
+/// IDE 用的 ask 标记：只有设了 COPPER_ASK_MARK 才发，单独跑 exe 不污染输出。
+/// 格式：`\u{1}ASK\u{1}<prompt>`，prompt 里的换行转义成 `\n`。
+pub fn ask_mark(p: &str) {
+    if std::env::var_os("COPPER_ASK_MARK").is_none() { return; }
+    let mut s = String::new();
+    for ch in p.chars() {
+        match ch {
+            '\n' => s.push_str("\\n"),
+            '\r' => {}
+            _ => s.push(ch),
+        }
+    }
+    eprintln!("\u{1}ASK\u{1}{}", s);
+}
 pub fn disp(v: &V) -> String { v.to_display() }
 #[inline(always)]
 pub fn show(items: &[V]) -> String {
@@ -5876,3 +5956,141 @@ pub fn hof_run(g: &mut Globals, name: &str, args: Vec<V>, ln: u32, cl: u32, call
     }
 }
 "#;
+
+/* ── 进程内 AOT 构建：IDE 的「AOT 运行」走这条路 ───────────────────────
+ * 为什么不直接调环境里的 colang：环境里那个编译器是自举产物，功能面可能
+ * 落后于当前内核。IDE 自己连着 float-lang，用同一份 emitter 才能保证
+ * "VM 能跑的程序，AOT 也一定能编"。环境仍然负责提供文档与二进制，
+ * 但 IDE 内的 AOT 不再受它能力边界限制。
+ *
+ * 产物按 cache_key 分目录；cargo 的 target 目录全局共享，
+ * float-lang 这类不变的依赖只编一次。
+ * ------------------------------------------------------------------- */
+
+fn aot_cargo() -> std::path::PathBuf {
+    if let Ok(c) = std::env::var("CARGO") {
+        let p = std::path::PathBuf::from(c);
+        if p.is_file() {
+            return p;
+        }
+    }
+    #[cfg(windows)]
+    {
+        if let Ok(home) = std::env::var("USERPROFILE") {
+            let p = std::path::PathBuf::from(home)
+                .join(".cargo")
+                .join("bin")
+                .join("cargo.exe");
+            if p.is_file() {
+                return p;
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            let p = std::path::PathBuf::from(home).join(".cargo").join("bin").join("cargo");
+            if p.is_file() {
+                return p;
+            }
+        }
+    }
+    std::path::PathBuf::from("cargo")
+}
+
+fn aot_exe_suffix() -> &'static str {
+    if cfg!(windows) {
+        ".exe"
+    } else {
+        ""
+    }
+}
+
+pub fn build_exe(
+    script: &std::path::Path,
+    src: &str,
+    manifest_dir: &str,
+    cache_key: &str,
+) -> Result<std::path::PathBuf, String> {
+    use std::process::Command;
+
+    let file = script
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "main.co".into());
+    let base = script.parent();
+    let prepared = crate::api::prepare(&file, src, base)
+        .map_err(|e| format!("预处理失败：{}", e.message))?;
+    let prog = crate::parser::parse_program(&file, &prepared.source);
+    if let Some(e) = prog.errors.first() {
+        return Err(format!("语法有错：{}", e.message));
+    }
+    let stem = script
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "app".into());
+    let safe: String = stem
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .collect();
+
+    let root = std::env::temp_dir().join(format!("copper_ide_aot_{}", cache_key));
+    let shared_target = std::env::temp_dir().join("copper_aot_cache");
+
+    let (dir, single) = match emit(&prog) {
+        Ok(rust_src) => {
+            let dir = root.join("single");
+            std::fs::create_dir_all(dir.join("src")).map_err(|e| e.to_string())?;
+            let manifest = format!(
+                "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nfloat-lang = {{ path = {:?} }}\n\n[[bin]]\nname = \"{}\"\npath = \"src/main.rs\"\n\n[profile.release]\nopt-level = 3\nlto = \"thin\"\ncodegen-units = 1\npanic = \"abort\"\nincremental = false\ndebug = false\nstrip = \"symbols\"\n",
+                safe, manifest_dir, safe
+            );
+            std::fs::write(dir.join("Cargo.toml"), manifest).map_err(|e| e.to_string())?;
+            std::fs::write(dir.join("src").join("main.rs"), rust_src).map_err(|e| e.to_string())?;
+            (dir, true)
+        }
+        Err(e) if e.message.contains("脚本太大") => {
+            let files = emit_split(&prog, &safe, manifest_dir).map_err(|e| e.message)?;
+            let dir = root.join("split");
+            for f in &files {
+                let p = dir.join(&f.rel);
+                if let Some(parent) = p.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+                let same = std::fs::read_to_string(&p).map(|old| old == f.content).unwrap_or(false);
+                if !same {
+                    std::fs::write(&p, &f.content).map_err(|e| e.to_string())?;
+                }
+            }
+            (dir, false)
+        }
+        Err(e) => return Err(e.message),
+    };
+
+    let st = Command::new(aot_cargo())
+        .args(["build", "--release", "-j", "2"])
+        .env("CARGO_TARGET_DIR", &shared_target)
+        .current_dir(&dir)
+        .output()
+        .map_err(|e| format!("cargo 起不来（{}）。AOT 需要本机装 Rust 工具链。", e))?;
+    if !st.status.success() {
+        let err = String::from_utf8_lossy(&st.stderr).to_string();
+        let lines: Vec<&str> = err.lines().filter(|l| l.trim_start().starts_with("error")).collect();
+        let tail: Vec<&str> = err.lines().rev().take(25).collect();
+        let msg = if lines.is_empty() {
+            tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+        } else {
+            lines.join(" | ")
+        };
+        return Err(format!("cargo build 失败：\n{}", msg));
+    }
+    let built = shared_target
+        .join("release")
+        .join(format!("{}{}", safe, aot_exe_suffix()));
+    if !built.is_file() {
+        return Err(format!("编译完了但找不到产物（{}，single={}）", built.display(), single));
+    }
+    let dest = root.join(format!("{}{}", safe, aot_exe_suffix()));
+    std::fs::copy(&built, &dest).map_err(|e| format!("复制产物失败：{}", e))?;
+    Ok(dest)
+}

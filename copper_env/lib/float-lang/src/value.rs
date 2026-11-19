@@ -1,0 +1,661 @@
+//! 值模型。
+//!
+//! 与 TS 版的语义对齐，但有两个刻意的改进：
+//!
+//! 1. **整数是整数**。TS 版所有数字都是 f64，`int`/`float` 只是标注；
+//!    这里分成 `Int(i64)` 和 `Float(f64)`: 整型运算走整数指令，不碰浮点单元。
+//!    这一步是 Rust 版能比 V8 快的第一个结构性原因。
+//! 2. **字典是有序的**，键集合与插入顺序都保得住（TS 用 Map，本来就保序）。
+//!
+//! 保持不变的语义：
+//! * 变量赋值/传参是引用语义（和 Python / TS 版一致）
+//! * 只有"往容器里塞值"才深拷贝（`clone_deep`），这一点 TS 版用 cloneVal 做过
+
+use crate::ast::{Param, Stmt};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::fmt::Write as _;
+use std::hash::{BuildHasherDefault, Hasher};
+use std::rc::Rc;
+
+/// FxHash（rustc 内部用的那套）：乘法 + 旋转，比默认 SipHash 快 3~5 倍。
+/// 字典是本语言最热的容器（编译器的每个 token、每个 AST 节点都是字典），
+/// 换哈希函数不动任何对外语义，纯粹少算几轮。
+#[derive(Default)]
+pub struct FxHasher(u64);
+
+impl Hasher for FxHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut h = self.0;
+        let mut chunks = bytes.chunks_exact(8);
+        for c in &mut chunks {
+            let mut a = [0u8; 8];
+            a.copy_from_slice(c);
+            h = (h.rotate_left(5) ^ u64::from_le_bytes(a)).wrapping_mul(0x517c_c1b7_2722_0a95);
+        }
+        for &b in chunks.remainder() {
+            h = (h.rotate_left(5) ^ b as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
+        }
+        self.0 = h;
+    }
+    #[inline]
+    fn write_u8(&mut self, n: u8) {
+        self.write(&[n]);
+    }
+    #[inline]
+    fn write_u64(&mut self, n: u64) {
+        self.0 = (self.0.rotate_left(5) ^ n).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+    #[inline]
+    fn write_usize(&mut self, n: usize) {
+        self.write_u64(n as u64);
+    }
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+pub type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
+
+pub type ListRef = Rc<RefCell<Vec<Value>>>;
+
+/// 上值格子（cell）：闭包捕获的局部变量。Rc<RefCell> 让内外层共享同一个变量，
+/// 内层改了外层能看到、外层函数返回后格子仍活着——这是真闭包的引用语义核心。
+pub type Cell = Rc<RefCell<Value>>;
+
+/// 手动分配的内存块。
+///
+/// 外面套 Rc 是故意的：忘了 `free` 也不会漏——没人引用时自动回收；
+/// `free` 之后再访问会得到明确的中文报错，而不是野指针。
+/// 也就是说同一份脚本里动态内存和手动内存可以混着用，不需要任何开关。
+/// 指针指向哪里：
+/// - `Cells`：alloc 自己的块，或者 &列表[i]（共享列表的 Vec）
+/// - `Local` / `Global`：&变量（直接绑到那个槽位，读写都回到变量本身）
+pub enum PtrTarget {
+    Cells(ListRef),
+    Local { frame: u64, slot: usize },
+    Global(usize),
+}
+
+pub struct MemBlock {
+    pub target: PtrTarget,
+    /// 当前指向第几格（指针运算改它，共享同一块内存）
+    pub idx: usize,
+    /// 是不是 alloc 出来的（只有自己的块才允许 free）
+    pub owned: bool,
+    pub freed: bool,
+    /// 这块内存第 0 格的"地址"（打印 address 和地址运算用）。
+    /// 不是真操作系统的地址——是这样一串稳定的编号，装着"哪块内存 + 第几格"，
+    /// 所以能打印、能加减、越界仍然会报错，不会真的踩到别人的内存。
+    pub base: u64,
+}
+
+/// 地址号从这开始，每次分配往后挪一段（够大、够像地址，又不会撞上真实内存）
+static NEXT_ADDR: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0x7F00_0000_0000);
+
+/// 一个新块的起始地址：一格 8 字节，按 16 字节对齐
+pub fn fresh_base(slots: usize) -> u64 {
+    let bytes = slots.max(1) as u64 * 8;
+    NEXT_ADDR.fetch_add((bytes + 15) & !15, std::sync::atomic::Ordering::Relaxed)
+}
+
+pub type PtrRef = Rc<RefCell<MemBlock>>;
+
+/// 复制指针的目标（Cells 共享同一个 Rc，槽位是纯数据）
+pub fn clone_target(t: &PtrTarget) -> PtrTarget {
+    match t {
+        PtrTarget::Cells(c) => PtrTarget::Cells(Rc::clone(c)),
+        PtrTarget::Local { frame, slot } => PtrTarget::Local { frame: *frame, slot: *slot },
+        PtrTarget::Global(i) => PtrTarget::Global(*i),
+    }
+}
+pub type DictRef = Rc<RefCell<Dict>>;
+
+/// 用户函数（脚本里 function 定义的）
+#[derive(Debug)]
+pub struct UserFn {
+    pub name: Rc<str>,
+    /// 函数在 Chunk.fn_names 里的编号（帧只存编号，省得每帧克隆一次名字）
+    pub id: u16,
+    pub params: Vec<Param>,
+    pub body: Rc<Vec<Stmt>>,
+    pub file: Rc<str>,
+    /// 函数在字节码里的入口地址
+    pub entry: usize,
+    /// 需要多少个局部槽（参数 + 函数体内的局部变量）
+    pub nlocals: usize,
+    /// 参数的默认值（没有默认值就是 Null）
+    pub defaults: Vec<Value>,
+    /// 这个函数引用了几个外层局部变量（上值）。0 = 普通函数走栈槽，不分配上值区。
+    pub nupvals: usize,
+    /// 本函数的局部变量里，哪几个槽要"装箱"成 cell 供内层闭包捕获。
+    /// 键 = 局部槽号，值 = 该变量的名字（报错/调试用）。空 = 没有变量逃逸。
+    pub celled: Vec<(u16, Rc<str>)>,
+}
+
+impl UserFn {
+    /// 老构造入口（没有捕获信息）：测试 / AOT 里手工造函数用。
+    pub fn plain(
+        name: Rc<str>, id: u16, params: Vec<Param>, body: Rc<Vec<Stmt>>,
+        file: Rc<str>, entry: usize, nlocals: usize, defaults: Vec<Value>,
+    ) -> UserFn {
+        UserFn { name, id, params, body, file, entry, nlocals, defaults, nupvals: 0, celled: Vec::new() }
+    }
+}
+
+/// 闭包 = 函数原型 + 捕获到的上值格子。和普通函数一样能调用、传递、打印。
+#[derive(Debug)]
+pub struct Closure {
+    pub func: Rc<UserFn>,
+    /// 捕获的外层变量格子，顺序与 UserFn 的 upval 引用表一致
+    pub upvals: Vec<Cell>,
+}
+
+/// 有序字典：HashMap 负责查，Vec 负责保序。
+#[derive(Default, Debug)]
+pub struct Dict {
+    keys: Vec<Rc<str>>,
+    map: FastMap<Rc<str>, Value>,
+}
+
+impl Dict {
+    pub fn new() -> Dict {
+        Dict::default()
+    }
+
+    pub fn set(&mut self, k: Rc<str>, v: Value) {
+        if !self.map.contains_key(&k) {
+            self.keys.push(Rc::clone(&k));
+        }
+        self.map.insert(k, v);
+    }
+
+    /// 用 `&str` 写字典：键已存在就**只换值、复用原来的键 Rc**。
+    ///
+    /// 为什么单独拿一条：`d["a"] = i` 在循环里跑，以前每次都要
+    /// `idx.to_display()` 拷出一个 String，再 `Rc::from` 再分配一个键，
+    /// 一次写入两个堆分配。字典热路径上这比哈希本身还贵。
+    pub fn set_str(&mut self, k: &str, v: Value) {
+        if let Some((old, _)) = self.map.get_key_value(k) {
+            let old = Rc::clone(old);
+            self.map.insert(old, v);
+            return;
+        }
+        let key: Rc<str> = Rc::from(k);
+        self.keys.push(Rc::clone(&key));
+        self.map.insert(key, v);
+    }
+
+    pub fn get(&self, k: &str) -> Option<Value> {
+        self.map.get(k).cloned()
+    }
+
+    pub fn has(&self, k: &str) -> bool {
+        self.map.contains_key(k)
+    }
+
+    pub fn remove(&mut self, k: &str) -> bool {
+        if self.map.remove(k).is_some() {
+            self.keys.retain(|x| &**x != k);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
+    pub fn keys(&self) -> &[Rc<str>] {
+        &self.keys
+    }
+
+    pub fn entries(&self) -> impl Iterator<Item = (&Rc<str>, &Value)> {
+        self.keys.iter().filter_map(move |k| self.map.get(k).map(|v| (k, v)))
+    }
+}
+
+#[derive(Clone)]
+pub enum Value {
+    Null,
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    /// 字符串用 `Rc<String>` 而不是 `Rc<str>`，是为了让 `s += "x"` 能走
+    /// "独占时就地追加"的快路径（引用计数为 1 时 `Rc::get_mut` 拿到 `&mut String`）。
+    /// 这是 CPython 处理字符串拼接的同一招，5 万次拼接从 O(n²) 降到 O(n)。
+    Str(Rc<String>),
+    List(ListRef),
+    Dict(DictRef),
+    /// 指针（手动分配的格子）
+    Ptr(PtrRef),
+    Func(Rc<UserFn>),
+    /// 闭包：函数 + 捕获的上值
+    Closure(Rc<Closure>),
+    /// 内建函数，直接用名字索引
+    Native(&'static str),
+}
+
+impl std::fmt::Debug for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_display())
+    }
+}
+
+impl Value {
+    pub fn str(s: &str) -> Value {
+        Value::Str(Rc::new(s.to_string()))
+    }
+
+    /// 把已经拥有的 String 直接包成值（少一次拷贝）
+    pub fn string(s: String) -> Value {
+        Value::Str(Rc::new(s))
+    }
+
+    pub fn list(items: Vec<Value>) -> Value {
+        Value::List(Rc::new(RefCell::new(items)))
+    }
+
+    pub fn dict() -> Value {
+        Value::Dict(Rc::new(RefCell::new(Dict::new())))
+    }
+
+    /// 申请 n 个格子，初值都是 null
+    pub fn alloc(n: usize) -> Value {
+        Value::Ptr(Rc::new(RefCell::new(MemBlock {
+            target: PtrTarget::Cells(Rc::new(RefCell::new(vec![Value::Null; n]))),
+            idx: 0,
+            owned: true,
+            freed: false,
+            base: fresh_base(n),
+        })))
+    }
+
+    /// &列表[i]：共享列表本身，写入会改到原列表
+    pub fn alias_list(list: ListRef, idx: usize) -> Value {
+        let slots = list.borrow().len();
+        Value::Ptr(Rc::new(RefCell::new(MemBlock {
+            target: PtrTarget::Cells(list),
+            idx,
+            owned: false,
+            freed: false,
+            base: fresh_base(slots),
+        })))
+    }
+
+    /// 指针平移：共享同一块内存，只挪 idx
+    pub fn shift_ptr(p: &PtrRef, n: i64) -> Value {
+        let b = p.borrow();
+        let idx = b.idx as i64 + n;
+        let idx = if idx < 0 { 0 } else { idx as usize };
+        Value::Ptr(Rc::new(RefCell::new(MemBlock {
+            target: clone_target(&b.target),
+            idx,
+            owned: b.owned,
+            freed: b.freed,
+            base: b.base,
+        })))
+    }
+
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Value::Null => "null",
+            Value::Int(_) => "int",
+            Value::Float(_) => "float",
+            Value::Bool(_) => "bool",
+            Value::Str(_) => "str",
+            Value::List(_) => "list",
+            // 带 __cls 的字典就是类的实例（class 降级方案的约定）
+            Value::Dict(d) => if d.borrow().get("__cls").is_some() { "class" } else { "dict" },
+            Value::Ptr(_) => "ptr",
+            Value::Func(_) | Value::Closure(_) | Value::Native(_) => "function",
+        }
+    }
+
+    pub fn truthy(&self) -> bool {
+        match self {
+            Value::Null => false,
+            Value::Bool(b) => *b,
+            Value::Int(i) => *i != 0,
+            Value::Float(f) => *f != 0.0 && !f.is_nan(),
+            Value::Str(s) => !s.is_empty(),
+            Value::List(l) => !l.borrow().is_empty(),
+            Value::Dict(d) => !d.borrow().is_empty(),
+            Value::Ptr(p) => !p.borrow().freed,
+            Value::Func(_) | Value::Closure(_) | Value::Native(_) => true,
+        }
+    }
+
+    /// 参与算术时统一取数值。字符串里是数字也认（和 TS 版 toNum 一致）。
+    pub fn as_num(&self) -> Option<f64> {
+        match self {
+            Value::Int(i) => Some(*i as f64),
+            Value::Float(f) => Some(*f),
+            Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
+            Value::Str(s) => {
+                let t = s.trim();
+                if t.is_empty() {
+                    None
+                } else {
+                    t.parse::<f64>().ok()
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// 整数化：整数直接给，浮点/布尔/数字串尽量转
+    pub fn as_int(&self) -> Option<i64> {
+        match self {
+            Value::Int(i) => Some(*i),
+            Value::Float(f) => Some(*f as i64),
+            Value::Bool(b) => Some(if *b { 1 } else { 0 }),
+            Value::Str(s) => s.trim().parse::<f64>().ok().map(|x| x as i64),
+            _ => None,
+        }
+    }
+
+    pub fn to_display(&self) -> String {
+        let mut seen = Vec::new();
+        self.fmt_rec(&mut seen, 0)
+    }
+
+    fn fmt_rec(&self, seen: &mut Vec<usize>, depth: usize) -> String {
+        const MAX_DEPTH: usize = 16;
+        match self {
+            Value::Null => "null".to_string(),
+            Value::Bool(b) => if *b { "true" } else { "false" }.to_string(),
+            Value::Int(i) => i.to_string(),
+            Value::Float(f) => fmt_float(*f),
+            Value::Str(s) => s.to_string(),
+            Value::Func(f) => format!("<函数 {}>", f.name),
+            Value::Closure(c) => format!("<函数 {}>", c.func.name),
+            Value::Native(n) => format!("<native {}>", n),
+            Value::List(l) => {
+                let id = Rc::as_ptr(l) as *const u8 as usize;
+                if seen.contains(&id) {
+                    return "…(循环)".to_string();
+                }
+                if depth >= MAX_DEPTH {
+                    return "…".to_string();
+                }
+                seen.push(id);
+                let s = {
+                    let v = l.borrow();
+                    let mut out = String::from("[");
+                    for (i, x) in v.iter().enumerate() {
+                        if i > 0 {
+                            out.push_str(", ");
+                        }
+                        // 容器内的字符串带引号（与 TS 版一致）
+                        match x {
+                            Value::Str(st) => {
+                                out.push('"');
+                                out.push_str(st);
+                                out.push('"');
+                            }
+                            _ => out.push_str(&x.fmt_rec(seen, depth + 1)),
+                        }
+                    }
+                    out.push(']');
+                    out
+                };
+                seen.pop();
+                s
+            }
+            Value::Ptr(p) => {
+                let m = p.borrow();
+                // 打印成地址：一个格子 8 字节，所以第 idx 格就是 base + idx*8
+                let addr = m.base + (m.idx as u64) * 8;
+                if m.freed {
+                    format!("0x{:012X}（已释放）", addr)
+                } else {
+                    format!("0x{:012X}", addr)
+                }
+            }
+            Value::Dict(d) => {
+                let id = Rc::as_ptr(d) as *const u8 as usize;
+                if seen.contains(&id) {
+                    return "…(循环)".to_string();
+                }
+                if depth >= MAX_DEPTH {
+                    return "…".to_string();
+                }
+                seen.push(id);
+                let s = {
+                    let m = d.borrow();
+                    let mut out = String::from("{");
+                    let mut first = true;
+                    for (k, v) in m.entries() {
+                        if !first {
+                            out.push_str(", ");
+                        }
+                        first = false;
+                        let _ = write!(out, "{}: ", k);
+                        match v {
+                            Value::Str(st) => {
+                                out.push('"');
+                                out.push_str(st);
+                                out.push('"');
+                            }
+                            _ => out.push_str(&v.fmt_rec(seen, depth + 1)),
+                        }
+                    }
+                    out.push('}');
+                    out
+                };
+                seen.pop();
+                s
+            }
+        }
+    }
+
+    /// 内容相等（容器按内容比，带环保护）
+    pub fn deep_eq(&self, other: &Value) -> bool {
+        let mut pairs = Vec::new();
+        self.eq_rec(other, &mut pairs)
+    }
+
+    fn eq_rec(&self, other: &Value, pairs: &mut Vec<(usize, usize)>) -> bool {
+        match (self, other) {
+            (Value::Null, Value::Null) => true,
+            (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Str(a), Value::Str(b)) => a == b,
+            (Value::Func(a), Value::Func(b)) => Rc::ptr_eq(a, b),
+            (Value::Closure(a), Value::Closure(b)) => Rc::ptr_eq(a, b),
+            (Value::Native(a), Value::Native(b)) => a == b,
+            // 指针按"是不是同一块"比，不看内容
+            (Value::Ptr(a), Value::Ptr(b)) => {
+                // 地址按"指向哪里"比较：同一块内存的同一格就算相等（跟 C 里比指针一个意思）
+                let (x, y) = (a.borrow(), b.borrow());
+                x.base == y.base && x.idx == y.idx
+            }
+            // 数值跨类型比较：1 == 1.0 成立
+            (a, b) => {
+                let an = matches!(a, Value::Int(_) | Value::Float(_));
+                let bn = matches!(b, Value::Int(_) | Value::Float(_));
+                if an && bn {
+                    return a.as_num() == b.as_num();
+                }
+                match (a, b) {
+                    (Value::List(x), Value::List(y)) => {
+                        let xa = Rc::as_ptr(x) as *const u8 as usize;
+                        let ya = Rc::as_ptr(y) as *const u8 as usize;
+                        if let Some(&(_, prev)) = pairs.iter().find(|(p, _)| *p == xa) {
+                            return prev == ya;
+                        }
+                        pairs.push((xa, ya));
+                        let xb = x.borrow();
+                        let yb = y.borrow();
+                        let ok = xb.len() == yb.len()
+                            && xb.iter().zip(yb.iter()).all(|(m, n)| m.eq_rec(n, pairs));
+                        pairs.pop();
+                        ok
+                    }
+                    (Value::Dict(x), Value::Dict(y)) => {
+                        let xa = Rc::as_ptr(x) as *const u8 as usize;
+                        let ya = Rc::as_ptr(y) as *const u8 as usize;
+                        if let Some(&(_, prev)) = pairs.iter().find(|(p, _)| *p == xa) {
+                            return prev == ya;
+                        }
+                        pairs.push((xa, ya));
+                        let xb = x.borrow();
+                        let yb = y.borrow();
+                        let ok = xb.len() == yb.len()
+                            && xb.entries().all(|(k, v)| match yb.get(k) {
+                                Some(w) => v.eq_rec(&w, pairs),
+                                None => false,
+                            });
+                        pairs.pop();
+                        ok
+                    }
+                    _ => false,
+                }
+            }
+        }
+    }
+
+    /// 往容器里塞值时的深拷贝（自引用保持同一份，不无限展开）
+    pub fn clone_deep(&self) -> Value {
+        let mut memo: Vec<(usize, Value)> = Vec::new();
+        self.clone_rec(&mut memo)
+    }
+
+    fn clone_rec(&self, memo: &mut Vec<(usize, Value)>) -> Value {
+        match self {
+            Value::List(l) => {
+                let id = Rc::as_ptr(l) as *const u8 as usize;
+                if let Some((_, v)) = memo.iter().find(|(p, _)| *p == id) {
+                    return v.clone();
+                }
+                let out = Rc::new(RefCell::new(Vec::new()));
+                memo.push((id, Value::List(Rc::clone(&out))));
+                let items: Vec<Value> = l.borrow().iter().map(|x| x.clone_rec(memo)).collect();
+                *out.borrow_mut() = items;
+                Value::List(out)
+            }
+            // 指针是"手柄"，深拷贝时仍然指向同一块内存（和列表/字典不同）
+            Value::Ptr(p) => Value::Ptr(Rc::clone(p)),
+            Value::Dict(d) => {
+                let id = Rc::as_ptr(d) as *const u8 as usize;
+                if let Some((_, v)) = memo.iter().find(|(p, _)| *p == id) {
+                    return v.clone();
+                }
+                let out = Rc::new(RefCell::new(Dict::new()));
+                memo.push((id, Value::Dict(Rc::clone(&out))));
+                let entries: Vec<(Rc<str>, Value)> = d
+                    .borrow()
+                    .entries()
+                    .map(|(k, v)| (Rc::clone(k), v.clone_rec(memo)))
+                    .collect();
+                {
+                    let mut m = out.borrow_mut();
+                    for (k, v) in entries {
+                        m.set(k, v);
+                    }
+                }
+                Value::Dict(out)
+            }
+            other => other.clone(),
+        }
+    }
+}
+
+/// 浮点显示：先按 12 位有效数字收敛，避免 0.1+0.2 打出 0.30000000000000004
+pub fn fmt_float(v: f64) -> String {
+    if v.is_nan() {
+        return "NaN".to_string();
+    }
+    if v.is_infinite() {
+        return if v > 0.0 { "Infinity" } else { "-Infinity" }.to_string();
+    }
+    if v == v.trunc() && v.abs() < 9.007_199_254_740_992e15 {
+        let i = v as i64;
+        return i.to_string();
+    }
+    let rounded = (v * 1e12).round() / 1e12;
+    format!("{}", rounded)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 浮点显示收敛长尾() {
+        assert_eq!(fmt_float(0.1 + 0.2), "0.3");
+        assert_eq!(fmt_float(2.0), "2");
+        assert_eq!(fmt_float(1.5), "1.5");
+        assert_eq!(fmt_float(-0.5), "-0.5");
+    }
+
+    #[test]
+    fn 列表格式化带引号() {
+        let v = Value::list(vec![Value::Int(1), Value::str("a"), Value::Bool(true)]);
+        assert_eq!(v.to_display(), r#"[1, "a", true]"#);
+    }
+
+    #[test]
+    fn 顶层字符串不带引号() {
+        assert_eq!(Value::str("abc").to_display(), "abc");
+    }
+
+    #[test]
+    fn 自引用列表不会爆栈() {
+        let l = Rc::new(RefCell::new(Vec::new()));
+        l.borrow_mut().push(Value::List(Rc::clone(&l)));
+        let v = Value::List(l);
+        assert_eq!(v.to_display(), "[…(循环)]");
+    }
+
+    #[test]
+    fn 内容相等() {
+        let a = Value::list(vec![Value::Int(1), Value::Int(2)]);
+        let b = Value::list(vec![Value::Int(1), Value::Int(2)]);
+        assert!(a.deep_eq(&b));
+        assert!(!a.deep_eq(&Value::list(vec![Value::Int(1)])));
+    }
+
+    #[test]
+    fn 整数与浮点相等() {
+        assert!(Value::Int(1).deep_eq(&Value::Float(1.0)));
+    }
+
+    #[test]
+    fn 深拷贝是真拷贝() {
+        let a = Value::list(vec![Value::Int(1)]);
+        let b = a.clone_deep();
+        if let (Value::List(x), Value::List(y)) = (&a, &b) {
+            x.borrow_mut().push(Value::Int(2));
+            assert_eq!(y.borrow().len(), 1);
+        }
+    }
+
+    #[test]
+    fn 字典保序() {
+        let mut d = Dict::new();
+        d.set(Rc::from("b"), Value::Int(1));
+        d.set(Rc::from("a"), Value::Int(2));
+        d.set(Rc::from("c"), Value::Int(3));
+        let ks: Vec<String> = d.keys().iter().map(|k| k.to_string()).collect();
+        assert_eq!(ks, vec!["b", "a", "c"]);
+    }
+
+    #[test]
+    fn truthy_规则() {
+        assert!(!Value::Null.truthy());
+        assert!(!Value::Int(0).truthy());
+        assert!(!Value::str("").truthy());
+        assert!(Value::list(vec![]).truthy() == false);
+        assert!(Value::Int(1).truthy());
+    }
+}

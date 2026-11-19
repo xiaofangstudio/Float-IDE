@@ -21,11 +21,18 @@ if exist "%COPPER_HOME%\toolchain\bin\cargo.exe" (
   if not defined RUSTFLAGS set "RUSTFLAGS=-C linker=rust-lld"
 )
 
-rem --- compiler resolution: platform dir first, flat layout for compatibility
+rem --- compiler resolution: 统一 `colang <版本>.exe`，多份取最新；copper.exe 只作兜底
 set "KIND=env"
-set "EXE=%HERE%windows-x64\copper.exe"
+set "EXE="
+for /f "delims=" %%F in ('dir /b /o-n "%HERE%windows-x64\colang *.exe" 2^>nul ^| findstr /v /i "-self"') do if not defined EXE set "EXE=%HERE%windows-x64\%%F"
+if not defined EXE for /f "delims=" %%F in ('dir /b /o-n "%HERE%colang *.exe" 2^>nul ^| findstr /v /i "-self"') do if not defined EXE set "EXE=%HERE%%%F"
+if not defined EXE set "EXE=%HERE%windows-x64\colang.exe"
+if not exist "%EXE%" set "EXE=%HERE%colang.exe"
+if not exist "%EXE%" set "EXE=%HERE%windows-x64\copper.exe"
 if not exist "%EXE%" set "EXE=%HERE%copper.exe"
-set "SELFEXE=%HERE%windows-x64\copper-self.exe"
+set "SELFEXE="
+for /f "delims=" %%F in ('dir /b /o-n "%HERE%windows-x64\colang-self *.exe" 2^>nul') do if not defined SELFEXE set "SELFEXE=%HERE%windows-x64\%%F"
+if not defined SELFEXE set "SELFEXE=%HERE%windows-x64\copper-self.exe"
 if not exist "%SELFEXE%" set "SELFEXE=%HERE%copper-self.exe"
 set "COPPER=%EXE%"
 if /I "%~1"=="self" goto pick_self

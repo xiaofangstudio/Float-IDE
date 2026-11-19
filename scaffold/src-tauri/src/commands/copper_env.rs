@@ -35,6 +35,12 @@ pub struct CopperEnvInfo {
     pub version: String,
     /// 环境里备好了二进制的平台列表（bin/ 下的子目录，如 windows-x64 / linux-x64）
     pub platforms: Vec<String>,
+    /// 编译器对外显示的名字，统一格式 `colang 1.9.2.exe`
+    pub compiler_name: String,
+    /// 编译器版本（从文件名解析，其次读 copper.json）
+    pub compiler_version: String,
+    /// 这个环境有没有带文档（docs/ 目录），IDE 的教程与「关于 Copper」都读这里
+    pub docs: bool,
 }
 
 fn exe_suffix() -> &'static str {
@@ -137,36 +143,52 @@ fn home_candidates() -> Vec<(PathBuf, &'static str)> {
     out
 }
 
-/// 一个目录是不是像一个 Copper 环境：至少要有 copper.json。
+/// 一个目录是不是像一个 Copper 环境：至少要有 copper.json，或者 bin/ 下有编译器。
 fn looks_like_env(dir: &Path) -> bool {
-    dir.join("copper.json").is_file()
-        || dir.join("bin").join(format!("copper{}", exe_suffix())).is_file()
-        || compiler_in(dir, &platform_tag()).is_file()
+    if dir.join("copper.json").is_file() || dir.join("docs").join("tutorial.json").is_file() {
+        return true;
+    }
+    if dir.join("bin").join(format!("colang{}", exe_suffix())).is_file() {
+        return true;
+    }
+    let rd = match std::fs::read_dir(dir.join("bin")) {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+    rd.flatten()
+        .any(|e| is_compiler_file(&e.file_name().to_string_lossy()))
 }
 
-/// 环境里的编译器路径。两种摆法都认，顺序如下：
-///   1. 多平台布局：`bin/<platform>/copper[.exe]`（新，跨平台用这个）
-///   2. 平铺布局：  `bin/copper[.exe]`（老环境照旧能用，不砸已有的安装）
+/// 环境里的编译器路径（兜底用：正常路径是先 scan_compilers 挑最新版本）。
+///   1. 多平台布局：`bin/<platform>/colang[.exe]`
+///   2. 平铺布局：  `bin/colang[.exe]`
+///   3. 老名字：    `bin/<platform>/copper[.exe]` / `bin/copper[.exe]`
 fn compiler_in(home: &Path, platform: &str) -> PathBuf {
-    let plat = home
-        .join("bin")
-        .join(platform)
-        .join(format!("copper{}", exe_suffix()));
-    if plat.is_file() {
-        return plat;
+    for p in [
+        home.join("bin").join(platform).join(format!("colang{}", exe_suffix())),
+        home.join("bin").join(format!("colang{}", exe_suffix())),
+        home.join("bin").join(platform).join(format!("copper{}", exe_suffix())),
+        home.join("bin").join(format!("copper{}", exe_suffix())),
+    ] {
+        if p.is_file() {
+            return p;
+        }
     }
-    home.join("bin").join(format!("copper{}", exe_suffix()))
+    home.join("bin").join(format!("colang{}", exe_suffix()))
 }
 
 fn compiler_self_in(home: &Path, platform: &str) -> PathBuf {
-    let plat = home
-        .join("bin")
-        .join(platform)
-        .join(format!("copper-self{}", exe_suffix()));
-    if plat.is_file() {
-        return plat;
+    for p in [
+        home.join("bin").join(platform).join(format!("colang-self{}", exe_suffix())),
+        home.join("bin").join(format!("colang-self{}", exe_suffix())),
+        home.join("bin").join(platform).join(format!("copper-self{}", exe_suffix())),
+        home.join("bin").join(format!("copper-self{}", exe_suffix())),
+    ] {
+        if p.is_file() {
+            return p;
+        }
     }
-    home.join("bin").join(format!("copper-self{}", exe_suffix()))
+    home.join("bin").join(format!("colang-self{}", exe_suffix()))
 }
 
 /// 环境里到底备了哪几个平台的二进制（`bin/` 下的子目录名）。
@@ -180,10 +202,11 @@ fn platforms_in(home: &Path) -> Vec<String> {
             if !p.is_dir() {
                 continue;
             }
-            let has = p.join(format!("copper{}", exe_suffix())).is_file()
-                || p.join("copper").is_file()
-                || p.join("copper.exe").is_file();
-            if has {
+            let has_c = match std::fs::read_dir(&p) {
+                Ok(r) => r.flatten().any(|f| is_compiler_file(&f.file_name().to_string_lossy())),
+                Err(_) => false,
+            };
+            if has_c {
                 if let Some(name) = p.file_name() {
                     out.push(name.to_string_lossy().to_string());
                 }
@@ -198,8 +221,7 @@ fn runtime_in(home: &Path) -> PathBuf {
     home.join("lib").join("colang_rt.rs")
 }
 
-fn read_version(home: &Path) -> String {
-    let p = home.join("copper.json");
+fn read_version(home: &Path) -> String {    let p = home.join("copper.json");
     let text = match std::fs::read_to_string(&p) {
         Ok(t) => t,
         Err(_) => return String::new(),
@@ -221,39 +243,236 @@ fn read_version(home: &Path) -> String {
     String::new()
 }
 
+/* ── 编译器命名与挑选 ────────────────────────────────────────────────
+ * 统一格式：`colang <大>.<中>.<小>.exe`（例：`colang 1.9.2.exe`）。
+ * 解释器不叫 copper，叫 colang —— 老的 copper.exe 只当兼容名兜底。
+ * 目录里有多份时**优先最新的**：版本号大的赢；一样大再比修改时间。 */
+
+/// 从文件名里抠版本号：colang 1.9.2.exe / colang-1.9.002 / colang2.0.0
+pub fn parse_version(name: &str) -> Option<(u32, u32, u32)> {
+    let lower = name.to_ascii_lowercase();
+    if !lower.contains("colang") {
+        if lower.starts_with("copper") {
+            // copper.exe 这类旧名不带版本，靠 copper.json
+            return None;
+        }
+        return None;
+    }
+    let digits: String = lower
+        .chars()
+        .map(|c| if c.is_ascii_digit() { c } else { ' ' })
+        .collect();
+    let nums: Vec<u32> = digits
+        .split_whitespace()
+        .filter_map(|s| s.parse::<u32>().ok())
+        .collect();
+    if nums.len() >= 3 {
+        Some((nums[0], nums[1], nums[2]))
+    } else if nums.len() == 2 {
+        Some((nums[0], nums[1], 0))
+    } else {
+        None
+    }
+}
+
+/// 对外显示名：有版本就写 `colang 1.9.2.exe`，没版本退回 `colang.exe`
+pub fn display_name(version: &str) -> String {
+    let v = version.trim();
+    if v.is_empty() {
+        format!("colang{}", exe_suffix())
+    } else {
+        format!("colang {}{}", v, exe_suffix())
+    }
+    }
+
+/// 是不是编译器二进制（colang*/copper*，排除 -run / -embed）
+pub fn is_compiler_file(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let is_bin = lower.ends_with(".exe") || !lower.contains('.');
+    let is_runner = lower.contains("-run") || lower.contains("-embed");
+    is_bin && !is_runner && (lower.starts_with("colang") || lower.starts_with("copper"))
+}
+
+fn is_self_file(name: &str) -> bool {
+    name.to_ascii_lowercase().contains("-self")
+}
+
+/// 环境里所有编译器候选（带版本与修改时间），按"最新优先"排好
+pub struct Candidate {
+    pub path: PathBuf,
+    pub name: String,
+    pub version: String,
+    pub self_hosted: bool,
+    pub bytes: u64,
+    mtime: u64,
+}
+
+pub fn scan_compilers(home: &Path, platform: &str) -> Vec<Candidate> {
+    let mut dirs: Vec<PathBuf> = vec![home.join("bin").join(platform), home.join("bin")];
+    let mut out: Vec<Candidate> = Vec::new();
+    for (di, dir) in dirs.drain(..).enumerate() {
+        let _ = di;
+        let rd = match std::fs::read_dir(&dir) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if !p.is_file() {
+                continue;
+            }
+            let name = p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            if !is_compiler_file(&name) {
+                continue;
+            }
+            let meta = e.metadata().ok();
+            let bytes = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+            let mtime = meta
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let ver = parse_version(&name);
+            out.push(Candidate {
+                path: p,
+                self_hosted: is_self_file(&name),
+                name,
+                version: ver
+                    .map(|(a, b, c)| format!("{}.{}.{}", a, b, c))
+                    .unwrap_or_default(),
+                bytes,
+                mtime,
+            });
+        }
+    }
+    out.sort_by(|a, b| {
+        let key = |c: &Candidate| -> (u8, u32, u32, u32, u64) {
+            let (x, y, z) = parse_version(&c.name).unwrap_or((0, 0, 0));
+            (c.self_hosted as u8, u32::MAX - x, u32::MAX - y, u32::MAX - z, u64::MAX - c.mtime)
+        };
+        key(a).cmp(&key(b))
+    });
+    out
+}
+
+fn bound_compiler_file() -> Option<PathBuf> {
+    override_file().map(|p| p.with_file_name("copper_compiler.txt"))
+}
+
+/// 用户在设置里手选的那个 colang exe（存的是绝对路径）
+fn read_bound_compiler() -> Option<PathBuf> {
+    let p = bound_compiler_file()?;
+    let t = std::fs::read_to_string(p).ok()?;
+    let t = t.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(t);
+    if path.is_file() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+/// 由编译器路径反推环境根：`<home>/bin/<平台>/colang 1.9.2.exe` → `<home>`
+fn home_of(compiler: &Path) -> Option<PathBuf> {
+    let bin = compiler.parent()?;
+    if bin.file_name().map(|n| n.to_string_lossy().to_string()) == Some("bin".into()) {
+        return bin.parent().map(|p| p.to_path_buf());
+    }
+    // bin/<平台>/x.exe → 上两层
+    bin.parent()
+        .filter(|p| p.file_name().map(|n| n.to_string_lossy().to_string()) == Some("bin".into()))
+        .and_then(|p| p.parent())
+        .map(|p| p.to_path_buf())
+        .or_else(|| bin.parent().map(|p| p.to_path_buf()))
+}
+
 /// 解析当前生效的 Copper 环境。找不到就返回 found=false（不编造路径）。
 pub fn resolve_env() -> CopperEnvInfo {
     let platform = platform_tag();
+
+    /* 0. 用户在设置里手选了某个 colang exe：它优先于所有自动查找。
+     *    "查找 Copper" 那个按钮绑的就是这里 —— 解释器叫 colang，不叫 copper。 */
+    if let Some(bound) = read_bound_compiler() {
+        let home = home_of(&bound).unwrap_or_else(|| bound.parent().map(|p| p.to_path_buf()).unwrap_or_default());
+        let file_name = bound.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let ver = parse_version(&file_name)
+            .map(|(a, b, c)| format!("{}.{}.{}", a, b, c))
+            .unwrap_or_else(|| read_version(&home));
+        let self_path = scan_compilers(&home, &platform)
+            .into_iter()
+            .find(|c| c.self_hosted)
+            .map(|c| c.path.display().to_string())
+            .unwrap_or_else(|| compiler_self_in(&home, &platform).display().to_string());
+        return CopperEnvInfo {
+            found: true,
+            home: home.display().to_string(),
+            compiler: bound.display().to_string(),
+            compiler_self: self_path,
+            runtime: runtime_in(&home).display().to_string(),
+            platform,
+            source: "manual-compiler".to_string(),
+            version: read_version(&home),
+            platforms: platforms_in(&home),
+            compiler_name: display_name(&ver),
+            compiler_version: ver,
+            docs: home.join("docs").is_dir(),
+        };
+    }
+
     for (dir, src) in home_candidates() {
         if !looks_like_env(&dir) {
             continue;
         }
-        let compiler = compiler_in(&dir, &platform);
+        let picked = scan_compilers(&dir, &platform).into_iter().find(|c| !c.self_hosted);
+        let compiler = match &picked {
+            Some(c) => c.path.clone(),
+            None => compiler_in(&dir, &platform),
+        };
         let ok = compiler.is_file();
+        let env_ver = read_version(&dir);
+        let ver = picked
+            .as_ref()
+            .map(|c| c.version.clone())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| env_ver.clone());
+        let self_path = scan_compilers(&dir, &platform)
+            .into_iter()
+            .find(|c| c.self_hosted)
+            .map(|c| c.path.display().to_string())
+            .unwrap_or_else(|| compiler_self_in(&dir, &platform).display().to_string());
         if !ok {
             // 目录在但二进制缺：报 found=false，但把路径带回去，前端能显示"缺什么"
             return CopperEnvInfo {
                 found: false,
                 home: dir.display().to_string(),
                 compiler: compiler.display().to_string(),
-                compiler_self: compiler_self_in(&dir, &platform).display().to_string(),
+                compiler_self: self_path,
                 runtime: runtime_in(&dir).display().to_string(),
                 platform,
                 source: src.to_string(),
-                version: read_version(&dir),
+                version: env_ver,
                 platforms: platforms_in(&dir),
+                compiler_name: display_name(&ver),
+                compiler_version: ver,
+                docs: dir.join("docs").is_dir(),
             };
         }
         return CopperEnvInfo {
             found: true,
             home: dir.display().to_string(),
             compiler: compiler.display().to_string(),
-            compiler_self: compiler_self_in(&dir, &platform).display().to_string(),
+            compiler_self: self_path,
             runtime: runtime_in(&dir).display().to_string(),
             platform,
             source: src.to_string(),
-            version: read_version(&dir),
+            version: env_ver,
             platforms: platforms_in(&dir),
+            compiler_name: display_name(&ver),
+            compiler_version: ver,
+            docs: dir.join("docs").is_dir(),
         };
     }
     CopperEnvInfo {
@@ -315,12 +534,20 @@ fn find_cargo() -> Option<PathBuf> {
     None
 }
 
-/// 内核 crate 目录（生成工程要 `float-lang = { path = ... }`）
+/// 内核 crate 目录（生成工程要 `float-lang = { path = ... }`）。
+/// 顺序：COLANG_CRATE → 环境自带的 lib/float-lang → 开发机上的仓库路径。
 fn crate_dir() -> Option<PathBuf> {
     if let Ok(c) = std::env::var("COLANG_CRATE") {
         let p = PathBuf::from(c);
         if p.join("Cargo.toml").is_file() {
             return Some(p);
+        }
+    }
+    let env = resolve_env();
+    if !env.home.is_empty() {
+        let cand = PathBuf::from(&env.home).join("lib").join("float-lang");
+        if cand.join("Cargo.toml").is_file() {
+            return Some(cand);
         }
     }
     if let Ok(exe) = std::env::current_exe() {
@@ -366,7 +593,9 @@ pub fn copper_build(file: String, out_dir: Option<String>, use_self: Option<bool
     if !rt.is_file() {
         return Err(format!("环境里缺运行时前奏：{}", rt.display()));
     }
-    let cratep = crate_dir().ok_or("找不到 float-lang crate 目录（可设 COLANG_CRATE 指定）")?;
+    /* 内核源码目录只有"自举编译器"才需要；分发的环境包里编译器自带运行时，
+     * 用户机器上不一定有 float-lang 源码，所以这里是可选参数，不再是硬门槛。 */
+    let cratep = crate_dir();
     let cargo = find_cargo().ok_or("找不到 cargo（可设 COLANG_CARGO 指定绝对路径）")?;
     let src = Path::new(&file);
     if !src.is_file() {
@@ -377,9 +606,12 @@ pub fn copper_build(file: String, out_dir: Option<String>, use_self: Option<bool
     std::fs::create_dir_all(&build_root).map_err(|e| format!("建临时目录失败：{}", e))?;
 
     let started = std::time::Instant::now();
-    let out = Command::new(&compiler)
-        .env("COPPER_RT", &rt)
-        .env("COLANG_CRATE", &cratep)
+    let mut cmd = Command::new(&compiler);
+    cmd.env("COPPER_RT", &rt);
+    if let Some(c) = &cratep {
+        cmd.env("COLANG_CRATE", c);
+    }
+    let out = cmd
         .env("COLANG_OUT", &build_root)
         .env("COLANG_CARGO", &cargo)
         .env("COLANG_MODE", "build")
@@ -423,32 +655,152 @@ pub fn copper_build(file: String, out_dir: Option<String>, use_self: Option<bool
     })
 }
 
-/// 环境里有哪些编译器，各自多大（给"设置"面板显示用）
+/// 环境里有哪些编译器，各自多大、什么版本（给"设置"面板显示用）
 #[derive(Serialize)]
 pub struct CopperCompilerInfo {
     pub path: String,
     pub bytes: u64,
     pub kind: String,
+    /// 版本号，如 "1.9.2"；解析不出来就是空串
+    pub version: String,
+    /// 对外显示名，统一 `colang 1.9.2.exe`
+    pub name: String,
+    /// 是不是当前要用的那一个（列表里最新的）
+    pub recommended: bool,
 }
 
 #[tauri::command]
 pub fn copper_env_compilers() -> Vec<CopperCompilerInfo> {
     let env = resolve_env();
-    let mut out = Vec::new();
-    for (p, kind) in [(&env.compiler, "env"), (&env.compiler_self, "self")] {
-        if p.is_empty() {
-            continue;
-        }
-        let path = Path::new(p);
-        if let Ok(m) = std::fs::metadata(path) {
+    let mut out: Vec<CopperCompilerInfo> = Vec::new();
+    if env.found {
+        let platform = platform_tag();
+        let home = PathBuf::from(&env.home);
+        for c in scan_compilers(&home, &platform) {
+            let version = if c.version.is_empty() { env.compiler_version.clone() } else { c.version.clone() };
             out.push(CopperCompilerInfo {
-                path: p.clone(),
-                bytes: m.len(),
-                kind: kind.to_string(),
+                path: c.path.display().to_string(),
+                bytes: c.bytes,
+                kind: if c.self_hosted { "self".into() } else { "env".into() },
+                name: display_name(&version),
+                version,
+                recommended: false,
             });
         }
     }
+    if out.is_empty() {
+        for (p, kind) in [(&env.compiler, "env"), (&env.compiler_self, "self")] {
+            if p.is_empty() {
+                continue;
+            }
+            let path = Path::new(p);
+            if let Ok(m) = std::fs::metadata(path) {
+                out.push(CopperCompilerInfo {
+                    path: p.clone(),
+                    bytes: m.len(),
+                    kind: kind.to_string(),
+                    version: env.compiler_version.clone(),
+                    name: env.compiler_name.clone(),
+                    recommended: false,
+                });
+            }
+        }
+    }
+    /* 推荐 = 非自举里最新的那个；自举版排在后面只作参考 */
+    if let Some(i) = out.iter().position(|c| c.kind == "env") {
+        out[i].recommended = true;
+    }
     out
+}
+
+/* ── 手选编译器 ─────────────────────────────────────────────────────
+ * 用户可能只下载了一个 `colang 1.9.2.exe`，没有整包环境。
+ * 设置页「查找 Copper」选完这个文件就绑上，下次启动照旧生效。 */
+
+#[tauri::command]
+pub fn copper_env_bind_compiler(path: String) -> Result<CopperEnvInfo, String> {
+    let p = PathBuf::from(path.trim());
+    if !p.is_file() {
+        return Err(format!("文件不存在：{}", p.display()));
+    }
+    let name = p.file_name().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
+    if !name.contains("colang") && !name.contains("copper") {
+        return Err(format!(
+            "这个文件不像 Copper 解释器：{name}。解释器叫 colang（例：colang 1.9.2.exe），不叫别的名字。"
+        ));
+    }
+    let f = bound_compiler_file().ok_or("取不到配置目录")?;
+    if let Some(parent) = f.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("建配置目录失败：{}", e))?;
+    }
+    let abs = p.canonicalize().unwrap_or(p.clone());
+    std::fs::write(&f, abs.display().to_string()).map_err(|e| format!("写配置失败：{}", e))?;
+    Ok(resolve_env())
+}
+
+/// 解除手选，回到自动查找
+#[tauri::command]
+pub fn copper_env_unbind_compiler() -> CopperEnvInfo {
+    if let Some(f) = bound_compiler_file() {
+        let _ = std::fs::remove_file(f);
+    }
+    resolve_env()
+}
+
+/* ── 环境自带的文档 ─────────────────────────────────────────────────
+ * 教程和「关于 Copper」都属于环境：环境更新，内容跟着换。
+ * 只读 `<home>/docs/` 下的文件，路径不许跳出这个目录。 */
+
+#[derive(Serialize)]
+pub struct CopperAsset {
+    pub rel: String,
+    pub bytes: u64,
+}
+
+#[tauri::command]
+pub fn copper_env_assets() -> Vec<CopperAsset> {
+    let env = resolve_env();
+    let mut out = Vec::new();
+    if !env.found {
+        return out;
+    }
+    let docs = PathBuf::from(&env.home).join("docs");
+    let rd = match std::fs::read_dir(&docs) {
+        Ok(r) => r,
+        Err(_) => return out,
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        let name = p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let lower = name.to_ascii_lowercase();
+        if !p.is_file() || !(lower.ends_with(".md") || lower.ends_with(".json") || lower.ends_with(".txt")) {
+            continue;
+        }
+        out.push(CopperAsset {
+            rel: format!("docs/{}", name),
+            bytes: e.metadata().map(|m| m.len()).unwrap_or(0),
+        });
+    }
+    out.sort_by(|a, b| a.rel.cmp(&b.rel));
+    out
+}
+
+/// 读环境文档：rel 形如 `docs/tutorial.json`，只允许 docs/ 下的相对路径
+#[tauri::command]
+pub fn copper_env_read_asset(rel: String) -> Result<String, String> {
+    let env = resolve_env();
+    if !env.found {
+        return Err("没有找到 Copper 环境，读不到环境文档".into());
+    }
+    let clean = rel.trim().replace('\\', "/");
+    if clean.contains("..") || !clean.starts_with("docs/") {
+        return Err(format!("只允许读 docs/ 下的文件：{rel}"));
+    }
+    let path = PathBuf::from(&env.home).join(&clean);
+    if !path.is_file() {
+        return Err(format!("环境里没有这份文档：{clean}"));
+    }
+    std::fs::read_to_string(&path).map_err(|e| format!("读文档失败：{e}"))
 }
 
 /* ── 手动指定 / 更新环境包 ───────────────────────────────────────────
@@ -640,3 +992,257 @@ pub fn copper_env_install(zip: Option<String>) -> Result<CopperEnvInfo, String> 
     Ok(resolve_env())
 }
 
+/* ────────────────────────────────────────────────────────────────────────
+ * AOT 运行：编成原生 exe 再跑（设置里 F5 可选 VM / AOT）
+ *
+ * 和 VM 运行的区别：
+ *   - 编的是**磁盘上**的文件（未保存的改动先 Ctrl+S），产物按内容 hash 缓存，
+ *     同一份源码第二次运行不再重编（首次 10~20 s，之后秒开）。
+ *   - 交互：AOT 产物的 ask 本来读 stdin。IDE 设 COPPER_ASK_MARK=1，
+ *     程序会在 stderr 打 `\x01ASK\x01<提示>`，后端翻成 float-input-request，
+ *     前端答完走 copper_aot_input 写回子进程 stdin。
+ * ──────────────────────────────────────────────────────────────────────── */
+
+#[derive(serde::Serialize)]
+pub struct AotRunResult {
+    pub ok: bool,
+    pub exe: String,
+    pub millis: u64,
+    pub code: i32,
+    pub error: String,
+    /// 这次是不是重新编译了（false = 命中缓存）
+    pub compiled: bool,
+    /// 编译耗时（0 = 命中缓存）
+    pub compile_ms: u64,
+}
+
+static AOT_STDIN: std::sync::Mutex<Option<(String, std::process::ChildStdin)>> =
+    std::sync::Mutex::new(None);
+static AOT_CHILD: std::sync::Mutex<Option<(String, std::process::Child)>> =
+    std::sync::Mutex::new(None);
+
+/// 源文件内容 + 同目录 .co/.cw 的修改时间 → 缓存 hash（改库文件也会重编）
+fn aot_hash(src: &Path) -> String {
+    fn mix(h: &mut u64, bytes: &[u8]) {
+        for b in bytes {
+            *h ^= *b as u64;
+            *h = h.wrapping_mul(0x100_0000_01b3);
+        }
+    }
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    mix(&mut h, src.display().to_string().as_bytes());
+    if let Ok(s) = std::fs::read(src) {
+        mix(&mut h, &s);
+    }
+    if let Some(dir) = src.parent() {
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            let mut names: Vec<(String, u64)> = Vec::new();
+            for e in rd.flatten() {
+                let p = e.path();
+                let ext = p.extension().map(|x| x.to_string_lossy().to_lowercase()).unwrap_or_default();
+                if ext != "co" && ext != "cw" {
+                    continue;
+                }
+                let mt = e.metadata().and_then(|m| m.modified()).ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs()).unwrap_or(0);
+                names.push((e.file_name().to_string_lossy().to_string(), mt));
+            }
+            names.sort();
+            for (n, mt) in names {
+                mix(&mut h, n.as_bytes());
+                mix(&mut h, &mt.to_le_bytes());
+            }
+        }
+    }
+    format!("{:016x}", h)
+}
+
+#[tauri::command]
+pub async fn copper_run_aot(
+    app: tauri::AppHandle,
+    file: String,
+    force_rebuild: Option<bool>,
+) -> Result<AotRunResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        aot_run_blocking(app, file, force_rebuild.unwrap_or(false))
+    })
+    .await
+    .map_err(|e| format!("AOT 运行线程崩了：{}", e))?
+}
+
+fn aot_run_blocking(
+    app: tauri::AppHandle,
+    file: String,
+    force: bool,
+) -> Result<AotRunResult, String> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Command, Stdio};
+    use tauri::Emitter;
+
+    let src = PathBuf::from(&file);
+    if !src.is_file() {
+        return Err(format!("找不到源文件：{file}"));
+    }
+    let started = std::time::Instant::now();
+    /* 用内核自己的 emitter 编，而不是环境里那个自举版 colang：
+     * VM 能跑的语义这里全支持（wait until / time / ~ / ask …），
+     * 环境只管提供文档与运行时，不再卡住 IDE 的能力边界。 */
+    let hash = aot_hash(&src);
+    let stem = src.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "app".into());
+    let safe: String = stem.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect();
+    let cache_root = std::env::temp_dir().join(format!("copper_ide_aot_{}", hash));
+    let exe = cache_root.join(format!("{}{}", safe, exe_suffix()));
+
+    let compile_ms;
+    let mut compiled = false;
+    if force || !exe.is_file() {
+        let body = std::fs::read_to_string(&src).map_err(|e| format!("读源文件失败：{e}"))?;
+        let t = std::time::Instant::now();
+        let built = float_lang::aot::build_exe(&src, &body, float_lang::MANIFEST_DIR, &hash)
+            .map_err(|m| format!("AOT 编译失败：\n{m}"))?;
+        compile_ms = t.elapsed().as_millis() as u64;
+        compiled = true;
+        if built != exe && built.is_file() {
+            std::fs::create_dir_all(&cache_root).ok();
+            std::fs::copy(&built, &exe).map_err(|e| format!("复制产物失败：{e}"))?;
+        }
+    } else {
+        compile_ms = 0;
+    }
+    if !exe.is_file() {
+        return Err("AOT 编译完了但没找到产物".into());
+    }
+
+    let run_id = format!(
+        "aot-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let mut child = Command::new(&exe)
+        .env("COPPER_ASK_MARK", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("启动 AOT 产物失败：{e}"))?;
+
+    if let Some(si) = child.stdin.take() {
+        if let Ok(mut g) = AOT_STDIN.lock() {
+            *g = Some((run_id.clone(), si));
+        }
+    }
+
+    let out_id = run_id.clone();
+    let out_app = app.clone();
+    let stdout = child.stdout.take();
+    let out_thread = std::thread::spawn(move || {
+        if let Some(so) = stdout {
+            for line in BufReader::new(so).lines().map_while(Result::ok) {
+                let _ = out_app.emit("float-aot-line", serde_json::json!({
+                    "runId": out_id, "kind": "out", "text": line,
+                }));
+            }
+        }
+    });
+
+    let err_id = run_id.clone();
+    let err_app = app.clone();
+    let stderr = child.stderr.take();
+    let err_thread = std::thread::spawn(move || {
+        if let Some(se) = stderr {
+            for line in BufReader::new(se).lines().map_while(Result::ok) {
+                if let Some(prompt) = line.strip_prefix("\u{1}ASK\u{1}") {
+                    let _ = err_app.emit("float-input-request", serde_json::json!({
+                        "runId": err_id,
+                        "prompt": prompt.replace("\\n", "\n"),
+                    }));
+                } else if !line.trim().is_empty() {
+                    let _ = err_app.emit("float-aot-line", serde_json::json!({
+                        "runId": err_id, "kind": "err", "text": line,
+                    }));
+                }
+            }
+        }
+    });
+
+    let pid_id = run_id.clone();
+    // 子进程交给全局持有，红色停止按钮才能杀得掉；等待循环每次短暂锁一下
+    if let Ok(mut g) = AOT_CHILD.lock() {
+        *g = Some((run_id.clone(), child));
+    }
+    let code;
+    loop {
+        let mut finished: Option<i32> = None;
+        if let Ok(mut g) = AOT_CHILD.lock() {
+            match g.as_mut() {
+                Some((id, c)) if id == &pid_id => match c.try_wait() {
+                    Ok(Some(st)) => finished = Some(st.code().unwrap_or(0)),
+                    Ok(None) => {}
+                    Err(_) => finished = Some(-1),
+                },
+                // 被 copper_aot_stop 杀掉：表里已经清空
+                _ => finished = Some(-1),
+            }
+            if finished.is_some() {
+                *g = None;
+            }
+        }
+        if let Some(c) = finished {
+            code = c;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(60));
+    }
+    // 子进程退出：清掉输入通道，唤醒读线程（它们读到 EOF 会自己结束）
+    if let Ok(mut g) = AOT_STDIN.lock() {
+        if g.as_ref().map(|(id, _)| id == &pid_id).unwrap_or(false) {
+            *g = None;
+        }
+    }
+    let _ = out_thread.join();
+    let _ = err_thread.join();
+
+    Ok(AotRunResult {
+        ok: code == 0,
+        exe: exe.display().to_string(),
+        millis: started.elapsed().as_millis() as u64,
+        code,
+        error: if code == 0 { String::new() } else { format!("程序退出码 {code}") },
+        compiled,
+        compile_ms,
+    })
+}
+
+/// AOT 产物的 ask 回填：把答案写进子进程 stdin
+#[tauri::command]
+pub fn copper_aot_input(run_id: String, answer: String) -> bool {
+    use std::io::Write;
+    let mut g = match AOT_STDIN.lock() {
+        Ok(g) => g,
+        Err(_) => return false,
+    };
+    match g.as_mut() {
+        Some((id, si)) if id == &run_id => {
+            let _ = writeln!(si, "{}", answer);
+            let _ = si.flush();
+            true
+        }
+        _ => false,
+    }
+}
+
+/// 停止 AOT 产物（红色停止按钮）
+#[tauri::command]
+pub fn copper_aot_stop() -> bool {
+    if let Ok(mut g) = AOT_CHILD.lock() {
+        if let Some((_, child)) = g.as_mut() {
+            let _ = child.kill();
+            *g = None;
+            return true;
+        }
+    }
+    false
+}

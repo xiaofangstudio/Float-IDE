@@ -189,6 +189,22 @@ pub fn lang_input(run_id: String, answer: String) -> bool {
     }
 }
 
+/// Shift+F5 / 红色停止按钮：让正在跑的 VM 退出。
+///
+/// VM 是"合作式"停止：置一个原子标志，VM 在循环回跳的 fuel 检查点上看一眼，
+/// 最多几千条指令就返回「已停止」。如果它正卡在 ask 上等人回答，
+/// 顺手塞一个空答案把 recv 唤醒——否则线程会一直睡在输入上，标志没人查。
+#[tauri::command]
+pub fn lang_stop() -> bool {
+    float_lang::cancel::request_stop();
+    if let Ok(g) = INPUT_TX.lock() {
+        if let Some((_, tx)) = g.as_ref() {
+            let _ = tx.send(String::new());
+        }
+    }
+    true
+}
+
 /// 把阻塞式运行的结果整理成给前端的纯数据
 fn finish_blocking(r: Result<float_lang::RunOutcome, float_lang::FloatError>) -> LangRunResult {
     match r {

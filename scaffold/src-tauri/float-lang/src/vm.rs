@@ -965,6 +965,9 @@ impl Vm {
                         fuel -= 1;
                         if fuel == 0 {
                             self.steps += FUEL;
+                            if crate::cancel::stop_requested() {
+                                return Err(self.err_at(ip, "已停止：界面按了停止"));
+                            }
                             if self.steps > self.max_steps {
                                 return Err(self.err_at(ip, "执行步数超限，可能是死循环"));
                             }
@@ -2146,6 +2149,9 @@ impl Vm {
                     fuel -= 1;
                     if fuel == 0 {
                         self.steps += FUEL;
+                        if crate::cancel::stop_requested() {
+                            return Err(self.err_at(ip, "已停止：界面按了停止"));
+                        }
                         if self.steps > self.max_steps {
                             return Err(self.err_at(ip, "执行步数超限，可能是死循环"));
                         }

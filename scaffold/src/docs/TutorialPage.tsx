@@ -1,5 +1,6 @@
-import React, { useCallback, useMemo, useState } from 'react';
-import { CHAPTERS, TUTORIAL_STATS, type CodeSample } from './tutorial';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { CHAPTERS, TUTORIAL_STATS, type Chapter, type CodeSample } from './tutorial';
+import { api, isTauriEnv } from '../core/tauri';
 
 /* 学习中心页面（占满一个标签页，不是浮窗）。
  *
@@ -94,8 +95,41 @@ function CodeBlock({ sample, onRun, onOpenInEditor }: {
 }
 
 export function TutorialPage({ onOpenInEditor, onRun, onOpenPluginsDoc }: Props) {
-  const [activeCh, setActiveCh] = useState(CHAPTERS[0].id);
+  /* 教程内容归 Copper 环境所有：读 `<环境>/docs/tutorial.json`。
+   * 环境更新 → 教程跟着更新，IDE 不用重发版。
+   * 只有环境缺失/没带文档时才退回 IDE 内置那份，并在页面上明说来源。 */
+  const [chapters, setChapters] = useState<Chapter[]>(isTauriEnv() ? [] : CHAPTERS);
+  const [stats, setStats] = useState(TUTORIAL_STATS);
+  const [fromEnv, setFromEnv] = useState<boolean | null>(isTauriEnv() ? null : false);
+  const [activeCh, setActiveCh] = useState(isTauriEnv() ? '' : CHAPTERS[0].id);
   const [q, setQ] = useState('');
+
+  useEffect(() => {
+    if (!isTauriEnv()) return;
+    let alive = true;
+    void (async () => {
+      try {
+        const text = await api.copperEnvReadAsset('docs/tutorial.json');
+        const j = JSON.parse(text) as { chapters?: Chapter[]; stats?: typeof TUTORIAL_STATS };
+        if (alive && Array.isArray(j.chapters) && j.chapters.length) {
+          setChapters(j.chapters);
+          if (j.stats) setStats(j.stats);
+          setActiveCh(j.chapters[0].id);
+          setFromEnv(true);
+          return;
+        }
+        throw new Error('tutorial.json 里没有 chapters');
+      } catch {
+        if (!alive) return;
+        setChapters(CHAPTERS);
+        setStats(TUTORIAL_STATS);
+        setActiveCh(CHAPTERS[0].id);
+        setFromEnv(false);
+      }
+    })();
+    return () => { alive = false; };
+  }, []);
+
   const [done, setDone] = useState<Set<string>>(() => {
     try {
       const raw = window.localStorage.getItem('float.tutorial.done');
@@ -104,8 +138,8 @@ export function TutorialPage({ onOpenInEditor, onRun, onOpenPluginsDoc }: Props)
   });
 
   const chapter = useMemo(
-    () => CHAPTERS.find((c) => c.id === activeCh) ?? CHAPTERS[0],
-    [activeCh]
+    () => chapters.find((c) => c.id === activeCh) ?? chapters[0],
+    [activeCh, chapters]
   );
 
   const markDone = useCallback((id: string): void => {
@@ -119,8 +153,8 @@ export function TutorialPage({ onOpenInEditor, onRun, onOpenPluginsDoc }: Props)
 
   const filtered = useMemo(() => {
     const k = q.trim().toLowerCase();
-    if (!k) return CHAPTERS;
-    return CHAPTERS
+    if (!k) return chapters;
+    return chapters
       .map((c) => ({
         ...c,
         sections: c.sections.filter((s) =>
@@ -131,9 +165,30 @@ export function TutorialPage({ onOpenInEditor, onRun, onOpenPluginsDoc }: Props)
         )
       }))
       .filter((c) => c.sections.length > 0 || c.title.toLowerCase().includes(k));
-  }, [q]);
+  }, [q, chapters]);
 
-  const progress = Math.round((done.size / TUTORIAL_STATS.sections) * 100);
+  if (!chapter) {
+    return (
+      <div className="tut-page">
+        <aside className="tut-nav">
+          <div className="tut-nav-head"><div className="tut-nav-title">Copper 教程</div></div>
+        </aside>
+        <main className="tut-main">
+          <header className="tut-hero">
+            <div className="tut-hero-icon">!</div>
+            <div>
+              <h1 className="tut-hero-title">环境里没有教程文档</h1>
+              <p className="tut-hero-sub">
+                教程由 Copper 环境提供（<code>docs/tutorial.json</code>）。先装/更新环境，或把文档放进环境目录。
+              </p>
+            </div>
+          </header>
+        </main>
+      </div>
+    );
+  }
+
+  const progress = Math.round((done.size / Math.max(1, stats.sections)) * 100);
 
   return (
     <div className="tut-page">
@@ -141,7 +196,12 @@ export function TutorialPage({ onOpenInEditor, onRun, onOpenPluginsDoc }: Props)
       <aside className="tut-nav">
         <div className="tut-nav-head">
           <div className="tut-nav-title">Copper 教程</div>
-          <div className="tut-nav-sub">{TUTORIAL_STATS.chapters} 章 · {TUTORIAL_STATS.sections} 节 · {TUTORIAL_STATS.samples} 个示例</div>
+          <div className="tut-nav-sub">
+            {stats.chapters} 章 · {stats.sections} 节 · {stats.samples} 个示例
+            <span className={`tut-src ${fromEnv ? 'env' : ''}`} title={fromEnv ? '来自 Copper 环境 docs/tutorial.json' : '环境未提供，用的是 IDE 内置副本'}>
+              {fromEnv ? '环境提供' : 'IDE 内置'}
+            </span>
+          </div>
           <div className="tut-progress">
             <div className="tut-progress-bar"><span style={{ width: progress + '%' }} /></div>
             <span className="tut-progress-num">{progress}%</span>
@@ -229,9 +289,9 @@ export function TutorialPage({ onOpenInEditor, onRun, onOpenPluginsDoc }: Props)
 
         <footer className="tut-foot">
           {(() => {
-            const idx = CHAPTERS.findIndex((c) => c.id === chapter.id);
-            const prev = CHAPTERS[idx - 1];
-            const next = CHAPTERS[idx + 1];
+            const idx = chapters.findIndex((c) => c.id === chapter.id);
+            const prev = chapters[idx - 1];
+            const next = chapters[idx + 1];
             return (
               <>
                 {prev

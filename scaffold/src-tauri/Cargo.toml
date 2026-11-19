@@ -1,6 +1,6 @@
 [package]
 name = "floatide"
-version = "1.7.1"
+version = "1.9.8"
 description = "Float IDE：Copper 语言（原 CW Script）的写作与调试"
 authors = ["小方工作室"]
 license = "MIT"
@@ -26,6 +26,7 @@ portable-pty = "0.8"
 ureq = "2"
 # CW Script 的原生内核：IDE 的运行（F5）走这条，比旧解释器快 4~5 倍
 float-lang = { path = "float-lang" }
+tauri-plugin-single-instance = "2"
 
 [profile.release]
 opt-level = 2
@@ -34,3 +35,9 @@ lto = false
 # Windows 文件关联走系统 API（RegCreateKeyW / SHChangeNotify），不调用 reg.exe
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Registry", "Win32_UI_Shell", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
+
+
+
+
+
+

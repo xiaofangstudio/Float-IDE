@@ -8,11 +8,39 @@ import { Logo } from './icons';
  * 和偏好设置共用 doc-embed 版式，作为文档标签页打开，不抢编辑器焦点。 */
 
 const VERSION = (pkg as { version?: string }).version ?? '1.6.0';
-/* Copper 语言版本（不是 IDE 版本）。改这里时同步改
-   src-tauri/float-lang/Cargo.toml 的 version，两个数字必须一致。 */
-const COPPER_VERSION = '1.0.0';
+
+/* Copper 的版本不再写死：它属于「环境」，由 copper_env/copper.json 和
+ * `colang x.x.xxx` 的二进制名决定。这里运行时问一次后端，
+ * 环境换了、编译器换了，关于页跟着变——不会再出现"页面写 1.0.0、实际跑 1.9.2"。
+ */
+function useCopperVersion(): string {
+  const [v, setV] = useState('—');
+  useEffect(() => {
+    if (!isTauriEnv()) return;
+    let alive = true;
+    void api
+      .copperEnvInfo()
+      .then((info) => {
+        if (!alive) return;
+        const text = (info.compiler_version || info.version || '').trim();
+        if (text) setV(text.replace(/^v/, ''));
+      })
+      .catch(() => { /* 没有环境就保持 — */ });
+    return () => { alive = false; };
+  }, []);
+  return v;
+}
 
 const CHANGELOG: { v: string; items: string[] }[] = [
+  {
+    v: '1.9.8',
+    items: [
+      'Shift+F5 / 红色停止按钮真的能停 Rust 内核：VM 在循环检查点上合作式退出',
+      '关于页的 Copper 版本改为运行时从环境读取，不再写死 1.0.0',
+      '工程索引的符号表补完后再返回，跳转定义不再偶尔"没找到"',
+      'AOT 的 ask 加了真跑对拍（编出 exe、喂 stdin、和 VM 逐字比）'
+    ]
+  },
   {
     v: '1.6.0',
     items: [
@@ -48,6 +76,7 @@ const CHANGELOG: { v: string; items: string[] }[] = [
 ];
 
 export function AboutPage({ onClose }: { onClose: () => void }) {
+  const copperVersion = useCopperVersion();
   const [assoc, setAssoc] = useState<boolean | null>(null);
   const [assocBusy, setAssocBusy] = useState(false);
   const [assocMsg, setAssocMsg] = useState('');
@@ -134,7 +163,7 @@ export function AboutPage({ onClose }: { onClose: () => void }) {
               <div>
                 <h3>Copper</h3>
                 <div className="about-sub">原 CW Script · 源文件扩展名 .co</div>
-                <div className="about-sub">Copper {COPPER_VERSION} · 一门行式脚本语言，铜的流动性是它的名字来源</div>
+                <div className="about-sub">Copper {copperVersion === '—' ? '' : copperVersion} · 一门行式脚本语言，铜的流动性是它的名字来源</div>
               </div>
             </div>
             <p>

@@ -1,6 +1,6 @@
 {
   "name": "float-ide",
-  "version": "1.9.0",
+  "version": "1.9.8",
   "description": "Copper 专用 IDE（Float IDE）：写脚本、调试、跑起来",
   "author": "小方工作室",
   "license": "MIT",
@@ -16,6 +16,8 @@
     "test:index": "esbuild tests/index.test.ts --bundle --platform=node --format=esm --external:@tauri-apps/* --outfile=tests/.idx.mjs --log-level=warning && node tests/.idx.mjs",
     "test:stress": "esbuild tests/stress.ts --bundle --platform=node --format=esm --external:@tauri-apps/* --outfile=tests/.stress.mjs --log-level=warning && node tests/.stress.mjs",
     "bench:lang": "esbuild tests/bench.ts --bundle --platform=node --format=esm --external:@tauri-apps/* --outfile=tests/.bench.mjs --log-level=warning && node tests/.bench.mjs",
+    "bench:complete": "esbuild tests/bench-complete.ts --bundle --platform=node --format=esm --external:@tauri-apps/* --outfile=tests/.benchcompl.mjs --log-level=warning && node tests/.benchcompl.mjs",
+    "train:corpus": "esbuild tests/train-corpus.ts --bundle --platform=node --format=esm --external:@tauri-apps/* --outfile=tests/.train-corpus.mjs --log-level=warning && node tests/.train-corpus.mjs --eval",
     "test:completion": "esbuild tests/completion.test.ts --bundle --platform=node --format=esm --external:@tauri-apps/* --outfile=tests/.compl.mjs --log-level=warning && node tests/.compl.mjs",
     "test:context": "esbuild tests/context.test.ts --bundle --platform=node --format=esm --external:@tauri-apps/* --outfile=tests/.ctx.mjs --log-level=warning && node tests/.ctx.mjs",
     "test:types": "esbuild tests/typecheck.test.ts --bundle --platform=node --format=esm --external:@tauri-apps/* --outfile=tests/.tc.mjs --log-level=warning && node tests/.tc.mjs",
@@ -44,3 +46,9 @@
     "vite": "^5.4.10"
   }
 }
+
+
+
+
+
+

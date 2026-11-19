@@ -394,18 +394,19 @@ class ExprParser {
       if (c === '\\' && (text[i + 1] === '{' || text[i + 1] === '}')) { buf += text[i + 1]; i += 2; continue; }
       if (c !== '{') { buf += c; i++; continue; }
 
-      const close = text.indexOf('}', i + 1);
+      const close = findInterpClose(text, i + 1);
       if (close < 0) { buf += c; i++; continue; }
       const inner = text.slice(i + 1, close).trim();
       if (!inner) { buf += '{}'; i = close + 1; continue; }
 
       pushStr();
-      const toks = tokenizeLine(inner, t.line, t.col + i + 1);
-      const sub = new ExprParser(toks, this.file);
       try {
+        const toks = tokenizeLine(inner, t.line, t.col + i + 1);
+        const sub = new ExprParser(toks, this.file);
         parts.push(sub.parseAll());
       } catch {
-        // 插值里写错了：当成普通文本，交给外面的语法检查
+        // 插值里写错了（或者这里根本不是插值，而是一段带花括号的普通文本）：
+        // 原样当文本留着，别把「字符串没有结束引号」这种假错报出去。
         buf += text.slice(i, close + 1);
       }
       i = close + 1;
@@ -531,6 +532,30 @@ class ExprParser {
       return e;
     }
   }
+}
+
+/** 找插值 `{…}` 的配对右括号：引号里的 `}`、被 `\` 转义的都不要，
+ *  内层 `{…}` 也要配对。找不到返回 -1。
+ *  以前直接 indexOf('}') —— 字符串里带一段 {…} 的代码（生成 Rust 源码那种）
+ *  会被从中间劈开，报出「字符串没有结束引号」这种假错误。 */
+function findInterpClose(text: string, from: number): number {
+  let depth = 1;
+  let quote: string | null = null;
+  for (let i = from; i < text.length; i++) {
+    const c = text[i];
+    if (quote) {
+      if (c === '\\') { i++; continue; }
+      if (c === quote) quote = null;
+      continue;
+    }
+    if (c === '"' || c === "'") { quote = c; continue; }
+    if (c === '{') { depth++; continue; }
+    if (c === '}') {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
 }
 
 /** 单独解析一段表达式文本（供 IDE / 指令参数复用） */
@@ -1068,9 +1093,9 @@ export function parseProgram(file: string, src: string): Program {
        * 只在真的当函数定义/continue 用的时候提示，别把叫这些名字的变量误伤。 */
       if (FUNC_WORDS.has(word) && word !== 'fn' && toks[1]?.k === 'ident') {
         const what = toks[2]?.v === '=' ? '函数别名' : '函数定义';
-        diag('warning', `${what}的旧写法「${word}」还能用，正式写法是 fn（行为完全一样）`, stmtSpan(ln), 'legacy');
+        diag('info', `${what}的旧写法「${word}」还能用，正式写法是 fn（行为完全一样）`, stmtSpan(ln), 'legacy');
       } else if (word === 'balo' && toks.length === 1) {
-        diag('warning', '「balo」是旧写法，正式写法是 continue', stmtSpan(ln), 'legacy');
+        diag('info', '「balo」是旧写法，正式写法是 continue', stmtSpan(ln), 'legacy');
       }
       switch (word) {
         case 'class': return parseClass(ln, toks);

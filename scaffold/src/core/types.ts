@@ -1,6 +1,6 @@
 /* Float IDE 前端类型。 */
 
-export type FileEntry = { name: string; relPath: string; isDir: boolean };
+export type FileEntry = { name: string; relPath: string; isDir: boolean; size?: number };
 
 export type RecentItem = { path: string; name: string; lastOpened: string };
 

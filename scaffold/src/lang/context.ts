@@ -53,9 +53,11 @@ function lastTokenAt(toks: Token[], col: number): number {
   return at;
 }
 
-export function contextAt(src: string, line: number, col: number, analysis?: Analysis): CursorContext {
-  const lines = src.split('\n');
-  const text = lines[line - 1] ?? '';
+/** `src` 是整份源码；编辑器热路径可以顺手把已经切好的 `lines` 传进来，
+ *  省掉每击键一次 split('\n')（150 KB 的文件这步能花掉 1~2 ms）。 */
+export function contextAt(src: string, line: number, col: number, analysis?: Analysis, lines?: string[]): CursorContext {
+  const all = lines ?? src.split('\n');
+  const text = all[line - 1] ?? '';
   const a = analysis ?? analyze('main.co', src);
 
   /* ── 1. 注释：光标落在 `/*` 之后的注释文字里 ── */

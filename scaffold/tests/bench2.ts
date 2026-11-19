@@ -1,0 +1,10 @@
+import { readFileSync } from "node:fs";
+import { parseProgram } from "../src/lang/parse";
+import { semanticDiagnostics, shadowDiagnostics } from "../src/lang/sema";
+import { checkTypes } from "../src/lang/types";
+const src=readFileSync("src-tauri/float-lang/bootstrap/colang.co","utf8");
+const t0=performance.now(); const p=parseProgram("colang.co",src); const t1=performance.now();
+semanticDiagnostics("colang.co",p.body,undefined); const t2=performance.now();
+checkTypes("colang.co",p.body); const t3=performance.now();
+shadowDiagnostics("colang.co",p.body); const t4=performance.now();
+console.log(`parse ${(t1-t0).toFixed(1)}  sema ${(t2-t1).toFixed(1)}  types ${(t3-t2).toFixed(1)}  shadow ${(t4-t3).toFixed(1)} ms`);

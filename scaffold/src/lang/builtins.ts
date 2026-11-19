@@ -100,6 +100,8 @@ const REGISTRY: BuiltinSpec[] = [
   } }),
   spec({ name: 'random', sig: 'random()', category: '数学', doc: '0 到 1 之间的小数', min: 0, max: 0, writes: '__last_calc', fn: () => Math.random() }),
   spec({ name: 'sqrt', sig: 'sqrt(a)', category: '数学', doc: '平方根', min: 1, max: 1, writes: '__last_calc', fn: (a) => Math.sqrt(num(a[0], 'sqrt')) }),
+  // sqrt2 是 sqrt 的兼容别名（老内核名单里就有），保证跨环境名字对得上
+  spec({ name: 'sqrt2', sig: 'sqrt2(a)', category: '数学', doc: '平方根（sqrt 的别名）', min: 1, max: 1, writes: '__last_calc', fn: (a) => Math.sqrt(num(a[0], 'sqrt2')) }),
   spec({ name: 'abs', sig: 'abs(a)', category: '数学', doc: '绝对值', min: 1, max: 1, writes: '__last_calc', fn: (a) => Math.abs(num(a[0], 'abs')) }),
   spec({ name: 'floor', sig: 'floor(a)', category: '数学', doc: '向下取整', min: 1, max: 1, writes: '__last_calc', fn: (a) => Math.floor(num(a[0], 'floor')) }),
   spec({ name: 'ceil', sig: 'ceil(a)', category: '数学', doc: '向上取整', min: 1, max: 1, writes: '__last_calc', fn: (a) => Math.ceil(num(a[0], 'ceil')) }),
@@ -165,6 +167,26 @@ const REGISTRY: BuiltinSpec[] = [
     return s[i];
   } }),
   spec({ name: 'strlen', sig: 'strlen(s)', category: '字符串', doc: '字符串长度', min: 1, max: 1, writes: '__last_str', fn: (a) => toStr(a[0]).length }),
+  spec({ name: 'charcode', sig: 'charcode(s, i)', category: '字符串', doc: '第 i 个字符的码点（负数从末尾数）', min: 2, max: 2, fn: (a) => {
+    const s = Array.from(toStr(a[0]));
+    const i = Math.trunc(num(a[1], 'charcode'));
+    const idx = i < 0 ? i + s.length : i;
+    if (idx < 0 || idx >= s.length) bad(`charcode 下标 ${i} 越界`);
+    return s[idx].codePointAt(0) ?? 0;
+  } }),
+  spec({ name: 'charfrom', sig: 'charfrom(n)', category: '字符串', doc: '码点 → 单字符（charcode 的逆，用来构造字符/转义输出）', min: 1, max: 1, fn: (a) => {
+    const n = Math.trunc(num(a[0], 'charfrom'));
+    if (n < 0 || n > 0x10ffff) bad(`charfrom 码点 ${n} 不是合法字符`);
+    try { return String.fromCodePoint(n); } catch { bad(`charfrom 码点 ${n} 不是合法字符`); }
+    return '';
+  } }),
+  spec({ name: 'strfind', sig: 'strfind(s, sub)', category: '字符串', doc: '子串首次出现的下标，找不到给 -1', min: 2, max: 2, fn: (a) => toStr(a[0]).indexOf(toStr(a[1])) }),
+  spec({ name: 'osname', sig: 'osname()', category: '系统', doc: '当前平台短名：windows / linux / macos', min: 0, max: 0, fn: () => {
+    const ua = typeof navigator !== 'undefined' ? navigator.userAgent.toLowerCase() : '';
+    if (ua.includes('win')) return 'windows';
+    if (ua.includes('mac')) return 'macos';
+    return 'linux';
+  } }),
   spec({ name: 'contain', sig: 'contain(s, 子串)', category: '字符串', doc: '是否包含子串', min: 2, max: 2, writes: '__last_cmp', fn: (a) => toStr(a[0]).includes(toStr(a[1])) }),
   spec({ name: 'upper', sig: 'upper(s)', category: '字符串', doc: '转大写', min: 1, max: 1, fn: (a) => toStr(a[0]).toUpperCase() }),
   spec({ name: 'lower', sig: 'lower(s)', category: '字符串', doc: '转小写', min: 1, max: 1, fn: (a) => toStr(a[0]).toLowerCase() }),

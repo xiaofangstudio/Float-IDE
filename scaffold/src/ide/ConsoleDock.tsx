@@ -17,6 +17,8 @@ type Props = {
   projectDir: string;
   onClear: () => void;
   height?: number;
+  /** 工程索引进度：有值时在工作区顶部压一条蓝条，显示加载到哪一步 */
+  progress?: { done: number; total: number; file: string } | null;
 };
 
 function TerminalLazy({ projectDir, visible }: { projectDir: string; visible: boolean }) {
@@ -28,9 +30,11 @@ function TerminalLazy({ projectDir, visible }: { projectDir: string; visible: bo
   return Comp ? <Comp projectDir={projectDir} /> : <div className="term-host" />;
 }
 
-export function ConsoleDock({ lines, askQuestion, onAnswer, running, stateText, tab, onTab, projectDir, onClear, height, searchNode, full, onToggleFull }: Props & { full?: boolean; onToggleFull?: () => void }) {
+export function ConsoleDock({ lines, askQuestion, onAnswer, running, stateText, tab, onTab, projectDir, onClear, height, searchNode, full, onToggleFull, progress }: Props & { full?: boolean; onToggleFull?: () => void }) {
   const [input, setInput] = useState('');
   const listRef = useRef<HTMLDivElement>(null);
+  const pct = progress && progress.total > 0 ? Math.min(100, Math.round((progress.done / progress.total) * 100)) : 0;
+  const fileName = (progress?.file || '').split(/[\\/]/).pop() || '';
 
   useEffect(() => {
     const el = listRef.current;
@@ -39,6 +43,11 @@ export function ConsoleDock({ lines, askQuestion, onAnswer, running, stateText, 
 
   return (
     <div className="term-dock" style={height ? { height } : undefined}>
+      {progress && (
+        <div className="work-progress" title={progress.file ? `正在加载：${progress.file}` : '正在建立工程索引'}>
+          <div className="work-progress-fill" style={{ width: `${pct}%` }} />
+        </div>
+      )}
       <div className="term-tabs">
         <span className="term-label">调试输出</span>
         <div className={`term-tab ${tab === 'console' ? 'active' : ''}`} onClick={() => onTab('console')}>控制台</div>
@@ -68,6 +77,11 @@ export function ConsoleDock({ lines, askQuestion, onAnswer, running, stateText, 
           {full ? <IconMinimize size={11} /> : <IconMaximize size={11} />}
         </button>
         {tab === 'terminal' && <span style={{ marginLeft: 4, display: 'flex' }}><IconPlus size={0} /></span>}
+        {progress && progress.total > 0 && (
+          <span className="muted" style={{ fontSize: 11, marginLeft: 6 }} title={progress.file}>
+            加载中 {progress.done}/{progress.total}（{pct}%）{fileName ? ` · ${fileName}` : ''}
+          </span>
+        )}
         <span style={{ flex: 1 }} />
         <span className="muted" style={{ fontSize: 11, marginRight: 8 }}>{stateText}</span>
       </div>

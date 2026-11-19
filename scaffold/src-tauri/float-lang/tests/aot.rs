@@ -33,9 +33,22 @@ fn 指针现在能翻成_rust() {
 }
 
 #[test]
-fn 有_ask_的程序明确拒绝() {
-    let e = emit("int a = ask(\"几岁\")\n").expect_err("ask 应该拒绝");
-    assert!(e.message.contains("ask"), "原因要说清楚：{}", e.message);
+fn ask_语句能翻成_ask_line() {
+    // ask 是语句：`ask "问题"` 生成 ask_line(行,列)，结果写进 ans / __last_ans，
+    // 和 VM 的控制台风格一致（先打提示、回声非空输入）。
+    let r = emit("ask \"你叫啥\"\nprint(\"你好，\" + ans)\n").expect("ask 语句应该能翻");
+    assert!(r.contains("ask_line("), "缺 ask_line 调用");
+    // 答案要落到全局槽里（ans 与 __last_ans 各写一次），后面 print 才读得到
+    let assigns = r.matches("g.v[").count();
+    assert!(assigns >= 2, "答案没落到 ans / __last_ans（g.v 赋值只有 {assigns} 次）");
+}
+
+#[test]
+fn ask_写成函数调用形式会被拒绝并给出正确写法() {
+    // `ask("几岁")` 不是合法的 ask 用法（ask 是语句，不是函数）。
+    // 这条守的是「报错要说人话」，不是「ask 不支持」。
+    let e = emit("int a = ask(\"几岁\")\n").expect_err("ask(...) 应该拒绝");
+    assert!(e.message.contains("ask \"问题\""), "应提示正确写法：{}", e.message);
 }
 
 #[test]

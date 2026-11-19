@@ -9,15 +9,18 @@ export type Settings = {
   tabSize: number;
   wordWrap: boolean;
   autoSave: boolean;
-  runMode: 'compile' | 'debug';
+  runMode: 'compile' | 'aot' | 'debug';
   /** 紧凑模式：行高、内边距更小，一屏塞更多信息（真 IDE 默认更紧凑） */
   compact: boolean;
   /** 界面动画：面板淡入、按钮悬停位移等 */
   animations: boolean;
   /** 补全弹窗右侧的文档说明面板 */
   suggestDocs: boolean;
-  /** Beta：本地超小补全模型（纯本地统计，不上网）。默认关闭，关了就走老补全 */
+  /** 智能补全：本地统计模型（不进源码、不联网），按上文与当前作用域重排候选。
+   *  默认开启；增量学习 + 空闲重建，常驻开销可以忽略（见 smartComplete.ts）。 */
   smartComplete: boolean;
+  /** 行内续写：行尾空格后给一个词的灰色建议，Tab 接受（本地统计模型给的） */
+  inlineSuggest: boolean;
 };
 
 const KEY = 'float.settings';
@@ -33,7 +36,8 @@ export const DEFAULT_SETTINGS: Settings = {
   compact: false,
   animations: true,
   suggestDocs: true,
-  smartComplete: false
+  smartComplete: true,
+  inlineSuggest: true
 };
 
 export function loadSettings(): Settings {
@@ -47,11 +51,12 @@ export function loadSettings(): Settings {
       tabSize: typeof s.tabSize === 'number' ? Math.min(8, Math.max(2, s.tabSize)) : DEFAULT_SETTINGS.tabSize,
       wordWrap: typeof s.wordWrap === 'boolean' ? s.wordWrap : DEFAULT_SETTINGS.wordWrap,
       autoSave: typeof s.autoSave === 'boolean' ? s.autoSave : DEFAULT_SETTINGS.autoSave,
-      runMode: s.runMode === 'debug' ? 'debug' : 'compile',
+      runMode: s.runMode === 'debug' ? 'debug' : (s.runMode === 'aot' ? 'aot' : 'compile'),
       compact: typeof s.compact === 'boolean' ? s.compact : DEFAULT_SETTINGS.compact,
       animations: typeof s.animations === 'boolean' ? s.animations : DEFAULT_SETTINGS.animations,
       suggestDocs: typeof s.suggestDocs === 'boolean' ? s.suggestDocs : DEFAULT_SETTINGS.suggestDocs,
-      smartComplete: typeof s.smartComplete === 'boolean' ? s.smartComplete : DEFAULT_SETTINGS.smartComplete
+      smartComplete: typeof s.smartComplete === 'boolean' ? s.smartComplete : DEFAULT_SETTINGS.smartComplete,
+      inlineSuggest: typeof s.inlineSuggest === 'boolean' ? s.inlineSuggest : DEFAULT_SETTINGS.inlineSuggest
     };
   } catch {
     return { ...DEFAULT_SETTINGS };

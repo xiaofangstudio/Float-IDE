@@ -175,9 +175,9 @@ export function semanticDiagnostics(file: string, body: Stmt[], project?: Set<st
 
   for (const r of refs) {
     if (known.has(r.name)) continue;
-    const key = `${r.name}@${r.span.line}:${r.span.col}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
+    // 同一个名字只报一次：一个没定义的函数被调用 35 次，不该刷 35 条红线
+    if (seen.has(r.name)) continue;
+    seen.add(r.name);
 
     const hint = suggest(r.name, known);
     const what = r.call ? '函数' : '变量';

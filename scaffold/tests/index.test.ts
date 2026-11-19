@@ -18,7 +18,7 @@ const ok = (name: string, cond: boolean, extra = ''): void => {
 const ROOT = 'P:';
 const FILES: Record<string, string> = {
   'P:/main.cw': [
-    '// 调用 tool 的地方（注释里的 tool 不该被改名）',
+    '/* 调用 tool 的地方（注释里的 tool 不该被改名）',
     'function tool(a)',
     '    return a + 1',
     '',
@@ -39,7 +39,11 @@ const FILES: Record<string, string> = {
 const idx = new ProjectIndex(ROOT, async (p) => FILES[p] ?? '', async () => []);
 
 /* 手工灌入（等价于 refresh，但不依赖文件系统） */
-for (const [p, t] of Object.entries(FILES)) idx.put(p, t);
+for (const [p, t] of Object.entries(FILES)) void idx.put(p, t);
+
+/* 符号表是 worker 异步补上的：不等它，跳转定义那边查到的永远是空表。
+ * 这条以前是靠"跑得够快刚好算完"侥幸过的，换台慢机器就红。 */
+await idx.whenIdle();
 
 /* ── 搜索 ── */
 {

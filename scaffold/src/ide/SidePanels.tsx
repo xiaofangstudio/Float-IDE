@@ -77,7 +77,14 @@ function ProblemHeader({ items }: { items: ProblemItem[] }) {  const errs = item
 
 export function SidePanels({ source, file, onReveal, vars, running, width, tabRequest, problems, onOpenProblem, reports, onClearReports }: Props) {
   const [tab, setTab] = useState<'outline' | 'vars' | 'problems' | 'report'>('outline');
-  const outline = useMemo(() => extractOutline(source), [source]);
+  /* 大纲按「停手后再算」：每敲一个键都重算整份大纲，大文件上就是白烧 CPU。
+   * 250 ms 静默期用旧大纲撑着，位置差一两行不影响导航。 */
+  const [outlineSrc, setOutlineSrc] = useState(source);
+  useEffect(() => {
+    const t = window.setTimeout(() => setOutlineSrc(source), 250);
+    return () => window.clearTimeout(t);
+  }, [source]);
+  const outline = useMemo(() => extractOutline(outlineSrc), [outlineSrc]);
   // 变量分成两组：脚本自己的变量，和语言自带的特殊变量（ans / __last_*）
   const isSpecial = (n: string): boolean => n === 'ans' || n.startsWith('__');
   const normalVars = useMemo(() => vars.filter((v) => !isSpecial(v.name)), [vars]);

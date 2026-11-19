@@ -1,34 +1,41 @@
 {
   "name": "copper",
-  "version": "1.0.0",
-  "language": "Copper 1.0",
+  "version": "1.9.2",
+  "language": "Copper 1.9",
+  "compiler_naming": "colang <major>.<minor>.<patch>.exe，同目录多份优先版本号最大的",
   "layout": {
     "bin": "bin",
     "lib": "lib",
-    "platforms": "bin/<platform>"
+    "platforms": "bin/<platform>",
+    "docs": "docs"
   },
   "platforms": {
     "windows-x64": {
-      "env": "bin/windows-x64/copper.exe",
-      "self": "bin/windows-x64/copper-self.exe",
+      "env": "bin/windows-x64/colang 1.9.2.exe",
+      "self": "bin/windows-x64/colang-self 1.9.2.exe",
+      "run": "bin/windows-x64/copper-run.exe",
+      "embed": "bin/windows-x64/copper-embed.exe",
       "status": "ready"
     },
     "linux-x64": {
-      "env": "bin/linux-x64/copper",
-      "self": "bin/linux-x64/copper-self",
+      "env": "bin/linux-x64/colang 1.9.2",
+      "self": "bin/linux-x64/colang-self 1.9.2",
       "run": "bin/linux-x64/copper-run",
+      "embed": "bin/linux-x64/copper-embed",
       "status": "ready"
     },
     "macos-arm64": {
-      "env": "bin/macos-arm64/copper",
-      "self": "bin/macos-arm64/copper-self",
+      "env": "bin/macos-arm64/colang 1.9.2",
+      "self": "bin/macos-arm64/colang-self 1.9.2",
       "status": "todo"
     }
   },
   "compilers": {
-    "env": "bin/copper.exe",
-    "self": "bin/copper-self.exe"
+    "env": "bin/colang 1.9.2.exe",
+    "self": "bin/colang-self 1.9.2.exe"
   },
   "runtime": "lib/colang_rt.rs",
-  "notes": "多平台布局：各平台二进制放 bin/<platform>/，后端按当前机器自动挑；bin/ 下的平铺那份是给老安装留的兼容路径。copper.exe 是 Rust-AOT 编出的环境编译器，copper-self.exe 是自举版（两者输出逐字节一致）。macos-arm64 目前没有二进制，需要在 Mac 上编一次后放进 bin/macos-arm64/。"
+  "docs": "docs",
+  "notes": "解释器叫 colang，不叫 copper。编译器一律按 `colang <大>.<中>.<小>[.exe]` 命名；IDE 与启动脚本都会在同目录里挑版本号最大的那一份，其次比修改时间。copper-run / copper-embed 是运行器与嵌入库，不参与版本比较。copper.exe 这类旧名只作兼容兜底。多平台二进制放 bin/<platform>/；bin/ 下平铺那份是给老安装留的兼容路径。docs/ 里放教程（tutorial.json）与「关于 Copper」（about-copper.md），IDE 直接读这里，环境更新时文档一起更新。macos-arm64 目前没有二进制，需要在 Mac 上编一次后放进 bin/macos-arm64/。",
+  "crate": "lib/float-lang"
 }

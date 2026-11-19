@@ -22,8 +22,17 @@ pick() {  # pick <平台路径> <平铺兼容路径>
   if [ -x "$HERE/$PLAT/$1" ]; then echo "$HERE/$PLAT/$1"; else echo "$HERE/$2"; fi
 }
 
-EXE="$(pick copper copper)"
-SELF="$(pick copper-self copper-self)"
+# 编译器统一命名 `colang <版本>.exe`（Linux 无 .exe 后缀）：同目录多份取版本最大的
+newest() {  # newest <前缀 glob> <排除词> <兜底>
+  local hit
+  hit="$(ls -1 "$HERE/$PLAT/"$1* 2>/dev/null | grep -v -- "$2" | sort -V | tail -1 || true)"
+  [ -n "$hit" ] || hit="$(ls -1 "$HERE/"$1* 2>/dev/null | grep -v -- "$2" | sort -V | tail -1 || true)"
+  [ -n "$hit" ] || hit="$(pick "$3" "$3")"
+  echo "$hit"
+}
+
+EXE="$(newest 'colang ' '-self' 'copper')"
+SELF="$(newest 'colang-self ' '-run' 'copper-self')"
 RUN="$(pick copper-run copper-run)"
 RT="$COPPER_HOME/lib/colang_rt.rs"
 

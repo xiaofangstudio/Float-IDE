@@ -50,7 +50,14 @@ export type Analysis = {
 
 const isClassDecl = (s: Stmt): s is Extract<Stmt, { k: 'decl' }> => s.k === 'decl';
 
-export function analyze(file: string, src: string, projectNames?: Set<string>): Analysis {
+/** `opts.symbolsOnly`：只要符号表（补全 / 成员提示用），跳过语义、类型、
+ *  遮蔽三路诊断 —— 那三路要把整棵 AST 再走几遍，100 KB 文件上能占七成时间。 */
+export function analyze(
+  file: string,
+  src: string,
+  projectNames?: Set<string>,
+  opts?: { symbolsOnly?: boolean }
+): Analysis {
   const program = parseProgram(file, src);
   const funcs: FuncSym[] = [];
   const classes: ClassSym[] = [];
@@ -182,13 +189,15 @@ export function analyze(file: string, src: string, projectNames?: Set<string>): 
 
   walk(program.body, null, 0);
 
-  // 语法错误、语义（未定义）、类型、方法遮蔽字段四路诊断合成一份
-  const diagnostics = [
-    ...program.diagnostics,
-    ...semanticDiagnostics(file, program.body, projectNames),
-    ...checkTypes(file, program.body),
-    ...shadowDiagnostics(file, program.body)
-  ];
+  // 语法错误、语义（未定义）、类型、方法遮蔽字段四路诊断合成一份（补全可跳过）
+  const diagnostics = opts?.symbolsOnly
+    ? program.diagnostics
+    : [
+      ...program.diagnostics,
+      ...semanticDiagnostics(file, program.body, projectNames),
+      ...checkTypes(file, program.body),
+      ...shadowDiagnostics(file, program.body)
+    ];
   return { program, funcs, classes, vars, outline, diagnostics };
 }
 

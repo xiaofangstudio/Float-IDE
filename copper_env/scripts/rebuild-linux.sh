@@ -25,6 +25,9 @@ OUT="$ROOT/copper_env/bin/linux-x64"
 RT="$ROOT/copper_env/lib/colang_rt.rs"
 CO="$FL/bootstrap/colang.co"
 TMP="${TMPDIR:-/tmp}/copper_linux_rebuild"
+VERSION="${COLANG_VERSION:-1.9.2}"
+NAME="colang $VERSION"
+SELFNAME="colang-self $VERSION"
 FAST=0
 if [ "${1:-}" = "--fast" ]; then FAST=1; fi
 
@@ -47,16 +50,16 @@ cargo build --release --examples || die "cargo build 失败"
 [ -x "$FL/target/release/examples/aot" ] || die "没编出 examples/aot"
 [ -x "$FL/target/release/examples/run" ] || die "没编出 examples/run"
 
-step "2/6 用 AOT 编译 colang.co → copper"
+step "2/6 用 AOT 编译 colang.co → $NAME"
 COPPER_PARSE_TARGET="$CO" \
 COPPER_AOT_MAX_LINES=400000 \
 COPPER_AOT_MAX_BYTES=40000000 \
-  "$FL/target/release/examples/aot" "$CO" -o "$OUT/copper" || die "AOT 编 colang.co 失败"
-[ -s "$OUT/copper" ] || die "copper 产物是空的"
+  "$FL/target/release/examples/aot" "$CO" -o "$OUT/$NAME" || die "AOT 编 colang.co 失败"
+[ -s "$OUT/$NAME" ] || die "编译器产物是空的"
 # aot 写出来的文件不一定带执行位，下面第 3 步要直接跑它
-chmod +x "$OUT/copper"
+chmod +x "$OUT/$NAME"
 
-step "3/6 用 copper 自举 → copper-self"
+step "3/6 用 $NAME 自举 → $SELFNAME"
 rm -rf "$TMP/self"
 COLANG_TARGET="$CO" \
 COLANG_MODE=build \
@@ -64,24 +67,24 @@ COLANG_OUT="$TMP/self" \
 COLANG_CRATE="$FL" \
 COPPER_RT="$RT" \
 COLANG_CARGO="$(command -v cargo)" \
-  "$OUT/copper" || die "copper 自举构建失败"
+  "$OUT/$NAME" || die "自举构建失败"
 [ -x "$TMP/self/target/release/app" ] || die "自举产物 app 不存在"
-cp "$TMP/self/target/release/app" "$OUT/copper-self"
+cp "$TMP/self/target/release/app" "$OUT/$SELFNAME"
 
 step "4/6 放 run / embed"
 cp "$FL/target/release/examples/run" "$OUT/copper-run"
 # embed 在部分检出里可能还不存在（它是后来加的例程）——没有就明说，别硬拷贝
 if [ -x "$FL/target/release/examples/embed" ]; then
   cp "$FL/target/release/examples/embed" "$OUT/copper-embed"
-  chmod +x "$OUT/copper" "$OUT/copper-self" "$OUT/copper-run" "$OUT/copper-embed"
+  chmod +x "$OUT/$NAME" "$OUT/$SELFNAME" "$OUT/copper-run" "$OUT/copper-embed"
 else
   echo "注意：examples/embed.rs 不在这次检出里，跳过 copper-embed"
-  chmod +x "$OUT/copper" "$OUT/copper-self" "$OUT/copper-run"
+  chmod +x "$OUT/$NAME" "$OUT/$SELFNAME" "$OUT/copper-run"
 fi
 
 step "5/6 冒烟（无目标文件应报提示并退 1）"
 set +e
-"$OUT/copper" > "$TMP/smoke.txt" 2>&1
+"$OUT/$NAME" > "$TMP/smoke.txt" 2>&1
 rc=$?
 set -e
 head -n 3 "$TMP/smoke.txt"
@@ -96,7 +99,7 @@ if [ "$FAST" -eq 0 ]; then
   COLANG_CRATE="$FL" \
   COPPER_RT="$RT" \
   COLANG_CARGO="$(command -v cargo)" \
-    "$OUT/copper-self" || die "copper-self 再自举失败"
+    "$OUT/$SELFNAME" || die "自举版再自举失败"
   A=$(sha256sum "$TMP/self/src/main.rs" | cut -d' ' -f1)
   B=$(sha256sum "$TMP/self2/src/main.rs" | cut -d' ' -f1)
   echo "g1 main.rs = $A"
@@ -106,7 +109,7 @@ if [ "$FAST" -eq 0 ]; then
 fi
 
 step "结果"
-for f in copper copper-self copper-run copper-embed; do
+for f in "$NAME" "$SELFNAME" copper-run copper-embed; do
   if [ -f "$OUT/$f" ]; then
     printf '%-14s %10s 字节  %s\n' "$f" "$(stat -c %s "$OUT/$f")" "$(sha256sum "$OUT/$f" | cut -d' ' -f1)"
   else
@@ -124,8 +127,8 @@ cat <<'TIP'
   1. 把这四个文件拷回 Windows 的 copper_env/bin/linux-x64/（同名覆盖）
   2. copper_env/copper.json 里 linux-x64 的 status 已经是 ready，无需改
   3. 提交前给二进制补执行位（Windows 上 git 只记 644）：
-       git update-index --chmod=+x copper_env/bin/linux-x64/copper \
-                                 copper_env/bin/linux-x64/copper-self \
+       git update-index --chmod=+x "copper_env/bin/linux-x64/$NAME" \
+                                 "copper_env/bin/linux-x64/$SELFNAME" \
                                  copper_env/bin/linux-x64/copper-run \
                                  copper_env/bin/linux-x64/copper-embed
   4. 用 `git status` 看一眼，提交这四个二进制
