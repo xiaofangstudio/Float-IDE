@@ -72,8 +72,9 @@ jobs:
         run: |
           set -eu
           mkdir -p dist
+          # 只收安装包本体：bundle 里还有被打包的 Copper 环境 exe，不能一起挂上去
           find scaffold/src-tauri/target/release/bundle -type f \
-            \( -name '*.exe' -o -name '*.msi' -o -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' \) \
+            \( -name '*setup.exe' -o -name '*.msi' -o -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' \) \
             -exec cp -v {} dist/ \;
           ls -lh dist
 
