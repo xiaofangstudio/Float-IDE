@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { api, listen } from '../core/tauri';
+import type { CopperEnvInfo } from '../core/tauri';
 
 const isTauri = (): boolean =>
   typeof window !== 'undefined' && '__TAURI_INTERNALS__' in (window as unknown as Record<string, unknown>);
@@ -474,8 +475,70 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
     }
   }, [pushLine]);
 
-  const doCopperBuild = useCallback(async (): Promise<void> => {
-    const p = bus.current.editor?.currentPath();
+  /* 环境找到了/没找到，两种说法都要把关键路径摆出来，别让人猜 */
+  const reportEnv = useCallback((info: CopperEnvInfo): void => {
+    if (!info.found) {
+      pushLine({ kind: 'err', text: `没找到可用的 Copper 环境${info.home ? `（${info.home}）` : ''}` });
+      pushLine({ kind: 'info', text: '可以：① 用命令面板「Copper: 从安装包铺设环境」；② 手动指定目录；③ 设 COPPER_HOME' });
+      return;
+    }
+    pushLine({ kind: 'info', text: `Copper 环境：${info.home}（${info.source}）` });
+    pushLine({ kind: 'out', text: `平台 ${info.platform}｜备了：${info.platforms.join(' / ') || '（无）'}｜版本 ${info.version || '未标'}` });
+    pushLine({ kind: 'out', text: `编译器 ${info.compiler}` });
+  }, [pushLine]);
+
+  /* 从下载的安装包铺开环境（zip 不给路径就自己在下载/桌面里找最新的） */
+  const doCopperInstall = useCallback(async (zip?: string): Promise<void> => {
+    setDockOpen(true);
+    setDockTab('console');
+    pushLine({ kind: 'info', text: '正在铺设 Copper 环境…' });
+    try {
+      const info = await api.copperEnvInstall(zip);
+      reportEnv(info);
+      if (info.found) pushLine({ kind: 'info', text: '环境已就绪，可以直接编 .co 了' });
+    } catch (e) {
+      pushLine({ kind: 'err', text: `铺设失败：${String(e)}` });
+    }
+  }, [pushLine, reportEnv]);
+
+  /* 手动指定环境目录：先问参数，再让后端校验并记住 */
+  const doCopperSetEnv = useCallback(async (home?: string): Promise<void> => {
+    setDockOpen(true);
+    setDockTab('console');
+    let dir = home?.trim() || '';
+    if (!dir) {
+      // 先猜工程里有没有铜环境，省得用户手打路径
+      const guess = `${projectDir}/copper_env`;
+      const typed = window.prompt('Copper 环境目录（含 copper.json 的那层）：', guess);
+      if (typed === null) return;
+      dir = typed.trim();
+    }
+    if (!dir) {
+      pushLine({ kind: 'err', text: '没给目录，取消了' });
+      return;
+    }
+    try {
+      const info = await api.copperEnvSet(dir);
+      reportEnv(info);
+      pushLine({ kind: 'info', text: '已记住这个目录，下次启动照旧生效（清掉用「Copper: 恢复自动查找」）' });
+    } catch (e) {
+      pushLine({ kind: 'err', text: `指定失败：${String(e)}` });
+    }
+  }, [projectDir, pushLine, reportEnv]);
+
+  const doCopperClearEnv = useCallback(async (): Promise<void> => {
+    setDockOpen(true);
+    setDockTab('console');
+    try {
+      const info = await api.copperEnvClear();
+      pushLine({ kind: 'info', text: '已恢复自动查找环境' });
+      reportEnv(info);
+    } catch (e) {
+      pushLine({ kind: 'err', text: `操作失败：${String(e)}` });
+    }
+  }, [pushLine, reportEnv]);
+
+  const doCopperBuild = useCallback(async (): Promise<void> => {    const p = bus.current.editor?.currentPath();
     setDockOpen(true);
     setDockTab('console');
     if (!p) {
@@ -1236,6 +1299,9 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
     { id: 'reveal', title: '在文件资源管理器中显示工程目录', run: () => void api.openPath(projectDir).catch(() => {}) },
     { id: 'export', title: '导出工程包（.floatzip）', run: () => void doExport() },
     { id: 'copper-env', title: '查看 Copper 环境（在哪、哪个平台、有哪些编译器）', run: () => void doCopperEnv() },
+    { id: 'copper-install', title: 'Copper: 从安装包铺设环境（自动找下载/桌面里的 zip）', run: () => void doCopperInstall() },
+    { id: 'copper-set-env', title: 'Copper: 手动指定环境目录', run: () => void doCopperSetEnv() },
+    { id: 'copper-clear-env', title: 'Copper: 恢复自动查找环境', run: () => void doCopperClearEnv() },
     { id: 'copper-build', title: '编成原生 exe（用环境里的 Copper 编译器）', run: () => void doCopperBuild() },
     { id: 'clear', title: '清空控制台', run: () => setLines([]) },
     { id: 'exit', title: '关闭工程，返回欢迎页', run: () => { doStop(); onExit(); } },
@@ -1301,6 +1367,8 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
         { sep: true, label: 's0c' },
         { label: '编成原生 exe（Copper 环境）', run: () => void doCopperBuild() },
         { label: '查看 Copper 环境', run: () => void doCopperEnv() },
+        { label: '从安装包铺设 Copper 环境', run: () => void doCopperInstall() },
+        { label: '手动指定 Copper 环境目录', run: () => void doCopperSetEnv() },
         { sep: true, label: 's1' },
         { label: '继续', hint: 'F8', disabled: ctl !== 'paused', run: doResume },
         { label: '单步跳过', hint: 'F10', disabled: ctl !== 'paused', run: () => doStep('over') },
@@ -1359,7 +1427,13 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
       )}
       <div className="ws-tools">
         <div className="tg">
-          <button className="tool run" onClick={() => void startRun('run')} title="运行（F5 · 编译执行）"><IconPlay size={15} /></button>
+          <button
+            className={`tool ${running ? 'danger' : 'run'}`}
+            onClick={() => (running ? doStop() : void startRun('run'))}
+            title={running ? '停止（Shift+F5）' : '运行（F5 · 编译执行）'}
+          >
+            {running ? <IconStop size={15} /> : <IconPlay size={15} />}
+          </button>
           <button className="tool debug" onClick={() => void startRun('debug')} title="调试（F6 · 解释执行，可断点单步）"><IconBug size={15} /></button>
         </div>
         <span className="tool-sep" />

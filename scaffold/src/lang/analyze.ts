@@ -50,7 +50,7 @@ export type Analysis = {
 
 const isClassDecl = (s: Stmt): s is Extract<Stmt, { k: 'decl' }> => s.k === 'decl';
 
-export function analyze(file: string, src: string): Analysis {
+export function analyze(file: string, src: string, projectNames?: Set<string>): Analysis {
   const program = parseProgram(file, src);
   const funcs: FuncSym[] = [];
   const classes: ClassSym[] = [];
@@ -185,7 +185,7 @@ export function analyze(file: string, src: string): Analysis {
   // 语法错误、语义（未定义）、类型、方法遮蔽字段四路诊断合成一份
   const diagnostics = [
     ...program.diagnostics,
-    ...semanticDiagnostics(file, program.body),
+    ...semanticDiagnostics(file, program.body, projectNames),
     ...checkTypes(file, program.body),
     ...shadowDiagnostics(file, program.body)
   ];

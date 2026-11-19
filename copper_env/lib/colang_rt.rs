@@ -164,7 +164,8 @@ pub fn out_flush() {
     });
 }
 
-/// 读一行输入（`ask`）：和 VM 的控制台风格一致——回声非空输入，EOF 给空串。
+/// 读一行输入（`ask`）：和 VM 的控制台风格一致——回声非空输入；
+/// 读到 EOF 就报错退出（和 VM 同一句话、同一退出码），不再拿空串让循环空转。
 /// 只有在终端里才每行 flush（管道/重定向时 flush 是纯 syscall 开销）
 pub fn ask_line() -> R<V> {
     use std::io::{BufRead, IsTerminal, Write};
@@ -173,7 +174,14 @@ pub fn ask_line() -> R<V> {
         let _ = std::io::stdout().flush();
     }
     let mut s = String::new();
-    let _ = std::io::stdin().lock().read_line(&mut s);
+    match std::io::stdin().lock().read_line(&mut s) {
+        Ok(0) | Err(_) => {
+            out_flush();
+            eprintln!("\n运行出错：输入已经结束（EOF）：ask 没有拿到答案");
+            std::process::exit(1);
+        }
+        Ok(_) => {}
+    }
     let t = s.trim_end_matches(['\r', '\n']).to_string();
     if !t.is_empty() {
         out_line(&t);

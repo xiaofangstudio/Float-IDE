@@ -3776,9 +3776,16 @@ function colang_build(target)
     let code = g_program(globals, fns, r["body"], readfile(rt))
     if strlen(code) == 0
         return 5
-    runcmd("mkdir " + out + " 2> nul")
-    runcmd("mkdir " + out + "\\src 2> nul")
-    writefile(pathjoin(out, "src\\main.rs"), code)
+    /* 建目录一律走原生 makedir（create_dir_all 自己递归、认斜杠、三平台同语义）。
+    /* 以前这里调 cmd 的 mkdir：cmd 把 / 当开关，路径一归一成斜杠就静默失败，
+    /* 表现成「writefile 写不进：文件不存在」——一个跨平台坑，已经踩过。 */
+    makedir(out)
+    makedir(pathjoin(out, "src"))
+    let is_win = osname() == "windows"
+    /* 生成代码统一闭嘴：AOT 发射会留下几千条 unused 警告，
+    /* 3.6 MB 的构建日志光读一遍就要命（见下面 strfind 那段注释）。 */
+    let purdah = "#![allow(dead_code, unused_variables, unused_mut, unused_imports, unused_parens, unused_assignments, unreachable_code, unused_must_use)]" + g_nl()
+    writefile(pathjoin(out, "src/main.rs"), purdah + code)
     let toml = g_ls() + "package" + g_rs() + g_nl()
     toml = toml + "name = " + g_q() + "copper_build" + g_q() + g_nl()
     toml = toml + "version = " + g_q() + "0.1.0" + g_q() + g_nl()
@@ -3793,13 +3800,29 @@ function colang_build(target)
     toml = toml + "opt-level = 3" + g_nl()
     toml = toml + g_q() + "lto" + g_q() + " = " + g_q() + "fat" + g_q() + g_nl()
     toml = toml + "codegen-units = 1" + g_nl()
-    toml = toml + "panic = " + g_q() + "abort" + g_q() + g_nl()
+    toml = toml + "panic = " + g_q() + "abort" + g_q() + g_nl() + g_nl()
+    /* 空的 [workspace] 表：构建目录如果落在 float-lang 自己的 cargo workspace 里，
+    /* cargo 会把这个生成 crate 当成员，报 "may be fixable by ensuring that this
+    /* crate is depended on by the workspace root"。加一张空 workspace 表等于声明
+    /* "我是独立单元"，构建目录放哪都不会被卷进上层 workspace。 */
+    toml = toml + g_ls() + "workspace" + g_rs() + g_nl()
     writefile(pathjoin(out, "Cargo.toml"), toml)
     print("colang build：已发射 Rust 源码，开始编译……")
     let log = pathjoin(out, "build.log")
-    runcmd("cd /d " + out + " && " + getenv("COLANG_CARGO") + " build --release > " + log + " 2>&1")
+    /* 不用 cd /d（Windows cmd 专有）：直接把 manifest-path 交给 cargo
+    /* 两边语义一致，路径带空格也不会被拆开 */
+    let cargo = getenv("COLANG_CARGO")
+    if strlen(cargo) == 0
+        cargo = "cargo"
+    let manifest = pathjoin(out, "Cargo.toml")
+    let rr = runcmd(g_q() + cargo + g_q() + " build --release --manifest-path " + g_q() + manifest + g_q() + " > " + g_q() + log + g_q() + " 2>&1")
+    /* 日志文件都不存在 = cargo 根本没起来（路径不对 / 被 shell 拆坏），
+    /* 这种要明确报出来，不能等到读日志时才报一句"读不到 build.log"。 */
+    if not hasfile(log)
+        print("colang build：cargo 没起来（退出码 " + str(rr["code"]) + "）：" + substr(rr["out"], 0, 2000))
+        return 7
     let lr = readfile(log)
-    if g_has(lr, "error[") or g_has(lr, "could not compile")
+    if strfind(lr, "error[") >= 0 or strfind(lr, "could not compile") >= 0
         let n0 = strlen(lr)
         if n0 > 4000
             print(substr(lr, n0 - 4000, 4000))
@@ -3813,7 +3836,9 @@ function colang_build(target)
             print(substr(lr, n - 4000, 4000))
         else
             print(lr)
-    let exe = pathjoin(out, "target\\release\\app.exe")
+    let exe = pathjoin(out, "target/release/app")
+    if is_win
+        exe = exe + ".exe"
     if not hasfile(exe)
         print("colang build：编译失败（看上面的 rustc 输出）")
         return 7

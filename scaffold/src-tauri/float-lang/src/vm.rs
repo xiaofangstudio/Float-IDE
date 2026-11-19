@@ -227,6 +227,12 @@ pub struct Vm {
     thrown: Option<Value>,
     /// 每个指令位置一格调用缓存
     call_ic: Vec<CallIc>,
+    /// 全局名 → 槽号。方法调用原来每帧都线性扫 global_names（编译器有上千个全局时
+    /// 15.85 ms → 85.58 ms 的 5.4 倍就是这条打出来的），这里一次建表。
+    global_index: std::collections::HashMap<Rc<str>, usize>,
+    /// 方法解析缓存：(类名, 方法名) → 槽号。子类没写就沿 __base 往上找，
+    /// 找到/没找到都记下来，避免每次调用重复走链。
+    method_ic: std::collections::HashMap<(Rc<str>, Rc<str>), Option<usize>>,
     /// 手动内存对账表
     /// 下一个调用帧的编号（&局部变量 的指针用它判断变量是否还活着）
     next_frame_id: u64,
@@ -241,6 +247,12 @@ pub struct Vm {
     input_pos: usize,
     /// 交互模式：ask 没有预设输入时"挂起等人回答"，而不是直接给空串
     interactive: bool,
+    /// 标准输入模式：没有预设输入、也没有回调时，ask 直接读 stdin 的一行。
+    /// 命令行跑脚本（`co 脚本.co` / `run.exe`）要打开它，否则 ask 永远拿到空串，
+    /// 交互脚本会在命令行里空转（和 AOT 的 ask_line 读 stdin 也不一致）。
+    stdin_mode: bool,
+    /// 跨 ask 复用的一行缓冲：连续 ask 时不会每次重新开一次 stdin
+    stdin_line: String,
     need_input: bool,
     /// 阻塞式输入回调：ask 没有预设输入时调它拿答案（回调自己负责等界面输入）。
     /// 有它时 VM 在同一次 run 里继续跑，不做「补输入重跑」——副作用只发生一次。
@@ -253,6 +265,12 @@ impl Vm {
     pub fn new(chunk: Chunk) -> Vm {
         let n = chunk.n_globals as usize;
         let chunk_len = chunk.code.len();
+        let global_index: std::collections::HashMap<Rc<str>, usize> = chunk
+            .global_names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (Rc::clone(n), i))
+            .collect();
         Vm {
             chunk,
             globals: vec![Value::Null; n],
@@ -266,6 +284,8 @@ impl Vm {
             handlers: Vec::new(),
             thrown: None,
             call_ic: vec![CallIc::default(); chunk_len],
+            global_index,
+            method_ic: std::collections::HashMap::new(),
             next_frame_id: 2,
             allocs: Vec::new(),
             reports: Vec::new(),
@@ -275,6 +295,8 @@ impl Vm {
             inputs: Vec::new(),
             input_pos: 0,
             interactive: false,
+            stdin_mode: false,
+            stdin_line: String::new(),
             need_input: false,
             input_cb: None,
             time_base: now_millis(),
@@ -372,6 +394,26 @@ impl Vm {
     /// 不再需要「补一条输入从头重跑」。
     pub fn set_input_cb(&mut self, cb: Box<dyn FnMut(&str) -> String>) {
         self.input_cb = Some(cb);
+    }
+
+    /// 打开标准输入模式：没预设输入时 ask 读 stdin 一行（读到 EOF 给空串）。
+    /// 命令行跑脚本用这个；IDE / 测试保持关着（它们各有自己的输入通道）。
+    pub fn set_stdin_mode(&mut self, on: bool) {
+        self.stdin_mode = on;
+    }
+
+    /// 读 stdin 一行；有内容返回 Some（已去掉行尾 CR/LF），
+    /// EOF 返回 None（调用方据此报错：别再拿空串硬撑）。
+    fn read_stdin_line(&mut self) -> Option<String> {
+        use std::io::BufRead;
+        self.stdin_line.clear();
+        let stdin = std::io::stdin();
+        let mut lock = stdin.lock();
+        match lock.read_line(&mut self.stdin_line) {
+            Ok(0) => None,
+            Ok(_) => Some(self.stdin_line.trim_end_matches(['\r', '\n']).to_string()),
+            Err(_) => None,
+        }
     }
 
     /// 当前 ask 的提问文本：输出里最后一行非调试内容
@@ -812,9 +854,17 @@ impl Vm {
                     let b = take(sptr, sp);
                     sp -= 1;
                     let a = take(sptr, sp);
-                    let v = match arith(op, &a, &b) {
-                        Ok(v) => v,
-                        Err(m) => return Err(self.err_at(ip, m)),
+                    // 加法交出来的是所有权：字符串拼接能走"独占就地追加"（见 concat_own）
+                    let v = if op == Op::Add {
+                        match concat_own(a, &b) {
+                            Ok(v) => v,
+                            Err(m) => return Err(self.err_at(ip, m)),
+                        }
+                    } else {
+                        match arith(op, &a, &b) {
+                            Ok(v) => v,
+                            Err(m) => return Err(self.err_at(ip, m)),
+                        }
                     };
                     std::ptr::write(sptr.add(sp), v);
                     sp += 1;
@@ -945,6 +995,54 @@ impl Vm {
                     let dg = flags & 1 != 0;
                     let sg = flags & 2 != 0;
                     let d = dst as usize;
+                    let s = src as usize;
+                    /* 整数就地快路径（`s += i` 这类热循环，每轮都要走这条）：
+                     * 只按引用读两个槽位、算完直接写回 —— 不 clone Value、
+                     * 不把目标槽位临时置空，省掉两次槽位写和一次引用计数。
+                     * 溢出（checked_* 返回 None）时故意落回慢路径，
+                     * 由那里给出整型溢出/类型不匹配的统一报错文案。 */
+                    let done = {
+                        let ap: Option<*mut Value> = if dg {
+                            if d < glen { Some(gptr.add(d)) } else { None }
+                        } else {
+                            let idx = base + d;
+                            if idx < sp { Some(sptr.add(idx)) } else { None }
+                        };
+                        let bp: Option<*const Value> = if sg {
+                            if s < glen { Some(gptr.add(s) as *const Value) } else { None }
+                        } else {
+                            let idx = base + s;
+                            if idx < sp { Some(sptr.add(idx) as *const Value) } else { None }
+                        };
+                        match (ap, bp) {
+                            (Some(ap), Some(bp)) => {
+                                if let (Value::Int(x), Value::Int(y)) = (&*ap, &*bp) {
+                                    let (x, y) = (*x, *y);
+                                    let r = match bop {
+                                        0 => x.checked_add(y),
+                                        1 => x.checked_sub(y),
+                                        2 => x.checked_mul(y),
+                                        3 if y != 0 && x % y == 0 => Some(x / y),
+                                        4 if y != 0 => Some(x % y),
+                                        _ => None,
+                                    };
+                                    match r {
+                                        Some(v) => {
+                                            *ap = Value::Int(v);
+                                            true
+                                        }
+                                        None => false,
+                                    }
+                                } else {
+                                    false
+                                }
+                            }
+                            _ => false,
+                        }
+                    };
+                    if done {
+                        continue;
+                    }
                     let b = if sg {
                         if (src as usize) < glen { (*gptr.add(src as usize)).clone() } else { Value::Null }
                     } else {
@@ -979,10 +1077,15 @@ impl Vm {
                     };
                     let v = match fast {
                         Some(v) => v,
-                        None => match compound_value(bop, a, &b) {
-                            Ok(v) => v,
-                            Err(m) => return Err(self.err_at(ip, m)),
-                        },
+                        None => {
+                            // 加法且两边都是字符串：a 已经是"搬出来的独占值"，
+                            // 走 concat_own 就能就地追加（`s += x` 不再是 O(n²)）
+                            let r = if bop == 0 { concat_own(a, &b) } else { compound_value(bop, a, &b) };
+                            match r {
+                                Ok(v) => v,
+                                Err(m) => return Err(self.err_at(ip, m)),
+                            }
+                        }
                     };
                     if dg {
                         if d < glen {
@@ -998,6 +1101,44 @@ impl Vm {
                 Op::CompoundVarConst { bop, dst, flags, k } => {
                     let dg = flags & 1 != 0;
                     let d = dst as usize;
+                    /* 同上：`s += 1` / `n = n + 1` 这类常量复合赋值走就地快路径，
+                     * 常量表按引用读，不 clone。 */
+                    let done = {
+                        let ap: Option<*mut Value> = if dg {
+                            if d < glen { Some(gptr.add(d)) } else { None }
+                        } else {
+                            let idx = base + d;
+                            if idx < sp { Some(sptr.add(idx)) } else { None }
+                        };
+                        match ap {
+                            Some(ap) if (k as usize) < klen => {
+                                if let (Value::Int(x), Value::Int(y)) = (&*ap, &*kptr.add(k as usize)) {
+                                    let (x, y) = (*x, *y);
+                                    let r = match bop {
+                                        0 => x.checked_add(y),
+                                        1 => x.checked_sub(y),
+                                        2 => x.checked_mul(y),
+                                        3 if y != 0 && x % y == 0 => Some(x / y),
+                                        4 if y != 0 => Some(x % y),
+                                        _ => None,
+                                    };
+                                    match r {
+                                        Some(v) => {
+                                            *ap = Value::Int(v);
+                                            true
+                                        }
+                                        None => false,
+                                    }
+                                } else {
+                                    false
+                                }
+                            }
+                            _ => false,
+                        }
+                    };
+                    if done {
+                        continue;
+                    }
                     let b = if (k as usize) < klen { (*kptr.add(k as usize)).clone() } else { Value::Null };
                     let a = if dg {
                         if d < glen { std::mem::replace(&mut *gptr.add(d), Value::Null) } else { Value::Null }
@@ -1024,10 +1165,15 @@ impl Vm {
                     };
                     let v = match fast {
                         Some(v) => v,
-                        None => match compound_value(bop, a, &b) {
-                            Ok(v) => v,
-                            Err(m) => return Err(self.err_at(ip, m)),
-                        },
+                        None => {
+                            // 加法且两边都是字符串：a 已经是"搬出来的独占值"，
+                            // 走 concat_own 就能就地追加（`s += x` 不再是 O(n²)）
+                            let r = if bop == 0 { concat_own(a, &b) } else { compound_value(bop, a, &b) };
+                            match r {
+                                Ok(v) => v,
+                                Err(m) => return Err(self.err_at(ip, m)),
+                            }
+                        }
                     };
                     if dg {
                         if d < glen {
@@ -1062,21 +1208,25 @@ impl Vm {
                     }
                 }
                 Op::BinLocalLocal { op, a, aflags, b, bflags } => {
-                    let av = if aflags & 1 != 0 {
+                    // 先只拿指针，整数快路径直接读，不克隆。
+                    // 以前无论走不走快路径都先 clone 两个操作数（Rc 增减各一次），
+                    // 一亿次循环就是两亿次无谓的引用计数改动。
+                    let aptr: *const Value = if aflags & 1 != 0 {
                         let i = a as usize;
-                        if i < glen { (*gptr.add(i)).clone() } else { Value::Null }
+                        if i < glen { gptr.add(i) } else { std::ptr::null() }
                     } else {
                         let i = base + a as usize;
-                        if i < sp { (*sptr.add(i)).clone() } else { Value::Null }
+                        if i < sp { sptr.add(i) } else { std::ptr::null() }
                     };
-                    let bv = if bflags & 1 != 0 {
+                    let bptr: *const Value = if bflags & 1 != 0 {
                         let i = b as usize;
-                        if i < glen { (*gptr.add(i)).clone() } else { Value::Null }
+                        if i < glen { gptr.add(i) } else { std::ptr::null() }
                     } else {
                         let i = base + b as usize;
-                        if i < sp { (*sptr.add(i)).clone() } else { Value::Null }
+                        if i < sp { sptr.add(i) } else { std::ptr::null() }
                     };
-                    if let (Value::Int(x), Value::Int(y)) = (&av, &bv) {
+                    if !aptr.is_null() && !bptr.is_null() {
+                        if let (Value::Int(x), Value::Int(y)) = (&*aptr, &*bptr) {
                         let (x, y) = (*x, *y);
                         let fast = match op {
                             0 => x.checked_add(y).map(Value::Int),
@@ -1097,7 +1247,11 @@ impl Vm {
                             sp += 1;
                             continue;
                         }
+                        }
                     }
+                    // 慢路径（浮点/字符串/列表比较等）才真去克隆两个操作数
+                    let av = if aptr.is_null() { Value::Null } else { (*aptr).clone() };
+                    let bv = if bptr.is_null() { Value::Null } else { (*bptr).clone() };
                     let v = if op <= 5 {
                         match arith(bop_to_op(op).unwrap_or(Op::Add), &av, &bv) {
                             Ok(v) => v,
@@ -1113,15 +1267,17 @@ impl Vm {
                     sp += 1;
                 }
                 Op::BinLocalK { op, slot, flags, k } => {
-                    let a = if flags & 1 != 0 {
+                    // 同 BinLocalLocal：整数快路径不克隆，慢路径才拷值
+                    let aptr: *const Value = if flags & 1 != 0 {
                         let idx = slot as usize;
-                        if idx < glen { (*gptr.add(idx)).clone() } else { Value::Null }
+                        if idx < glen { gptr.add(idx) } else { std::ptr::null() }
                     } else {
                         let idx = base + slot as usize;
-                        if idx < sp { (*sptr.add(idx)).clone() } else { Value::Null }
+                        if idx < sp { sptr.add(idx) } else { std::ptr::null() }
                     };
-                    let b = if (k as usize) < klen { (*kptr.add(k as usize)).clone() } else { Value::Null };
-                    if let (Value::Int(x), Value::Int(y)) = (&a, &b) {
+                    let bptr: *const Value = if (k as usize) < klen { kptr.add(k as usize) } else { std::ptr::null() };
+                    if !aptr.is_null() && !bptr.is_null() {
+                        if let (Value::Int(x), Value::Int(y)) = (&*aptr, &*bptr) {
                         let (x, y) = (*x, *y);
                         let fast = match op {
                             0 => x.checked_add(y).map(Value::Int),
@@ -1142,7 +1298,10 @@ impl Vm {
                             sp += 1;
                             continue;
                         }
+                        }
                     }
+                    let a = if aptr.is_null() { Value::Null } else { (*aptr).clone() };
+                    let b = if bptr.is_null() { Value::Null } else { (*bptr).clone() };
                     let v = if op <= 5 {
                         match arith(bop_to_op(op).unwrap_or(Op::Add), &a, &b) {
                             Ok(v) => v,
@@ -1232,6 +1391,23 @@ impl Vm {
                                 n
                             )));
                         }
+                        /* 少给实参不许静默补 null：没有默认值的参数一个都不能少。
+                         * 有默认值的参数才允许缺（按位置补默认值）。 */
+                        let req = proto
+                            .params
+                            .iter()
+                            .rposition(|p| p.default.is_none())
+                            .map(|i| i + 1)
+                            .unwrap_or(0);
+                        if n < req {
+                            return Err(self.err_at(ip, format!(
+                                "函数 {} 需要 {} 个参数，实际给了 {} 个（缺第 {} 个）",
+                                pretty_fn_name(proto.name.as_ref()),
+                                req,
+                                n,
+                                n + 1
+                            )));
+                        }
                         // 参数不足补默认值
                         if n < nparams {
                             for k in n..nparams {
@@ -1290,23 +1466,34 @@ impl Vm {
                         _ => None,
                     };
                     if let Some(mut cls) = cls {
-                        // 沿着 __base 往上找：子类没写的方法用父类的
-                        let mut found = None;
-                        for _ in 0..16 {
-                            let want_name = format!("__m_{}_{}", cls, name);
-                            if let Some(slot) = self.chunk.global_names.iter().position(|g| &**g == want_name.as_str()) {
-                                found = Some(slot);
-                                break;
-                            }
+                        /* 先看方法缓存：编译器这种上千个函数的程序里，
+                         * 每次调用都重新 format + 线性扫全局名是很贵的一笔。 */
+                        let cache_key = (Rc::from(cls.as_str()), name.clone());
+                        let cached = self.method_ic.get(&cache_key).copied();
+                        let mut found = match cached {
+                            Some(hit) => hit,
+                            None => {
+                                // 沿着 __base 往上找：子类没写的方法用父类的
+                                let mut f: Option<usize> = None;
+                                for _ in 0..16 {
+                                    let want_name = format!("__m_{}_{}", cls, name);
+                                    if let Some(slot) = self.global_index.get(want_name.as_str()).copied() {
+                                        f = Some(slot);
+                                        break;
+                                    }
                             let parent = match &*sptr.add(recv_idx) {
                                 Value::Dict(d) => d.borrow().get("__base").map(|v| v.to_display()),
                                 _ => None,
                             };
-                            match parent {
-                                Some(p) => cls = p,
-                                None => break,
+                                    match parent {
+                                        Some(p) => cls = p,
+                                        None => break,
+                                    }
+                                }
+                                self.method_ic.insert(cache_key, f);
+                                f
                             }
-                        }
+                        };
                         if let Some(slot) = found {
                             let fv = (*gptr.add(slot)).clone();
                             if let Value::Func(f) = fv {
@@ -1314,8 +1501,23 @@ impl Vm {
                                 if self.frames.len() >= MAX_DEPTH {
                                     return Err(self.err_at(ip, format!("递归太深了（超过 {} 层）", MAX_DEPTH)));
                                 }
-                                // 实参不够就用默认值补
+                                // 实参不够就用默认值补；没有默认值的参数缺了就明确报错
                                 if n + 1 < nparams {
+                                    let req = f
+                                        .params
+                                        .iter()
+                                        .rposition(|p| p.default.is_none())
+                                        .map(|i| i + 1)
+                                        .unwrap_or(0);
+                                    if n + 1 < req {
+                                        return Err(self.err_at(ip, format!(
+                                            "方法 {} 需要 {} 个参数，实际给了 {} 个（缺第 {} 个）",
+                                            name,
+                                            req - 1,
+                                            n,
+                                            n + 1
+                                        )));
+                                    }
                                     for k in (n + 1)..nparams {
                                         std::ptr::write(
                                             sptr.add(sp),
@@ -1497,6 +1699,22 @@ impl Vm {
                             )));
                         }
                         if n < nparams {
+                            /* 同上：没有默认值的参数不许缺 */
+                            let req = proto
+                                .params
+                                .iter()
+                                .rposition(|p| p.default.is_none())
+                                .map(|i| i + 1)
+                                .unwrap_or(0);
+                            if n < req {
+                                return Err(self.err_at(ip, format!(
+                                    "函数 {} 需要 {} 个参数，实际给了 {} 个（缺第 {} 个）",
+                                    pretty_fn_name(proto.name.as_ref()),
+                                    req,
+                                    n,
+                                    n + 1
+                                )));
+                            }
                             for k in n..nparams {
                                 std::ptr::write(
                                     sptr.add(sp),
@@ -1769,6 +1987,19 @@ impl Vm {
                         let prompt = self.prompt_text();
                         // is_some 已确认，这里 unwrap 不会 panic；先借 prompt 再借 cb，避免同时借 self
                         (self.input_cb.as_mut().unwrap())(&prompt)
+                    } else if self.stdin_mode {
+                        // 命令行：直接读一行（和 AOT 的 ask_line 同一口径）。
+                        // 读到 EOF 就是"没答案了"——报错退出，跟 python 的 ctrl-D 一个意思，
+                        // 而不是悄悄给空串让 while 循环空转（那会把输出撑爆 32MB 护栏）。
+                        match self.read_stdin_line() {
+                            Some(v) => v,
+                            None => {
+                                return Err(self.err_at(
+                                    ip,
+                                    "输入已经结束（EOF）：ask 没有拿到答案".to_string(),
+                                ))
+                            }
+                        }
                     } else if self.interactive {
                         // 老的重跑式兜底（没注入回调时）：标记"等人回答"
                         self.need_input = true;
@@ -2430,8 +2661,48 @@ pub fn arith(op: Op, a: &Value, b: &Value) -> Result<Value, String> {
     })
 }
 
-pub fn compare(op: Op, a: &Value, b: &Value) -> Result<bool, String> {
-    if op == Op::Eq {
+/// `a + b` 的"所有权版"：可用于 `s = s + x` 这种把旧值整个交出来的场合。
+///
+/// 为什么值得单独做一条：`arith(Add)` 只拿到 `&Value`，拼接必然新分配一个 String 再把
+/// 旧内容整串拷过去 —— `while …: s = s + "…"` 就是 O(n²)，30 万次拼接实测 306 秒。
+/// 这里在**引用计数为 1**（没有别的变量/容器还指着这个字符串）时用 `Rc::get_mut`
+/// 拿到 `&mut String` 原地追加：String 扩容是倍增的，摊还下来就是 O(1)。
+/// 引用计数不为 1 时退回"新建再拷"，语义与值语义完全一致（不会原地改到别人的副本）。
+pub fn concat_own(mut a: Value, b: &Value) -> Result<Value, String> {
+    let both_str = matches!((&a, b), (Value::Str(_), Value::Str(_)));
+    if !both_str {
+        return arith(Op::Add, &a, b);
+    }
+    let (la, lb) = match (&a, b) {
+        (Value::Str(sa), Value::Str(sb)) => (sa.len(), sb.len()),
+        _ => (0, 0),
+    };
+    crate::limits::guard_string(la, lb)?;
+    let appended = {
+        let m = match (&mut a, b) {
+            (Value::Str(rc), Value::Str(sb)) => {
+                let s = sb.as_str();
+                Rc::get_mut(rc).map(|buf| buf.push_str(s)).map(|_| ())
+            }
+            _ => None,
+        };
+        m.is_some()
+    };
+    if appended {
+        return Ok(a);
+    }
+    // 共享（或取不到独占）：按值语义生成新串
+    let mut ns = String::with_capacity(la + lb);
+    if let Value::Str(sa) = &a {
+        ns.push_str(sa.as_str());
+    }
+    if let Value::Str(sb) = b {
+        ns.push_str(sb.as_str());
+    }
+    Ok(Value::string(ns))
+}
+
+pub fn compare(op: Op, a: &Value, b: &Value) -> Result<bool, String> {if op == Op::Eq {
         return Ok(a.deep_eq(b));
     }
     if op == Op::Ne {
@@ -2470,6 +2741,14 @@ fn norm_index(i: &Value, len: usize) -> Result<usize, String> {
     Ok(idx as usize)
 }
 
+/// 把下标/键取成 `&str` 视图：字符串直接借用（零拷贝），其它类型才走 to_display。
+fn key_text(v: &Value) -> std::borrow::Cow<'_, str> {
+    match v {
+        Value::Str(s) => std::borrow::Cow::Borrowed(s.as_str()),
+        other => std::borrow::Cow::Owned(other.to_display()),
+    }
+}
+
 pub fn index_get(obj: &Value, idx: &Value) -> Result<Value, String> {
     match obj {
         Value::List(l) => {
@@ -2485,8 +2764,9 @@ pub fn index_get(obj: &Value, idx: &Value) -> Result<Value, String> {
         Value::Dict(d) => {
             // 缺键给 null：Copper 是拿来处理脏 JSON 的，可选字段缺失不该让整段脚本崩。
             // 要严格就用 data.require(d, 键)，它缺键会抛「字典里没有键」。
-            let key = idx.to_display();
-            Ok(d.borrow().get(&key).unwrap_or(Value::Null))
+            // 键本身是字符串时直接借用，不为了取键把整串再拷一遍。
+            let key = key_text(idx);
+            Ok(d.borrow().get(key.as_ref()).unwrap_or(Value::Null))
         }
         Value::Ptr(p) => {
             let m = p.borrow();
@@ -2582,9 +2862,9 @@ pub fn index_set(obj: &Value, idx: &Value, val: Value) -> Result<(), String> {
             Ok(())
         }
         Value::Dict(d) => {
-            let key = Rc::from(idx.to_display().as_str());
+            let key = key_text(idx);
             crate::limits::guard_dict(d.borrow().len(), 1)?;
-            d.borrow_mut().set(key, val.clone_deep());
+            d.borrow_mut().set_str(key.as_ref(), val.clone_deep());
             Ok(())
         }
         Value::Ptr(p) => {

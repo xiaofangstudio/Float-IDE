@@ -304,7 +304,7 @@ export function Welcome({ onOpenProject, onOpenFile }: {
     <div className="wc" style={{ position: 'relative' }}>
       <TitleBar
         title="Float IDE"
-        subtitle="代码世界脚本工作室"
+        subtitle="小方工作室"
         right={<button className="tb-link" onClick={() => setShowAppearance(true)}><IconImage size={13} /> 外观</button>}
       />
 
@@ -351,7 +351,6 @@ export function Welcome({ onOpenProject, onOpenFile }: {
           <div className="wc-hero">
             <div className="wc-logo"><Logo size={84} /></div>
             <h1>欢迎使用 Float IDE</h1>
-            <p className="wc-sub">给代码世界一个正经的 IDE</p>
 
             <div className="wc-cards">
               {cards.map((c) => (

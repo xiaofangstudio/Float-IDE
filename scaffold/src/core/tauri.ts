@@ -154,6 +154,12 @@ export const api = {
    * 环境缺失时后端返回 found=false，前端要明说"先装环境"，不准静默退回内置实现。 */
   copperEnvInfo: () => invoke<CopperEnvInfo>('copper_env_info'),
   copperEnvCompilers: () => invoke<CopperCompilerInfo[]>('copper_env_compilers'),
+  /** 手动指定环境目录（会校验；记在配置里，下次启动照旧生效） */
+  copperEnvSet: (home: string) => invoke<CopperEnvInfo>('copper_env_set', { home }),
+  /** 清掉手动指定，回到自动查找 */
+  copperEnvClear: () => invoke<CopperEnvInfo>('copper_env_clear'),
+  /** 从下载的安装包（zip）铺开环境；不给路径就自己在下载/桌面里找最新的 Copper*.zip */
+  copperEnvInstall: (zip?: string) => invoke<CopperEnvInfo>('copper_env_install', { zip: zip ?? null }),
   copperBuild: (file: string, outDir?: string, useSelf?: boolean) =>
     invoke<CopperBuildResult>('copper_build', {
       file,

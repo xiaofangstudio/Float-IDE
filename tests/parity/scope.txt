@@ -1,0 +1,191 @@
+### 块内声明在块外可见（if）
+int a = 1
+if (a > 0)
+    int b = 7
+print(a, b)
+### 块内重新声明同名变量（同一函数作用域）
+int a = 1
+if (a > 0)
+    int a = 2
+print(a)
+### while 体内声明在循环后可见
+int n = 0
+while n < 1
+    int c = 5
+    n += 1
+print(c)
+### 循环变量活到循环外
+for i in range(3)
+    print(i)
+print(i)
+### 外层同名变量被循环复用
+int i = 99
+for i in range(2)
+    print(i)
+print(i)
+### 嵌套同名循环互不干扰
+for i in range(2)
+    for i in range(2)
+        print(i)
+print(i)
+### for-in 变量活到循环外
+for x in [7, 8]
+    print(x)
+print(x)
+### 函数参数遮蔽全局
+int g = 1
+fn f(int g)
+    return g
+print(f(9), g)
+### 函数内局部遮蔽全局，改的是局部
+int g = 1
+fn f()
+    int g = 2
+    g = 3
+    return g
+print(f(), g)
+### 函数内不改声明直接写全局
+int g = 1
+fn bump()
+    g = g + 4
+bump()
+print(g)
+### 全局列表在函数里 push
+list xs = [1]
+fn addone()
+    xs.push(9)
+addone()
+print(xs)
+### 嵌套函数捕获外层局部并回写
+fn outer()
+    int n = 1
+    fn inc()
+        n = n + 1
+        return n
+    inc()
+    inc()
+    return n
+print(outer())
+### 嵌套函数捕获参数
+fn outer(int start)
+    fn step()
+        start = start + 10
+        return start
+    return step()
+print(outer(5))
+### 嵌套函数按引用：改外层后读到新值
+fn outer()
+    int base = 1
+    fn read()
+        return base
+    base = 42
+    return read()
+print(outer())
+### 循环里定义并调用嵌套函数
+fn outer()
+    int acc = 0
+    for k in range(3)
+        fn add()
+            acc = acc + k
+        add()
+    return acc
+print(outer())
+### lambda 捕获外层变量
+fn outer()
+    int base = 100
+    list xs = [1, 2]
+    fn times(x)
+        return x + base
+    return data.map(xs, times)
+print(outer())
+### 类字段与方法局部同名
+class C
+    int v = 5
+    fn get()
+        return v
+    fn shadow()
+        int v = 9
+        return v
+C c = new C()
+print(c.get(), c.shadow())
+### 类方法里改字段（不写 self）
+class B
+    int hp = 10
+    fn hurt(d)
+        hp -= d
+        return hp
+B b = new B()
+print(b.hurt(3), b.hp)
+### 方法参数与字段同名
+class D
+    int hp = 10
+    fn set(int hp)
+        return hp + 1
+print(new D().set(4))
+### catch 变量作用域
+try
+    throw "boom"
+catch e
+    print("接到：" + e)
+### try 里声明的变量出了 try 还能用
+try
+    int t = 3
+    t = t + 1
+finally
+    print(t)
+### finally 里读到 try 内的变量
+fn work()
+    try
+        int k = 8
+        return k
+    finally
+        print("收尾 " + k)
+print(work())
+### 列表按引用传参，重新赋值不影响外面
+fn addone(list xs)
+    xs.push(9)
+fn swap(list xs)
+    xs = [7]
+list a = [1]
+addone(a)
+swap(a)
+print(a)
+### 字典按引用传参
+fn bump(dict d)
+    d.hp = d.hp + 1
+dict m = {"hp": 1}
+bump(m)
+print(m.hp)
+### 递归每次调用独立局部
+fn f(int n)
+    if (n <= 0)
+        return 0
+    int local = n * 2
+    return local + f(n - 1)
+print(f(3))
+### 默认参数引用前一个参数
+fn area(int w, int h = w)
+    return w * h
+print(area(3), area(3, 4))
+### 指针取局部地址，嵌套函数通过指针写回
+fn outer()
+    int x = 1
+    fn poke(ptr p)
+        *p = *p + 5
+    poke(&x)
+    return x
+print(outer())
+### 中文变量名的作用域
+int 数量 = 2
+fn 加倍(数量)
+    int 结果 = 数量 * 2
+    return 结果
+print(加倍(5), 数量)
+### 遮蔽后循环里再声明同名
+int i = 1
+fn f()
+    int i = 2
+    for i in range(2)
+        print(i)
+    return i
+print(f(), i)

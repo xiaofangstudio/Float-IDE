@@ -15,7 +15,49 @@ use crate::ast::{Param, Stmt};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::rc::Rc;
+
+/// FxHash（rustc 内部用的那套）：乘法 + 旋转，比默认 SipHash 快 3~5 倍。
+/// 字典是本语言最热的容器（编译器的每个 token、每个 AST 节点都是字典），
+/// 换哈希函数不动任何对外语义，纯粹少算几轮。
+#[derive(Default)]
+pub struct FxHasher(u64);
+
+impl Hasher for FxHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut h = self.0;
+        let mut chunks = bytes.chunks_exact(8);
+        for c in &mut chunks {
+            let mut a = [0u8; 8];
+            a.copy_from_slice(c);
+            h = (h.rotate_left(5) ^ u64::from_le_bytes(a)).wrapping_mul(0x517c_c1b7_2722_0a95);
+        }
+        for &b in chunks.remainder() {
+            h = (h.rotate_left(5) ^ b as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
+        }
+        self.0 = h;
+    }
+    #[inline]
+    fn write_u8(&mut self, n: u8) {
+        self.write(&[n]);
+    }
+    #[inline]
+    fn write_u64(&mut self, n: u64) {
+        self.0 = (self.0.rotate_left(5) ^ n).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+    #[inline]
+    fn write_usize(&mut self, n: usize) {
+        self.write_u64(n as u64);
+    }
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+pub type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
 
 pub type ListRef = Rc<RefCell<Vec<Value>>>;
 
@@ -116,7 +158,7 @@ pub struct Closure {
 #[derive(Default, Debug)]
 pub struct Dict {
     keys: Vec<Rc<str>>,
-    map: HashMap<Rc<str>, Value>,
+    map: FastMap<Rc<str>, Value>,
 }
 
 impl Dict {
@@ -129,6 +171,22 @@ impl Dict {
             self.keys.push(Rc::clone(&k));
         }
         self.map.insert(k, v);
+    }
+
+    /// 用 `&str` 写字典：键已存在就**只换值、复用原来的键 Rc**。
+    ///
+    /// 为什么单独拿一条：`d["a"] = i` 在循环里跑，以前每次都要
+    /// `idx.to_display()` 拷出一个 String，再 `Rc::from` 再分配一个键，
+    /// 一次写入两个堆分配。字典热路径上这比哈希本身还贵。
+    pub fn set_str(&mut self, k: &str, v: Value) {
+        if let Some((old, _)) = self.map.get_key_value(k) {
+            let old = Rc::clone(old);
+            self.map.insert(old, v);
+            return;
+        }
+        let key: Rc<str> = Rc::from(k);
+        self.keys.push(Rc::clone(&key));
+        self.map.insert(key, v);
     }
 
     pub fn get(&self, k: &str) -> Option<Value> {

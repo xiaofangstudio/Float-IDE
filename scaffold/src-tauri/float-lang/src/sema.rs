@@ -390,7 +390,7 @@ impl Checker {
 
     fn expr(&mut self, e: &Expr) {
         match &e.kind {
-            ExprKind::Num(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Null => {}
+            ExprKind::Num(_) | ExprKind::Int(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Null => {}
             ExprKind::Var(name) => {
                 if self.is_defined(name) {
                     self.mark_used(name);

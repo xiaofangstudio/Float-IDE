@@ -118,7 +118,15 @@ export function ConsoleDock({ lines, askQuestion, onAnswer, running, stateText, 
               <button className="btn primary" style={{ fontSize: 12, padding: '5px 14px' }} type="submit">回答</button>
             </form>
           )}
-          {running && askQuestion === null && <div className="console-running">脚本运行中……</div>}
+          {running && askQuestion === null && (
+            stateText.indexOf('已暂停') >= 0 ? (
+              <div className="console-running paused-hint">
+                已暂停 · 按 <b>F8</b> 继续（F10 跳过 / F11 进入 / Shift+F11 跳出）
+              </div>
+            ) : (
+              <div className="console-running">脚本运行中……</div>
+            )
+          )}
         </div>
       ) : (
         <TerminalLazy projectDir={projectDir} visible={tab === 'terminal'} />

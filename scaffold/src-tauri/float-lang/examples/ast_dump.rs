@@ -87,6 +87,7 @@ fn esc(s: &str) -> String {
 
 fn expr_str(e: &Expr) -> String {
     match &e.kind {
+        ExprKind::Int(n) => format!("Num({})", n),
         ExprKind::Num(f) => format!("Num({})", float_lang::value::fmt_float(*f)),
         ExprKind::Str(s) => format!("Str(\"{}\")", esc(s)),
         ExprKind::Bool(b) => format!("Bool({})", b),

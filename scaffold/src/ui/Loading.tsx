@@ -33,7 +33,7 @@ export function Loading({ onDone }: { onDone: () => void }) {
     <div className="loading-wrap">
       <div className="loading-logo"><Logo size={96} /></div>
       <div style={{ fontSize: 22, fontWeight: 800, letterSpacing: 3 }}>Float IDE</div>
-      <div style={{ fontSize: 11, letterSpacing: 2, color: 'var(--txt3)', marginTop: 2 }}>代码世界脚本工作室</div>
+      <div style={{ fontSize: 11, letterSpacing: 2, color: 'var(--txt3)', marginTop: 2 }}>小方工作室</div>
       <div className="loading-bar"><div style={{ width: `${p * 100}%` }} /></div>
       <div className="loading-tip">{tip}</div>
     </div>

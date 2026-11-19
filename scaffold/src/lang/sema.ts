@@ -154,12 +154,22 @@ function suggest(name: string, pool: Iterable<string>): string | null {
   return best;
 }
 
-/** 在解析诊断之外，补上「未定义的名字」这类语义提示 */
-export function semanticDiagnostics(file: string, body: Stmt[]): Diagnostic[] {
+/** 只取这个文件顶层声明的名字（跨文件总表用，不跑语义检查） */
+export function toplevelNames(body: Stmt[]): string[] {
+  return [...collect(body).declared];
+}
+
+/** 在解析诊断之外，补上「未定义的名字」这类语义提示
+ * `project` 是「本文件 + 它 import 的文件」汇总出来的名字总表：
+ * 有 import 的文件不再一律免检，而是先查总表，表里也没有才报「没定义」。
+ */
+export function semanticDiagnostics(file: string, body: Stmt[], project?: Set<string>): Diagnostic[] {
   const { declared, refs, hasImport } = collect(body);
-  if (hasImport) return [];
+  // 有 import 又拿不到总表（依赖还没解析出来）：保持沉默，宁可不报也不误报
+  if (hasImport && !project) return [];
 
   const known = new Set<string>([...declared, ...BUILTINS, ...SPECIAL, 'self', 'this', 'super', 'ans']);
+  if (project) for (const n of project) known.add(n);
   const out: Diagnostic[] = [];
   const seen = new Set<string>();
 
@@ -174,7 +184,7 @@ export function semanticDiagnostics(file: string, body: Stmt[]): Diagnostic[] {
     out.push({
       severity: 'warning',
       code: r.call ? 'undefined-fn' : 'undefined-var',
-      message: `${what}「${r.name}」没有定义${hint ? `，是不是想写「${hint}」？` : '（先声明或赋值）'}`,
+      message: `${what}「${r.name}」没有定义${hint ? `，是不是想写「${hint}」？` : (hasImport ? '（本文件和它 import 的文件里都没有）' : '（先声明或赋值）')}`,
       span: {
         file,
         line: r.span.line,

@@ -72,3 +72,43 @@ fn 类里字段与方法局部同名() {
     assert_eq!(out("class C\n    int v = 5\n    fn get()\n        return v\nprint(new C().get())\n"), "5");
     assert_eq!(out("class C\n    int v = 5\n    fn get()\n        int v = 9\n        return v\nprint(new C().get())\n"), "9");
 }
+
+/* ───────── 方法参数带类型：以前把类型词当成参数名，arity 直接算错 ───────── */
+
+#[test]
+fn 方法参数带类型_arity_正确() {
+    assert_eq!(
+        out("class D\n    int hp = 10\n    fn set(int v)\n        return v + 1\nprint(new D().set(4))\n"),
+        "5"
+    );
+    assert_eq!(
+        out("class D\n    int hp = 10\n    fn set(int hp)\n        return hp + 1\nprint(new D().set(4))\n"),
+        "5"
+    );
+    // 两个带类型参数 + 默认值
+    assert_eq!(
+        out("class E\n    int a = 0\n    fn sum(int x, int y = 10)\n        return x + y\nprint(new E().sum(1), new E().sum(1, 2))\n"),
+        "11 3"
+    );
+}
+
+/* ───────── return 提前出门时 finally 必须照跑（而且不能静默跳过） ───────── */
+
+#[test]
+fn return_局部变量时_finally_照跑() {
+    assert_eq!(
+        out("fn work()\n    try\n        int k = 8\n        return k\n    finally\n        print(\"收尾\")\nprint(work())\n"),
+        "收尾\n8"
+    );
+    // 返回值不能因为 finally 里 set 了别的变量而串味
+    assert_eq!(
+        out("fn f()\n    try\n        int k = 1\n        return k\n    finally\n        k = 99\nprint(f())\n"),
+        "1"
+    );
+    // 没有 finally 时快路径照旧（别为了修这个把性能路径砍掉）
+    assert_eq!(out("fn g()\n    int k = 3\n    return k\nprint(g())\n"), "3");
+    // finally 里抛错要冒到外面，不能被吞
+    let e = err("fn h()\n    try\n        return 1\n    finally\n        throw \"收尾炸了\"\nprint(h())\n");
+    assert!(e.contains("收尾炸了"), "实际：{e}");
+}
+

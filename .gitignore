@@ -56,3 +56,17 @@ scaffold/src-tauri/float-lang/bootstrap/*.py
 
 # ===== Copper 环境里的二进制（走 Releases 分发，源码与脚本入库）=====
 copper_env/bin/*.exe
+
+# ===== 自举 / 压测 / 调试的中间目录（约 280MB，不入库；需要时本机重新生成）=====
+scaffold/src-tauri/float-lang/_selfhost/
+scaffold/src-tauri/float-lang/_bench/
+scaffold/src-tauri/float-lang/_cls/
+scaffold/src-tauri/float-lang/_fuzz/
+scaffold/src-tauri/float-lang/_scope/
+scaffold/src-tauri/float-lang/_silent/
+scaffold/src-tauri/float-lang/_stress/
+scaffold/src-tauri/float-lang/_backup_*/
+scaffold/src-tauri/float-lang/_verified_*/
+
+# ===== 本机 PATH 备份（不随仓库走，清理时也别删）=====
+copper_env/_path_backup_*.txt

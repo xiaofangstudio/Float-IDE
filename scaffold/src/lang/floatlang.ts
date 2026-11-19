@@ -57,6 +57,8 @@ import {
   analyze, classAtLine, classFields, classMethods,
   type Analysis, type OutlineItem
 } from './analyze';
+import { parseProgram } from './parse';
+import { toplevelNames } from './sema';
 
 /* Copper（原 CW Script）编辑器支持：Monarch 高亮、AST 驱动的补全 / 悬停 / 签名提示 / 实时诊断 / 大纲。
  *
@@ -77,9 +79,56 @@ export function analysisOf(model: monaco.editor.ITextModel): Analysis {
   const hit = cache.get(model);
   const version = model.getVersionId();
   if (hit && hit.version === version) return hit.analysis;
-  const analysis = analyze(model.uri.path.split('/').pop() || 'main.co', model.getValue());
+  const analysis = analyze(model.uri.path.split('/').pop() || 'main.co', model.getValue(), importNamesOf(model));
   cache.set(model, { version, analysis });
   return analysis;
+}
+
+/* ── 跨文件名字总表 ──
+ * 「这个文件里没定义」不能直接报错：名字也可能来自它 import 的文件。
+ * 顺着 import 把依赖里的顶层定义（变量 / 列表 / 字典 / 函数 / 类）全收进来，
+ * 只有总表里也没有，才算真的没定义。依赖还没解析完（读盘是异步的）时返回
+ * undefined，这一轮先不报，下次校验再查表。 */
+const importNamesCache = new WeakMap<monaco.editor.ITextModel, { key: string; names: Set<string> | null }>();
+
+function importNamesOf(model: monaco.editor.ITextModel): Set<string> | undefined {
+  const code = model.getValue();
+  if (!/^[\t ]*import[ \t]+/m.test(code)) return undefined;
+
+  const srcs: string[] = [];
+  const seen = new Set<string>();
+  let complete = true;
+  const walk = (src: string, depth: number): void => {
+    if (depth > 4) return;
+    const re = /^[\t ]*import[ \t]+["']?([^"'\s;)]+)/gm;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(src)) !== null) {
+      const want = m[1];
+      if (seen.has(want)) continue;
+      seen.add(want);
+      const text = findImported(model, want);
+      if (!text) { complete = false; continue; }
+      srcs.push(text);
+      walk(text, depth + 1);
+    }
+  };
+  walk(code, 0);
+
+  const key = `${model.getVersionId()}|${[...seen].join(',')}`;
+  const hit = importNamesCache.get(model);
+  if (hit && hit.key === key) return hit.names ?? undefined;
+  if (!complete) {
+    importNamesCache.set(model, { key, names: null });
+    return undefined;
+  }
+  const names = new Set<string>();
+  for (const src of srcs) {
+    try {
+      for (const n of toplevelNames(parseProgram('dep.co', src).body)) names.add(n);
+    } catch { /* 依赖自己语法坏了不归这里管 */ }
+  }
+  importNamesCache.set(model, { key, names });
+  return names;
 }
 
 /* ── import 进来的符号 ──

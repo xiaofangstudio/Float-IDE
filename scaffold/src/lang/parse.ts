@@ -1656,6 +1656,13 @@ export function parseProgram(file: string, src: string): Program {
     let idx = 0;
     while (idx < toks.length) {
       let type: TypeName | null = null;
+      /* lazy 参数：`fn bool AND2(bool x, lazy bool y)` —— 调用处不求值，
+       * 函数体每次读到 y 才按调用方的环境算一遍（by-name，和 Rust 内核一致）。 */
+      let lazy = false;
+      if (toks[idx]?.k === 'ident' && toks[idx].v === 'lazy' && toks[idx + 1]) {
+        lazy = true;
+        idx++;
+      }
       if (toks[idx]?.k === 'ident' && TYPE_WORDS.has(toks[idx].v) && toks[idx + 1]?.k === 'ident') {
         type = (toks[idx].v === 'addr' ? 'ptr' : toks[idx].v) as TypeName;
         idx++;
@@ -1679,7 +1686,7 @@ export function parseProgram(file: string, src: string): Program {
         if (!sub.length) throw new ParseError(`参数 ${nameTok.v} 的默认值为空`, nameTok, 'param-default');
         def = exprOf(sub);
       }
-      out.push({ name: nameTok.v, type, def, line: nameTok.line, col: nameTok.col });
+      out.push({ name: nameTok.v, type, def, lazy, line: nameTok.line, col: nameTok.col });
       if (toks[idx]?.v === ',') { idx++; continue; }
       break;
     }

@@ -7,6 +7,7 @@ import { normPath, setSourceProvider } from '../core/sources';
 import type { ProblemItem } from '../core/types';
 import { registerFloatLanguage, LANG_ID, validateModel } from '../lang/floatlang';
 import { isCopperFile } from '../lang/spec';
+import { MdPreview } from './MdPreview';
 import { loadSettings, SETTINGS_EVENT, type Settings } from '../ui/settings';
 import { askChoice, askText } from '../ui/prompt';
 import { IconClose, IconPlus } from '../ui/icons';
@@ -222,7 +223,7 @@ type Props = {
   /** 当前文件的诊断列表（状态栏与问题面板用） */
   onProblems?: (items: ProblemItem[]) => void;
   /** 当前激活文件名（标题栏用） */
-  onActiveFile?: (name: string) => void;
+  onActiveFile?: (name: string, path: string | null) => void;
   /** 缓冲区有变化（输入 / 切标签 / 外部覆盖）：
    *  右侧大纲、搜索索引这些"读内存"的 UI 全靠它触发刷新，
    *  谁也不许再回头读磁盘上的旧文件。 */
@@ -249,6 +250,8 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
 
   const [tabs, setTabs] = useState<string[]>([]);
   const [activeTab, setActiveTab] = useState<string | null>(null);
+  /* Markdown 预览开关：md 文件默认分屏预览，手动关掉后整个会话保持关（再点一次按钮重开） */
+  const [mdOff, setMdOff] = useState(false);
   /* 文档标签页（教程/插件/MCP/设置…）。和文件标签并存，点哪个显示哪个。 */
   const [docTabs, setDocTabs] = useState<DocTab[]>([]);
   const [activeDoc, setActiveDoc] = useState<string | null>(null);
@@ -721,7 +724,8 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
   onEditRef.current = onEdit;
 
   const notifyActive = useCallback((p: string | null): void => {
-    onActiveFile?.(p ? (p.split(/[\\/]/).pop() ?? '') : '');
+    // path 直接随事件带出去：等渲染完再让外面反查 currentPath() 会拿到上一个文件（ref 渲染期才同步）
+    onActiveFile?.(p ? (p.split(/[\\/]/).pop() ?? '') : '', p);
     // 切了文件：右侧大纲要立刻换成新文件的内存内容
     buffersChangeRef.current?.();
   }, [onActiveFile]);
@@ -818,8 +822,7 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
     });
   }, []);
 
-  const closeTab = useCallback((path: string): void => {
-    setTabs((t) => {
+  const closeTab = useCallback((path: string): void => {    setTabs((t) => {
       const next = t.filter((p) => p !== path);
       if (activeTab === path) {
         const n = next[next.length - 1] ?? null;
@@ -828,10 +831,12 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
           const m = modelsRef.current.get(n);
           if (m) edRef.current?.setModel(m);
         } else if (!n && !diffSpec) edRef.current?.setModel(null);
+        // 关的是当前标签：树的「当前文件」高亮也要跟着退到 fallback / 清掉
+        notifyActive(diffSpec ? null : n);
       }
       return next;
     });
-  }, [activeTab, diffSpec]);
+  }, [activeTab, diffSpec, notifyActive]);
 
   /** 标签栏「+」：在工程根新建一个 .co 文件并打开 */
   const newFile = useCallback(async (): Promise<void> => {
@@ -957,6 +962,10 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
     return () => { delete bus.current.editor; };
   }, [bus, openFile, closeTab, saveAll, saveOne, setContent, revealLine, refreshBpDecor, openDiff, closeDiff, runAction, zoom, toggleBreakpoint, openDoc, closeDoc, newFile]);
 
+  /* 当前是 .md 文件且在编辑器视图（非 diff / 文档页）→ 默认右侧分屏渲染预览 */
+  const isMdTab = !!activeTab && !diffSpec && !activeDoc && /\.md$/i.test(activeTab);
+  const showMd = isMdTab && !mdOff;
+
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0 }}>
       <div className="tree-tabs">
@@ -1000,15 +1009,24 @@ export function EditorPane({ projectDir, bus, onSaved, onDirtyChange, breakpoint
         <button className="tab-new" title="新建文件（Ctrl+N）" onClick={() => void newFile()}>
           <IconPlus size={12} />
         </button>
+        {isMdTab && (
+          <button className="tab-new" title={mdOff ? '打开 Markdown 预览' : '关闭 Markdown 预览'} onClick={() => setMdOff((v) => !v)}>
+            {mdOff ? '预览' : '源码'}
+          </button>
+        )}
       </div>
-      <div style={{ position: 'relative', flex: 1, minHeight: 0 }}>
+      <div style={{ position: 'relative', flex: 1, minHeight: 0, display: 'flex', alignItems: 'stretch' }}>
         <div
           className="editor-host"
           ref={hostRef}
-          style={{ display: diffSpec || activeDoc ? 'none' : 'block', height: '100%' }}
+          style={{ display: diffSpec || activeDoc ? 'none' : 'block', height: '100%', flex: 1, minWidth: 0 }}
         />
-        <div className="editor-host" ref={diffHostRef} style={{ display: diffSpec ? 'block' : 'none', height: '100%' }} />
+        <div className="editor-host" ref={diffHostRef} style={{ display: diffSpec ? 'block' : 'none', height: '100%', flex: 1, minWidth: 0 }} />
         {diffSpec && <div className="diff-hint">对比视图（只读）：左侧基线，右侧当前内容。</div>}
+        {/* Markdown 分屏预览：编辑左、渲染右，跟着敲键实时刷新 */}
+        {showMd && (
+          <MdPreview model={modelsRef.current.get(activeTab ?? '') ?? null} onClose={() => setMdOff(true)} />
+        )}
         {/* 文档页面：占满编辑区 */}
         {activeDoc && (
           <div className="doc-host">

@@ -79,6 +79,15 @@ class StopSignal extends Error {
 
 /* ───────────────────────────── 作用域 ───────────────────────────── */
 
+/* lazy 参数（by-name）：调用处不求值，只在函数体读到这个名字时按调用方的环境算一遍。
+ * 和 Rust 内核的 Slot::Lazy（零参 thunk，读一次算一次）同一套语义。 */
+class LazyArg {
+  readonly isLazyArg = true;
+  constructor(public expr: Expr, public env: Env, public pname: string) {}
+}
+const isLazyArg = (v: unknown): v is LazyArg =>
+  typeof v === 'object' && v !== null && (v as LazyArg).isLazyArg === true;
+
 class Env {
   vars = new Map<string, Val>();
   selfObj: Instance | null = null;
@@ -1106,6 +1115,19 @@ export class Runner {
     return out;
   }
 
+  /** lazy 位图给了就跳过那些位的求值，包成 thunk；没给（内建/未知被调）就全求值 */
+  private async *evalArgsLazy(
+    args: Expr[], env: Env, lazyFlags: boolean[] | null,
+  ): AsyncGenerator<Yield, Val[], Next> {
+    if (!lazyFlags || !lazyFlags.some(Boolean)) return yield* this.evalArgs(args, env);
+    const out: Val[] = [];
+    for (let i = 0; i < args.length; i++) {
+      if (lazyFlags[i]) out.push(new LazyArg(args[i], env, '') as unknown as Val);
+      else out.push(yield* this.evalExpr(args[i], env));
+    }
+    return out;
+  }
+
   /* ── 表达式 ── */
 
   private async *evalExpr(e: Expr, env: Env): ValGen {
@@ -1128,7 +1150,11 @@ export class Runner {
       }
       case 'var': {
         const v = env.lookup(e.name);
-        if (v !== undefined) return v;
+        if (v !== undefined) {
+          // lazy 参数：读到才算（by-name，每次读都重算一遍）
+          if (isLazyArg(v)) return yield* this.evalExpr(v.expr, v.env);
+          return v;
+        }
         if (this.classes.has(e.name)) throw new FloatError(`「${e.name}」是类名，要创建实例请写 new ${e.name}(…)`, e);
         // 函数当值：顶层函数名直接读出来（可赋值、可传参、可存列表）
         if (this.funcs.has(e.name)) return this.fnVal(this.funcs.get(e.name) as FuncDef, null, null);
@@ -1175,7 +1201,20 @@ export class Runner {
         return this.memberGet(obj, e.name, e);
       }
       case 'call': {
-        const args = yield* this.evalArgs(e.args, env);
+        /* lazy 参数：先看被调函数哪几位是 lazy，那些实参**不**在这里求值，
+         * 只把「表达式 + 当前环境」包成 thunk 传进去（否则 AND2/OR2 的短路失效，
+         * 第二段会先算一遍、把本来要躲开的越界/缺键炸出来）。 */
+        let lazyFlags: boolean[] | null = null;
+        if (e.callee.k === 'var') {
+          const nm = e.callee.name;
+          const fv = env.lookup(nm);
+          const cand: FuncDef | null =
+            (fv !== undefined && isFn(fv)) ? fv.fn
+              : (env.selfObj ? (findMethod(env.selfObj.cls, nm)?.fn ?? null) : null)
+              ?? this.funcs.get(nm) ?? null;
+          if (cand) lazyFlags = cand.params.map((p) => p.lazy === true);
+        }
+        const args = yield* this.evalArgsLazy(e.args, env, lazyFlags);
         if (e.callee.k === 'var') {
           const name = e.callee.name;
           // super(…)：调用父类的同名初始化

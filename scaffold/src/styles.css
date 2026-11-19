@@ -446,6 +446,9 @@ code.inline { background: var(--bg3); padding: 1px 5px; border-radius: 4px; font
 }
 .ask-input-row input { flex: 1; font-size: 13px; }
 .console-running { color: var(--txt3); font-size: 11.5px; padding: 6px 0 0; flex: none; }
+/* 调试暂停时的操作提示：要比"运行中"显眼，F8 是下一步该按的键 */
+.console-running.paused-hint { color: #e6b23a; font-size: 12px; padding: 8px 0 2px; }
+.console-running.paused-hint b { color: #ffcf5c; font-weight: 800; }
 
 /* 编辑器断点 / 执行行（Monaco 装饰） */
 .bp-dot {
@@ -2325,3 +2328,68 @@ html, body, #root {
   font-variant-numeric: tabular-nums;
   cursor: default;
 }
+
+/* ────────────────────────────────────────────────
+   Markdown 分屏预览（MdPreview.tsx）
+   编辑器左、渲染右；全部走主题变量，深浅色自动适配
+   ──────────────────────────────────────────────── */
+.md-split {
+  display: flex; flex-direction: column; flex: 1; min-width: 0;
+  border-left: 1px solid var(--b2); background: var(--s2);
+}
+.md-split-head {
+  display: flex; align-items: center; gap: 6px; flex: none;
+  padding: 3px 8px 3px 12px; font-size: 11px; color: var(--t3);
+  border-bottom: 1px solid var(--b1);
+}
+.md-preview-body {
+  flex: 1; overflow: auto; padding: 16px 26px 48px;
+  font-size: 13.5px; line-height: 1.7; color: var(--t1); user-select: text;
+}
+.md-preview-body h1, .md-preview-body h2, .md-preview-body h3,
+.md-preview-body h4, .md-preview-body h5, .md-preview-body h6 {
+  color: var(--t1); font-weight: 600; line-height: 1.35; margin: 1.1em 0 .45em;
+}
+.md-preview-body h1:first-child, .md-preview-body h2:first-child, .md-preview-body p:first-child { margin-top: 0; }
+.md-preview-body h1 { font-size: 1.65em; padding-bottom: 6px; border-bottom: 1px solid var(--b2); }
+.md-preview-body h2 { font-size: 1.35em; padding-bottom: 4px; border-bottom: 1px solid var(--b1); }
+.md-preview-body h3 { font-size: 1.15em; }
+.md-preview-body h4 { font-size: 1em; }
+.md-preview-body p { margin: .5em 0; }
+.md-preview-body ul, .md-preview-body ol { margin: .5em 0; padding-left: 1.7em; }
+.md-preview-body li { margin: .18em 0; }
+.md-preview-body li > ul, .md-preview-body li > ol { margin: .15em 0; }
+.md-preview-body code {
+  font-family: Consolas, monospace; font-size: .92em;
+  background: var(--s3); border: 1px solid var(--b1); border-radius: 4px;
+  padding: 1px 5px; color: var(--t1);
+}
+.md-preview-body pre.md-code {
+  position: relative; margin: .8em 0; padding: 10px 13px;
+  background: var(--s0); border: 1px solid var(--b1); border-radius: 6px;
+  overflow: auto; line-height: 1.55;
+}
+.md-preview-body pre.md-code code {
+  background: none; border: none; padding: 0; font-size: 12.5px; white-space: pre;
+}
+.md-preview-body pre.md-code[data-lang]::after {
+  content: attr(data-lang); position: absolute; top: 4px; right: 8px;
+  font-size: 10px; color: var(--t4); font-family: Consolas, monospace;
+}
+.md-preview-body blockquote {
+  margin: .7em 0; padding: 4px 14px;
+  border-left: 3px solid var(--a4); background: var(--s3); border-radius: 0 6px 6px 0;
+  color: var(--t2);
+}
+.md-preview-body blockquote p { margin: .3em 0; }
+.md-preview-body hr { border: none; border-top: 1px solid var(--b2); margin: 1.1em 0; }
+.md-preview-body table { border-collapse: collapse; margin: .8em 0; font-size: .95em; }
+.md-preview-body th, .md-preview-body td {
+  border: 1px solid var(--b2); padding: 4px 10px; text-align: left;
+}
+.md-preview-body th { background: var(--s3); font-weight: 600; }
+.md-preview-body .md-link { color: var(--a1); text-decoration: underline; text-underline-offset: 2px; cursor: help; }
+.md-preview-body .md-img { color: var(--t3); font-size: .92em; }
+.md-preview-body strong { font-weight: 600; }
+[data-theme='dark'] .md-split { border-left-color: var(--b2); }
+[data-theme='dark'] .md-preview-body pre.md-code[data-lang]::after { color: var(--t4); }

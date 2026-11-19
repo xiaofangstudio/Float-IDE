@@ -24,9 +24,12 @@ fn 整数变量被特化成_i64() {
 }
 
 #[test]
-fn 有指针的程序明确拒绝() {
-    let e = emit("int x = 1\nptr p = &x\n").expect_err("指针应该拒绝");
-    assert!(e.message.contains("指针"), "原因要说清楚：{}", e.message);
+fn 指针现在能翻成_rust() {
+    // 指针是这一版新补的能力：&局部 → ptr_of_cell、&列表[i] → ptr_of_index，
+    // 读 *p、写 *p / *p += v 都走 ptr_get / ptr_set（和 VM 共用同一块内存）
+    let r = emit("int x = 1\nptr p = &x\n*p = 2\nprint(*p)\n").expect("指针应该能翻");
+    assert!(r.contains("ptr_of_cell") || r.contains("ptr_of_"), "缺取地址：{}", &r[..r.len().min(400)]);
+    assert!(r.contains("ptr_set") || r.contains("ptr_get"), "缺解引用");
 }
 
 #[test]

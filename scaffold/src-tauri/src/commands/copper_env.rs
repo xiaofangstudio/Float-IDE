@@ -62,12 +62,44 @@ pub fn platform_tag() -> String {
     format!("{}-{}", os, arch)
 }
 
+/// 手动指定的环境目录存哪儿（一行纯文本，改环境不用重新编译 IDE）
+fn override_file() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            return Some(PathBuf::from(appdata).join("Float").join("copper_home.txt"));
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            return Some(PathBuf::from(home).join(".config").join("float").join("copper_home.txt"));
+        }
+    }
+    None
+}
+
+fn read_override() -> Option<PathBuf> {
+    let p = override_file()?;
+    let t = std::fs::read_to_string(p).ok()?;
+    let t = t.trim();
+    if t.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(t))
+    }
+}
+
 fn home_candidates() -> Vec<(PathBuf, &'static str)> {
     let mut out = Vec::new();
     if let Ok(p) = std::env::var("COPPER_HOME") {
         if !p.trim().is_empty() {
             out.push((PathBuf::from(p), "env"));
         }
+    }
+    // 手动指定（IDE 里选过的目录），排在用户级之前
+    if let Some(p) = read_override() {
+        out.push((p, "manual"));
     }
     // 用户级
     #[cfg(windows)]
@@ -418,3 +450,193 @@ pub fn copper_env_compilers() -> Vec<CopperCompilerInfo> {
     }
     out
 }
+
+/* ── 手动指定 / 更新环境包 ───────────────────────────────────────────
+ * 用户可能把 Copper 装在任何地方，也可能只下载了一个 zip。这两件事都要在
+ * IDE 里能做完（选目录 / 从 zip 铺开），不能要求先去改环境变量再重启。 */
+
+/// 默认装到哪儿：Windows `%APPDATA%\Float\copper`，其它 `~/.copper`
+fn default_home() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            return Some(PathBuf::from(appdata).join("Float").join("copper"));
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            return Some(PathBuf::from(home).join(".copper"));
+        }
+    }
+    None
+}
+
+/// 手动指定环境目录（会校验里面有没有 copper.json / 编译器）
+#[tauri::command]
+pub fn copper_env_set(home: String) -> Result<CopperEnvInfo, String> {
+    let dir = PathBuf::from(home.trim());
+    if !dir.is_dir() {
+        return Err(format!("目录不存在：{}", dir.display()));
+    }
+    if !looks_like_env(&dir) {
+        return Err(format!(
+            "这个目录不像 Copper 环境（要有 copper.json，或 bin/<平台>/copper{}）",
+            exe_suffix()
+        ));
+    }
+    let f = override_file().ok_or("取不到配置目录")?;
+    if let Some(parent) = f.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("建配置目录失败：{}", e))?;
+    }
+    std::fs::write(&f, dir.canonicalize().unwrap_or(dir.clone()).display().to_string())
+        .map_err(|e| format!("写配置失败：{}", e))?;
+    let info = resolve_env();
+    Ok(info)
+}
+
+/// 清掉手动指定，回到自动查找
+#[tauri::command]
+pub fn copper_env_clear() -> CopperEnvInfo {
+    if let Some(f) = override_file() {
+        let _ = std::fs::remove_file(f);
+    }
+    resolve_env()
+}
+
+fn copy_tree(from: &Path, to: &Path) -> std::io::Result<u64> {
+    let mut n = 0u64;
+    std::fs::create_dir_all(to)?;
+    for e in std::fs::read_dir(from)? {
+        let e = e?;
+        let src = e.path();
+        let dst = to.join(e.file_name());
+        if src.is_dir() {
+            n += copy_tree(&src, &dst)?;
+        } else {
+            std::fs::copy(&src, &dst)?;
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+/// 找一个目录里最新修改的 Copper 包（zip）
+fn newest_package(dir: &Path) -> Option<PathBuf> {
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    let rd = std::fs::read_dir(dir).ok()?;
+    for e in rd.flatten() {
+        let p = e.path();
+        if !p.is_file() {
+            continue;
+        }
+        let name = p.file_name().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
+        if !name.contains("copper") || !(name.ends_with(".zip")) {
+            continue;
+        }
+        if let Ok(m) = e.metadata() {
+            if let Ok(t) = m.modified() {
+                if best.as_ref().map(|(bt, _)| t > *bt).unwrap_or(true) {
+                    best = Some((t, p));
+                }
+            }
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
+/// 从下载的 zip 包装环境：解开 → 找到里面的环境根（含 copper.json 的那层）→ 铺到默认位置
+#[tauri::command]
+pub fn copper_env_install(zip: Option<String>) -> Result<CopperEnvInfo, String> {
+    let pkg = match zip.map(|s| PathBuf::from(s.trim())).filter(|p| !p.as_os_str().is_empty()) {
+        Some(p) => p,
+        None => {
+            let mut found = None;
+            #[cfg(windows)]
+            {
+                if let Ok(profile) = std::env::var("USERPROFILE") {
+                    found = newest_package(&PathBuf::from(&profile).join("Downloads"))
+                        .or_else(|| newest_package(&PathBuf::from(&profile).join("Desktop")));
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                if let Ok(home) = std::env::var("HOME") {
+                    found = newest_package(&PathBuf::from(&home).join("Downloads"))
+                        .or_else(|| newest_package(&PathBuf::from(&home).join("Desktop")));
+                }
+            }
+            found.ok_or("没在下载/桌面目录里找到 Copper 安装包（*.zip），请在参数里给绝对路径")?
+        }
+    };
+    if !pkg.is_file() {
+        return Err(format!("安装包不存在：{}", pkg.display()));
+    }
+    let tmp = std::env::temp_dir().join(format!("copper_pkg_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).map_err(|e| format!("建临时目录失败：{}", e))?;
+
+    // 解压：Windows 用自带的 Expand-Archive，其它平台试 unzip
+    #[cfg(windows)]
+    let st = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &format!(
+                "Expand-Archive -LiteralPath '{}' -DestinationPath '{}' -Force",
+                pkg.display(),
+                tmp.display()
+            ),
+        ])
+        .output();
+    #[cfg(not(windows))]
+    let st = Command::new("unzip")
+        .args(["-o", "-q", pkg.to_string_lossy().as_ref(), "-d", tmp.to_string_lossy().as_ref()])
+        .output();
+    let st = st.map_err(|e| format!("解压失败：{}", e))?;
+    if !st.status.success() {
+        return Err(format!(
+            "解压失败：{}",
+            String::from_utf8_lossy(&st.stderr).trim()
+        ));
+    }
+
+    // 找环境根：优先含 copper.json 的目录，其次含 bin/ 的
+    fn find_root(dir: &Path, depth: u32) -> Option<PathBuf> {
+        if dir.join("copper.json").is_file() {
+            return Some(dir.to_path_buf());
+        }
+        if depth == 0 {
+            return None;
+        }
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            let mut subs: Vec<_> = rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+            // 名字里带 copper 的先找
+            subs.sort_by_key(|p| {
+                let n = p.file_name().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
+                if n.contains("copper") { 0 } else { 1 }
+            });
+            for s in subs {
+                if let Some(r) = find_root(&s, depth - 1) {
+                    return Some(r);
+                }
+            }
+        }
+        None
+    }
+    let root = find_root(&tmp, 2).ok_or("解开的包里没找到 copper.json（不是 Copper 安装包？）")?;
+
+    let dest = default_home().ok_or("取不到默认安装目录")?;
+    std::fs::create_dir_all(&dest).map_err(|e| format!("建安装目录失败：{}", e))?;
+    copy_tree(&root, &dest).map_err(|e| format!("铺开环境失败：{}", e))?;
+    let _ = std::fs::remove_dir_all(&tmp);
+
+    // 装完直接生效：清掉旧的手动指定（默认位置本身就在查找链里）
+    if let Some(f) = override_file() {
+        let _ = std::fs::remove_file(f);
+    }
+    Ok(resolve_env())
+}
+

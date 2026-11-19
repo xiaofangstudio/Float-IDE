@@ -89,11 +89,20 @@ struct Cg {
     try_stack: Vec<u32>,
     /// 内联函数登记表：源码位置 (行, 列) → 隐藏函数名 __lambda_行_列
     lambdas: HashMap<(u32, u32), Rc<str>>,
+    /// 嵌套函数的捕获表：函数名 → 要当成额外尾部参数传进来的外层局部变量
+    caps: HashMap<Rc<str>, Vec<Rc<str>>>,
+    /// 每个函数哪些局部要按 Cell 共享（捕获机制用）
+    cell_marks: HashMap<Rc<str>, CellMarks>,
+    /// 当前函数里要按 Cell 读写的名字
+    cells: HashSet<Rc<str>>,
 }
 
 impl Cg {
     fn w(&mut self, line: String) {
-        for _ in 0..self.indent {
+        /* 缩进只是排版：任一处计数出错也绝不能变成 26GB 的 repeat（release 下
+         * usize 下溢就是这么大的分配，直接把编译器打成 OOM）。这里统一夹住。 */
+        let n = self.indent.min(64);
+        for _ in 0..n {
             self.out.push_str("    ");
         }
         self.out.push_str(&line);
@@ -122,6 +131,11 @@ impl Cg {
 
     /// 这个变量是否按 i64 存（能证明是整数）
     fn is_int_var(&self, name: &str) -> bool {
+        // 存进 Cell 的变量（被嵌套函数捕获 / 被 & 取过地址）里放的是 V，
+        // 不能再按 i64 读写成 `c_x = 3i64` —— 那是类型不匹配，编出来就是 E0308
+        if self.cells.contains(name) {
+            return false;
+        }
         if self.is_local(name) {
             self.int_locals.as_ref().map(|l| l.contains(name)).unwrap_or(false)
         } else {
@@ -166,6 +180,11 @@ impl Cg {
     fn assign_var(&mut self, name: &str, val: &str) {
         if self.is_local(name) {
             let l = fmt_local(name);
+            if self.cells.contains(name) {
+                // 被嵌套函数捕获的变量：写回共享 cell，外面立刻看得见
+                self.w(format!("cell_set(&{}, ({}).clone());", l, val));
+                return;
+            }
             self.w(format!("{} = ({}).clone();", l, val));
         } else {
             let i = self.slot_of(name);
@@ -296,7 +315,8 @@ fn collect_locals(body: &[Stmt], out: &mut HashSet<Rc<str>>) -> Result<(), AotEr
                 collect_locals(body, out)?;
                 collect_locals(catch_body.as_deref().unwrap_or(&[]), out)?;
             }
-            StmtKind::FuncDef { .. } => return Err(AotError::unsupported("函数里再定义函数", s.span.line)),
+            // 嵌套函数：抬成顶层函数 + 捕获表（见 collect_caps），不是不支持
+            StmtKind::FuncDef { .. } => {}
             _ => {}
         }
     }
@@ -334,6 +354,7 @@ fn collect_assigned(body: &[Stmt], out: &mut HashSet<Rc<str>>) {
 fn rhs_int_shaped(e: &Expr, ints: &HashSet<Rc<str>>) -> bool {
     match &e.kind {
         ExprKind::Num(f) => f.fract() == 0.0 && f.abs() < 9.0e15,
+        ExprKind::Int(_) => true,
         ExprKind::Var(n) => ints.contains(n),
         ExprKind::Un { op: Op::Neg, a } => rhs_int_shaped(a, ints),
         ExprKind::Bin { op: Op::Add | Op::Sub | Op::Mul, a, b } => rhs_int_shaped(a, ints) && rhs_int_shaped(b, ints),
@@ -628,8 +649,302 @@ fn for_each_stmts_expr(body: &[Stmt], f: &mut dyn FnMut(&Expr)) {
     }
 }
 
+/* 嵌套函数 → 顶层函数的"捕获"表。
+ * AOT 要求函数是顶层 Rust 函数，所以嵌套函数会被抬上去；抬上去以后它原来能看到的
+ * 外层局部变量就没了。做法是把这些变量当成额外的尾部参数传进去（参数名保持原名，
+ * 函数体里照常按名字引用就能对上）。这里只负责算出"每个嵌套函数要带哪些变量"。
+ * 没有捕获的嵌套函数等价于顶层函数，可以照常当一等公民用；有捕获的只能直接调用
+ * （值语义的闭包在 AOT 里不支持，会明确报错，绝不静默算错）。 */
+fn collect_caps(prog: &[Stmt]) -> HashMap<Rc<str>, Vec<Rc<str>>> {
+    fn free_vars(body: &[Stmt], own: &HashSet<Rc<str>>) -> HashSet<Rc<str>> {
+        let mut free = HashSet::new();
+        for_each_stmts_expr(body, &mut |e| {
+            if let ExprKind::Var(n) = &e.kind {
+                if !own.contains(n.as_ref()) {
+                    free.insert(Rc::clone(n));
+                }
+            }
+        });
+        free
+    }
+    /// 遍历一条语句里所有"会开新块、会引入新名字"的地方。
+    /// 作用域口径跟 VM 完全一致：Copper 的变量是函数作用域的，块里声明的名字
+    /// 出了块照样可见，所以这里**只压栈不弹栈**；循环变量、catch 变量同理。
+    fn walk(
+        body: &[Stmt],
+        visible: &mut Vec<Rc<str>>,
+        out: &mut HashMap<Rc<str>, Vec<Rc<str>>>,
+        changed: &mut bool,
+        top: bool,
+    ) {
+        for s in body {
+            match &s.kind {
+                StmtKind::FuncDef { name, params, body: fb, .. } => {
+                    let mut own = HashSet::new();
+                    for p in params {
+                        own.insert(Rc::clone(&p.name));
+                    }
+                    let _ = collect_locals(fb, &mut own);
+                    let free = free_vars(fb, &own);
+                    let mut caps: Vec<Rc<str>> =
+                        visible.iter().filter(|n| free.contains(*n)).cloned().collect();
+                    // 传下去的责任：本函数直接调用的子函数需要哪些捕获值，本函数自己
+                    // 也得有（否则拿什么传给子函数）。子函数的捕获表是上一轮算的，
+                    // 外层传两轮就能收敛——捕获集合只增不减，一定会停。
+                    let mut kids: Vec<Rc<str>> = Vec::new();
+                    let mut sub: Vec<(&Rc<str>, &Vec<crate::ast::Param>, &Vec<Stmt>)> = Vec::new();
+                    level_fns(fb, &mut sub);
+                    for (cn, _, _) in sub {
+                        if let Some(cc) = out.get(cn) {
+                            for c in cc {
+                                if caps.contains(c) {
+                                    continue;
+                                }
+                                // 只有"更外层"的名字才需要本函数向上去要；本函数自己的
+                                // 参数和局部变量本来就在手边，直接传给子函数即可
+                                if visible.contains(c) {
+                                    caps.push(Rc::clone(c));
+                                }
+                            }
+                        }
+                        kids.push(Rc::clone(cn));
+                    }
+                    let _ = kids;
+                    let prev = out.get(name);
+                    let same = match prev {
+                        Some(p) => p.len() == caps.len() && p.iter().zip(caps.iter()).all(|(a, b)| a == b),
+                        None => false,
+                    };
+                    if !same {
+                        out.insert(Rc::clone(name), caps.clone());
+                        *changed = true;
+                    }
+                    let mut child: Vec<Rc<str>> = visible.to_vec();
+                    for p in params {
+                        child.push(Rc::clone(&p.name));
+                    }
+                    for l in &own {
+                        if !params.iter().any(|p| &p.name == l) {
+                            child.push(Rc::clone(l));
+                        }
+                    }
+                    for c in &caps {
+                        child.push(Rc::clone(c));
+                    }
+                    // 捕获变量可能本来就在外层可见链里 → 去重（重名参数生成器会报 E0415）
+                    let mut seen: Vec<Rc<str>> = Vec::new();
+                    let mut dedup: Vec<Rc<str>> = Vec::new();
+                    for n in child {
+                        if !seen.iter().any(|x| *x == n) {
+                            seen.push(Rc::clone(&n));
+                            dedup.push(n);
+                        }
+                    }
+                    walk(fb, &mut dedup, out, changed, false);
+                }
+                // 顶层声明就是全局变量：不参与捕获（函数体里直接按槽位访问）
+                StmtKind::Decl { name, .. } if !top => push_name(visible, name),
+                StmtKind::Destructure { names, .. } if !top => {
+                    for n in names {
+                        push_name(visible, n);
+                    }
+                }
+                StmtKind::ForRange { var, body: fb, .. } => {
+                    if !top {
+                        push_name(visible, var);
+                    }
+                    walk(fb, visible, out, changed, top);
+                }
+                StmtKind::ForIn { var, value_name, body: fb, .. } => {
+                    if !top {
+                        push_name(visible, var);
+                        if let Some(v) = value_name {
+                            push_name(visible, v);
+                        }
+                    }
+                    walk(fb, visible, out, changed, top);
+                }
+                StmtKind::If { branches, else_body } => {
+                    for (_, b) in branches {
+                        walk(b, visible, out, changed, top);
+                    }
+                    if let Some(b) = else_body {
+                        walk(b, visible, out, changed, top);
+                    }
+                }
+                StmtKind::While { body: fb, .. }
+                | StmtKind::WaitUntil { body: fb, .. }
+                | StmtKind::Repeat { body: fb, .. } => walk(fb, visible, out, changed, top),
+                StmtKind::Try { body: fb, catch_name, catch_body, finally } => {
+                    walk(fb, visible, out, changed, top);
+                    if let Some(c) = catch_name {
+                        if !top {
+                            push_name(visible, c);
+                        }
+                    }
+                    if let Some(b) = catch_body {
+                        walk(b, visible, out, changed, top);
+                    }
+                    if let Some(b) = finally {
+                        walk(b, visible, out, changed, top);
+                    }
+                }
+                StmtKind::Group(b) => walk(b, visible, out, changed, top),
+                _ => {}
+            }
+        }
+    }
+    fn push_name(visible: &mut Vec<Rc<str>>, n: &Rc<str>) {
+        if !visible.iter().any(|x| x == n) {
+            visible.push(Rc::clone(n));
+        }
+    }
+    let mut out: HashMap<Rc<str>, Vec<Rc<str>>> = HashMap::new();
+    // 不动点：捕获值要沿"子函数需要 → 父函数负责传"一路向上收敛
+    for _ in 0..32 {
+        let mut changed = false;
+        let mut visible: Vec<Rc<str>> = Vec::new();
+        walk(prog, &mut visible, &mut out, &mut changed, true);
+        if !changed {
+            break;
+        }
+    }
+    out
+}
+
+/// 被 `&` 取过地址的局部变量名：这些变量要存成 cell 才能被指针共享。
+fn addr_names(body: &[Stmt]) -> HashSet<Rc<str>> {
+    let mut out = HashSet::new();
+    for_each_stmts_expr(body, &mut |e| {
+        if let ExprKind::Un { op: Op::Addr, a } = &e.kind {
+            if let ExprKind::Var(n) = &a.kind {
+                out.insert(Rc::clone(n));
+            }
+        }
+    });
+    out
+}
+
+/// 某个函数里"要按引用共享"的局部：被任意直接子函数捕获的变量。
+/// 这些变量在所属函数里存成 Cell，子函数拿到的也是同一个 Cell。
+#[derive(Default, Clone)]
+struct CellMarks {
+    /// 与参数一一对应：true = 这个参数要按 Cell 形式收发
+    params: Vec<bool>,
+    /// 非参数的局部变量名（要声明成 Cell）
+    locals: Vec<Rc<str>>,
+}
+
+/// 算出每个函数哪些局部要变成 Cell。捕获表已经收敛，这里只做"谁负责持有"的映射：
+/// 子函数的捕获值里，凡是本函数自己的参数/局部，就得由本函数存成 Cell 才能共享。
+fn collect_cell_marks(
+    prog: &[Stmt],
+    caps: &HashMap<Rc<str>, Vec<Rc<str>>>,
+) -> HashMap<Rc<str>, CellMarks> {
+    fn walk(body: &[Stmt], caps: &HashMap<Rc<str>, Vec<Rc<str>>>, out: &mut HashMap<Rc<str>, CellMarks>) {
+        for s in body {
+            match &s.kind {
+                StmtKind::FuncDef { name, params, body: fb, .. } => {
+                    let mut own = HashSet::new();
+                    let _ = collect_locals(fb, &mut own);
+                    let mut marks = CellMarks {
+                        params: vec![false; params.len()],
+                        locals: Vec::new(),
+                    };
+                    // 子函数可能写在循环 / if / try 里，不只是直挂函数体第一层
+                    let mut kids: Vec<(&Rc<str>, &Vec<crate::ast::Param>, &Vec<Stmt>)> = Vec::new();
+                    level_fns(fb, &mut kids);
+                    for (cn, _, _) in kids {
+                        let Some(cc) = caps.get(cn) else { continue };
+                        for c in cc {
+                            if let Some(i) = params.iter().position(|p| &p.name == c) {
+                                marks.params[i] = true;
+                            } else if own.contains(c) && !marks.locals.iter().any(|l| l == c) {
+                                marks.locals.push(Rc::clone(c));
+                            }
+                        }
+                    }
+                    // 参数被 & 取过地址：也得按 Cell 收发，否则指针无处可指
+                    for n in addr_names(fb) {
+                        if let Some(i) = params.iter().position(|p| p.name == n) {
+                            marks.params[i] = true;
+                        }
+                    }
+                    out.insert(Rc::clone(name), marks.clone());
+                    walk(fb, caps, out);
+                }
+                StmtKind::Group(b) => walk(b, caps, out),
+                StmtKind::If { branches, else_body } => {
+                    for (_, b) in branches {
+                        walk(b, caps, out);
+                    }
+                    if let Some(b) = else_body {
+                        walk(b, caps, out);
+                    }
+                }
+                StmtKind::While { body: fb, .. }
+                | StmtKind::WaitUntil { body: fb, .. }
+                | StmtKind::Repeat { body: fb, .. } => walk(fb, caps, out),
+                StmtKind::ForRange { body: fb, .. } | StmtKind::ForIn { body: fb, .. } => {
+                    walk(fb, caps, out)
+                }
+                StmtKind::Try { body: fb, catch_body, finally, .. } => {
+                    walk(fb, caps, out);
+                    if let Some(b) = catch_body {
+                        walk(b, caps, out);
+                    }
+                    if let Some(b) = finally {
+                        walk(b, caps, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = HashMap::new();
+    walk(prog, caps, &mut out);
+    out
+}
+
+/// 收集"属于当前这一层"的函数定义：写在循环 / if / try / group 里的也算，
+/// 但不再钻进另一个函数体（那是更里面的一层）。
+fn level_fns<'a>(
+    body: &'a [Stmt],
+    out: &mut Vec<(&'a Rc<str>, &'a Vec<crate::ast::Param>, &'a Vec<Stmt>)>,
+) {
+    for s in body {
+        match &s.kind {
+            StmtKind::FuncDef { name, params, body: fb, .. } => out.push((name, params, fb)),
+            StmtKind::If { branches, else_body } => {
+                for (_, b) in branches {
+                    level_fns(b, out);
+                }
+                if let Some(b) = else_body {
+                    level_fns(b, out);
+                }
+            }
+            StmtKind::While { body: fb, .. }
+            | StmtKind::WaitUntil { body: fb, .. }
+            | StmtKind::Repeat { body: fb, .. } => level_fns(fb, out),
+            StmtKind::ForRange { body: fb, .. } | StmtKind::ForIn { body: fb, .. } => {
+                level_fns(fb, out)
+            }
+            StmtKind::Try { body: fb, catch_body, finally, .. } => {
+                level_fns(fb, out);
+                if let Some(b) = catch_body {
+                    level_fns(b, out);
+                }
+                if let Some(b) = finally {
+                    level_fns(b, out);
+                }
+            }
+            StmtKind::Group(b) => level_fns(b, out),
+            _ => {}
+        }
+    }
+}
+
 /// 收集程序里的内联函数：登记成隐藏函数 __lambda_行_列 并加入函数表。
-/// 嵌套 lambda 通过「新函数进表后继续扫」的不动点循环覆盖。
 fn collect_lambdas(
     top_stmts: &[Stmt],
     fns: &mut Vec<(Rc<str>, Vec<crate::ast::Param>, Vec<Stmt>)>,
@@ -662,11 +977,16 @@ fn collect_lambdas(
     map
 }
 
-/// 表达式层扫描：& / * 不支持
+/// 表达式层扫描：& / * 由扫描之外的专门逻辑处理
 fn scan_expr(e: &Expr) -> Result<(), AotError> {
     match &e.kind {
-        ExprKind::Un { op: Op::Addr, .. } | ExprKind::Un { op: Op::Deref, .. } => {
-            Err(AotError::unsupported("指针取地址 / 解引用（& 与 *）", e.span.line))
+        ExprKind::Un { op: Op::Addr, a } => {
+            scan_expr(a)?;
+            Ok(())
+        }
+        ExprKind::Un { op: Op::Deref, a } => {
+            scan_expr(a)?;
+            Ok(())
         }
         ExprKind::List(xs) => {
             for x in xs {
@@ -771,7 +1091,7 @@ fn scan_body(body: &[Stmt], fns: &mut Vec<(Rc<str>, Vec<crate::ast::Param>, Vec<
                         scan_expr(obj)?;
                         scan_expr(idx)?;
                     }
-                    Target::Deref(_) => return Err(AotError::unsupported("指针解引用赋值（*p = …）", s.span.line)),
+                    Target::Deref(e) => scan_expr(e)?,
                 }
                 scan_expr(value)?;
             }
@@ -782,7 +1102,7 @@ fn scan_body(body: &[Stmt], fns: &mut Vec<(Rc<str>, Vec<crate::ast::Param>, Vec<
                     scan_expr(obj)?;
                     scan_expr(idx)?;
                 }
-                Target::Deref(_) => return Err(AotError::unsupported("指针解引用自增（*p += …）", s.span.line)),
+                Target::Deref(e) => scan_expr(e)?,
             },
             StmtKind::If { branches, else_body } => {
                 for (c, b) in branches {
@@ -851,6 +1171,7 @@ fn scan_body(body: &[Stmt], fns: &mut Vec<(Rc<str>, Vec<crate::ast::Param>, Vec<
 fn int_shaped(e: &Expr, ints: &HashSet<Rc<str>>) -> bool {
     match &e.kind {
         ExprKind::Num(f) => f.fract() == 0.0 && f.abs() < 9.0e15,
+        ExprKind::Int(_) => true,
         ExprKind::Var(n) => ints.contains(n),
         ExprKind::Un { op: Op::Neg, a } => int_shaped(a, ints),
         ExprKind::Bin {
@@ -1055,6 +1376,8 @@ fn ic_shaped(e: &Expr, ic: &mut IntCheck) -> bool {
         ExprKind::Num(f) => {
             ic.float_mode || (f.fract() == 0.0 && f.abs() < 9.0e15)
         }
+        // 精确 i64 字面量：不管多大都能直接放进 int 世界
+        ExprKind::Int(_) => true,
         ExprKind::Var(n) => ic.ints.contains(n),
         ExprKind::Un { op: Op::Neg, a } => ic_shaped(a, ic),
         // 调用也是整型形状：走 ic_expr 校验被调并登记（嵌套调用一起收）
@@ -1383,7 +1706,9 @@ pub fn emit(prog: &Program) -> Result<String, AotError> {
     // 收集函数（含类降级的 __new_ / __m_）+ 扫不支持的特性
     let mut fns: Vec<(Rc<str>, Vec<crate::ast::Param>, Vec<Stmt>)> = Vec::new();
     scan_body(&prog.body, &mut fns)?;
-
+    // 嵌套函数的捕获表（抬成顶层函数时，把外层局部变量当尾部参数带进来）
+    let caps = collect_caps(&prog.body);
+    let cell_marks = collect_cell_marks(&prog.body, &caps);
     // 内联函数（fn(x) return …）：编译成隐藏函数并登记，表达式位置发射
     // V::Native 引用。必须在 meta 构建之前做，lambda 才能参与特化推断。
     let top_stmts0: Vec<Stmt> = prog
@@ -1426,7 +1751,12 @@ pub fn emit(prog: &Program) -> Result<String, AotError> {
         .filter(|s| !matches!(s.kind, StmtKind::FuncDef { .. }))
         .cloned()
         .collect();
-    let int_globals = classify_int_vars(&top_stmts);
+    /* 被 & 取过地址的全局变量不能进整型快路径（g.gi 不是 Value，指针指不到），
+     * 让它留在 g.v 的值槽里，&x / *p 才对得上同一个变量。 */
+    let mut int_globals = classify_int_vars(&top_stmts);
+    for n in addr_names(&prog.body) {
+        int_globals.remove(&n);
+    }
     // gi 索引一次算定：所有函数共用同一套编号
     let mut gi_sorted: Vec<Rc<str>> = int_globals.iter().cloned().collect();
     gi_sorted.sort();
@@ -1463,6 +1793,9 @@ pub fn emit(prog: &Program) -> Result<String, AotError> {
         chunk_of: HashMap::new(),
             try_stack: Vec::new(),
             lambdas: lambda_map.clone(),
+            caps: caps.clone(),
+            cell_marks: cell_marks.clone(),
+            cells: HashSet::new(),
     };
 
     // 函数体里"赋值给没声明过的名字"会在 VM 里创建全局；AOT 提前把这些名字登记成槽位
@@ -1503,8 +1836,15 @@ pub fn emit(prog: &Program) -> Result<String, AotError> {
     // ── 各函数 ──
     let mut fn_code = Vec::new();
     for (name, params, body) in &fns {
+        // 有捕获 / 有 Cell 的函数不能进整型/浮点特化：特化路径只认 i64/f64，
+        // 而捕获要走 Cell 共享（否则嵌套函数改了外层看不见）
+        let plain = caps.get(name).map(|c| c.is_empty()).unwrap_or(true)
+            && cell_marks
+                .get(name)
+                .map(|m| !m.params.iter().any(|x| *x) && m.locals.is_empty())
+                .unwrap_or(true);
         // 整型函数特化：签名/返回全是 i64，跨调用边界不装箱（见 infer_int_fns）
-        if cg.meta.get(name).map(|m| m.int_fn).unwrap_or(false) {
+        if plain && cg.meta.get(name).map(|m| m.int_fn).unwrap_or(false) {
             fn_code.push(render_fn_int(
                 &cg.meta,
                 &globals,
@@ -1521,7 +1861,7 @@ pub fn emit(prog: &Program) -> Result<String, AotError> {
             continue;
         }
         // 浮点函数特化：签名/返回全是 f64（见 infer_float_fns）
-        if cg.meta.get(name).map(|m| m.float_fn).unwrap_or(false) {
+        if plain && cg.meta.get(name).map(|m| m.float_fn).unwrap_or(false) {
             fn_code.push(render_fn_int(
                 &cg.meta,
                 &globals,
@@ -1537,7 +1877,7 @@ pub fn emit(prog: &Program) -> Result<String, AotError> {
             )?);
             continue;
         }
-        let int_locals = classify_int_vars(body);
+        let mut int_locals = classify_int_vars(body);
         let mut fcg = Cg {
             meta: cg.meta.clone(),
             globals: globals.clone(),
@@ -1560,6 +1900,9 @@ pub fn emit(prog: &Program) -> Result<String, AotError> {
             chunk_of: HashMap::new(),
             try_stack: Vec::new(),
             lambdas: lambda_map.clone(),
+            caps: caps.clone(),
+            cell_marks: cell_marks.clone(),
+            cells: HashSet::new(),
         };
         for g in &globals {
             fcg.slot_of(g);
@@ -1569,18 +1912,58 @@ pub fn emit(prog: &Program) -> Result<String, AotError> {
         for p in params {
             locals.insert(Rc::clone(&p.name));
         }
+        // 嵌套函数被抬到顶层后，外层局部变量以"尾部同名参数"的身份进来：
+        // 加进 locals，函数体里按名字引用就能直接读到。
+        let my_caps: Vec<Rc<str>> = cg.caps.get(name).cloned().unwrap_or_default();
+        for c in &my_caps {
+            locals.insert(Rc::clone(c));
+        }
+        /* 捕获要按引用共享：被捕获的变量（以及被别人捕获的本函数局部/参数）
+         * 一律存成 Cell，函数之间传同一个 Rc，改了立刻互相看得见。 */
+        let my_marks: CellMarks = cg.cell_marks.get(name).cloned().unwrap_or_default();
+        let mut cells: HashSet<Rc<str>> = my_caps.iter().cloned().collect();
+        for l in &my_marks.locals {
+            cells.insert(Rc::clone(l));
+        }
+        for (i, f) in my_marks.params.iter().enumerate() {
+            if *f {
+                if let Some(p) = params.get(i) {
+                    cells.insert(Rc::clone(&p.name));
+                }
+            }
+        }
+        // &x 取过地址的局部也要按 cell 存（指针要能改回变量本身）
+        for n in addr_names(body) {
+            cells.insert(Rc::clone(&n));
+        }
+        for c in &cells {
+            int_locals.remove(c);
+        }
+        fcg.cells = cells.clone();
         fcg.locals = Some(locals.clone());
 
         let _ = &int_locals;
 
         // 递归深度护栏（沿用 VM 的 400 上限）
+        let has_def = params.iter().any(|p| p.default.is_some());
         let mut sig = String::new();
         sig.push_str(&format!(
             "#[allow(unused_mut)]\nfn {}(g: &mut Globals",
             rust_fn_name(name)
         ));
         for p in params {
-            sig.push_str(&format!(", mut c_{}: V", sanitize(&p.name)));
+            let ty = if cells.contains(&p.name) { "Cell" } else { "V" };
+            sig.push_str(&format!(", mut c_{}: {}", sanitize(&p.name), ty));
+        }
+        // 嵌套函数的捕获变量：尾部同名参数，调用点按同一顺序传
+        for c in &my_caps {
+            sig.push_str(&format!(", mut c_{}: Cell", sanitize(c)));
+        }
+        // 有默认值的函数多收一个"实际给了几个实参"。缺的参数在**函数入口**补，
+        // 而不是在调用点补——这样默认值能引用前面的参数（fn area(w, h = w)），
+        // 一等公民/注册表/跨块这些间接调用也一并自动正确。
+        if has_def {
+            sig.push_str(", __n: i64");
         }
         sig.push_str(") -> R<V> {\n");
         sig.push_str(&format!("    let _guard = enter({})?;\n", lit_str(name)));
@@ -1592,8 +1975,13 @@ pub fn emit(prog: &Program) -> Result<String, AotError> {
             if params.iter().any(|p| &p.name == l) {
                 continue; // 参数已经在签名里
             }
+            if my_caps.iter().any(|c| c == l) {
+                continue; // 捕获变量也是签名里的尾部参数
+            }
             if int_locals.contains(l) {
                 decls.push(format!("    let mut {}: i64 = 0;", fmt_local(l)));
+            } else if cells.contains(l) {
+                decls.push(format!("    let {}: Cell = cell_new(V::Null);", fmt_local(l)));
             } else {
                 decls.push(format!("    let mut {}: V = V::Null;", fmt_local(l)));
             }
@@ -1602,6 +1990,31 @@ pub fn emit(prog: &Program) -> Result<String, AotError> {
         for d in decls {
             fcg.out.push_str(&d);
             fcg.out.push('\n');
+        }
+
+        // 入口补默认值：__n 是实际实参个数；i >= __n 的参数没传，按顺序求默认值。
+        // 前面的参数此时已经绑定好，所以默认值里引用 w 这种写法能直接编译。
+        if has_def {
+            for (i, p) in params.iter().enumerate() {
+                if let Some(d) = &p.default {
+                    let dv = emit_expr(&mut fcg, d)?;
+                    if cells.contains(&p.name) {
+                        fcg.w(format!(
+                            "if __n <= {} as i64 {{ cell_set(&{}, ({}).clone()); }}",
+                            i,
+                            fmt_local(&p.name),
+                            dv
+                        ));
+                    } else {
+                        fcg.w(format!(
+                            "if __n <= {} as i64 {{ {} = ({}).clone(); }}",
+                            i,
+                            fmt_local(&p.name),
+                            dv
+                        ));
+                    }
+                }
+            }
         }
 
         emit_stmt_slice(&mut fcg, body, false)?;
@@ -1631,11 +2044,11 @@ pub fn emit(prog: &Program) -> Result<String, AotError> {
     doc.push(String::new());
 
     if uses_mcall {
-        doc.push(gen_mcall(&methods, false));
+        doc.push(gen_mcall(&methods, false, &cg.meta));
         doc.push(String::new());
     }
     if uses_dcall {
-        doc.push(gen_dcall(&cg.meta));
+        doc.push(gen_dcall(&cg.meta, &cg.caps, &cg.cell_marks));
         doc.push(String::new());
     }
 
@@ -1650,10 +2063,10 @@ pub fn emit(prog: &Program) -> Result<String, AotError> {
         n_globals, n_gi
     ));
     doc.push("    match run_top(&mut g) {".into());
-    doc.push("        Ok(_) => {}".into());
+    doc.push("        Ok(_) => { out_flush(); }".into());
     doc.push("        Err(e) => {".into());
-    doc.push("            use std::io::Write as _; let _ = std::io::stdout().flush();".into());
-    doc.push("            eprintln!(\"出错（第 {} 行）：{}\", e.span.line, e.message);".into());
+    doc.push("            use std::io::Write as _; out_flush();".into());
+    doc.push("            eprintln!(\"\\n运行出错：第 {} 行：{}\", e.span.line, e.message);".into());
     doc.push("            std::process::exit(1);".into());
     doc.push("        }".into());
     doc.push("    }".into());
@@ -1967,7 +2380,8 @@ fn emit_stmt(cg: &mut Cg, s: &Stmt, top_level: bool) -> Result<(), AotError> {
             Ok(())
         }
         StmtKind::Stop => {
-            cg.w("use std::io::Write as _; let _ = std::io::stdout().flush(); std::process::exit(0);".into());
+            /* 程序输出走 OUTBUF，不先冲一遍就 exit 会把前面所有 print 全丢掉 */
+            cg.w("use std::io::Write as _; out_flush(); std::process::exit(0);".into());
             Ok(())
         }
         StmtKind::IfOut(cond) => {
@@ -1995,18 +2409,23 @@ fn emit_stmt(cg: &mut Cg, s: &Stmt, top_level: bool) -> Result<(), AotError> {
             let v = emit_expr(cg, e)?;
             if !cg.try_stack.is_empty() {
                 cg.w(format!(
-                    "return Ok((Err(fe({}, {}, disp(&({})))), 0u8));",
-                    s.span.line, s.span.col, v
+                    "return Ok((Err(throw_err(({}).clone(), {}, {})), 0u8));",
+                    v, s.span.line, s.span.col
                 ));
             } else {
-                cg.w(format!("return Err(fe({}, {}, disp(&({}))));", s.span.line, s.span.col, v));
+                cg.w(format!(
+                    "return Err(throw_err(({}).clone(), {}, {}));",
+                    v, s.span.line, s.span.col
+                ));
             }
             Ok(())
         }
         StmtKind::Try { body, catch_name, catch_body, finally } => {
             /* try 用 Rust 闭包实现异常边界；return / break / continue 用流向编码
              * （0 正常 / 1 return / 2 break / 3 continue）穿出闭包，语义和 VM 一致。
-             * catch / finally 在闭包外（函数层级）发射，那里的控制流直接生效。 */
+             * 顺序必须是 VM 的顺序：先 catch（只接运行时错误），再 finally，
+             * 最后才把 return / break / continue 真正落地——否则 return 会跳过
+             * finally，没写 catch 的 try 也会把错误吞掉。 */
             cg.try_stack.push(cg.loop_depth as u32);
             cg.w("let __tr: R<(R<V>, u8)> = (|| -> R<(R<V>, u8)> {".into());
             cg.indent += 1;
@@ -2015,62 +2434,49 @@ fn emit_stmt(cg: &mut Cg, s: &Stmt, top_level: bool) -> Result<(), AotError> {
             cg.w("Ok((Ok(V::Null), 0u8))".into());
             cg.w("})();".into());
             cg.try_stack.pop();
+            let nested_try = !cg.try_stack.is_empty();
             /* 闭包内部的 `?`（调用/索引/算术失败）走 R 提前返回，这里统一折成
              * "错误 + 流向 0"，让下面的 catch 按 VM 的语义接住它 */
-            cg.w("let __tr: (R<V>, u8) = match __tr { Ok(x) => x, Err(e) => (Err(e), 0u8) };".into());
-            cg.w("match __tr.1 {".into());
-            cg.indent += 1;
-            if cg.try_stack.is_empty() {
-                // 最外层 try：控制流在这里真正落地
-                cg.w("1 => return __tr.0,".into());
+            cg.w("let mut __fv: R<V>; let mut __fl: u8;".into());
+            cg.w("match __tr { Ok(x) => { __fv = x.0; __fl = x.1 }, Err(e) => { __fv = Err(e); __fl = 0u8 } };".into());
+            // ① catch 只接住"错误且不是控制流"的情况；没写 catch 就原样留着报
+            let has_catch = catch_body.is_some() || catch_name.is_some();
+            if has_catch {
+                cg.w("if __fl == 0 && __fv.is_err() {".into());
+                cg.indent += 1;
+                cg.w("let e = match __fv { Err(e) => e, Ok(_) => unreachable!() };".into());
+                if let Some(n) = catch_name {
+                    cg.assign_var(n, "catch_bind(&e)");
+                }
+                if let Some(cb) = catch_body {
+                    emit_stmts_owned(cg, cb, top_level)?;
+                }
+                cg.w("__fv = Ok(V::Null);".into());
+                cg.indent -= 1;
+                cg.w("}".into());
+            }
+            // ② finally 无论走哪条路都要跑（return / break / continue 都还没落地）
+            if let Some(f) = finally {
+                emit_stmts_owned(cg, f, top_level)?;
+            }
+            // ③ 控制流现在才落地
+            if nested_try {
+                // 嵌套 try：连错误一起交给外层闭包（外层闭包返回 R<(R<V>, u8)>）
+                cg.w("return Ok((__fv, __fl));".into());
+            } else {
+                cg.w("match __fl {".into());
+                cg.indent += 1;
+                cg.w("1 => return __fv,".into());
                 if cg.loop_depth > 0 {
                     cg.w("2 => break,".into());
                     cg.w("3 => continue,".into());
                 } else {
                     cg.w("2 | 3 => {}".into());
                 }
-            } else {
-                // 嵌套 try：继续向外层闭包传播（外层闭包现在返回 R<(R<V>, u8)>）
-                cg.w("1 => return Ok((__tr.0, 1u8)),".into());
-                cg.w("2 => return Ok((__tr.0, 2u8)),".into());
-                cg.w("3 => return Ok((__tr.0, 3u8)),".into());
-            }
-            cg.indent -= 1;
-            cg.w("_ => match __tr.0 {".into());
-            cg.indent += 1;
-            if catch_body.is_some() || catch_name.is_some() {
-                match catch_name {
-                    Some(n) => {
-                        let bound = "V::string(e.message.clone())".to_string();
-                        cg.w("Err(e) => {".into());
-                        cg.indent += 1;
-                        cg.assign_var(n, &bound);
-                        if let Some(cb) = catch_body {
-                            emit_stmts_owned(cg, cb, top_level)?;
-                        }
-                        cg.indent -= 1;
-                        cg.w("}".into());
-                    }
-                    None => {
-                        cg.w("Err(_) => {".into());
-                        cg.indent += 1;
-                        if let Some(cb) = catch_body {
-                            emit_stmts_owned(cg, cb, top_level)?;
-                        }
-                        cg.indent -= 1;
-                        cg.w("}".into());
-                    }
-                }
-            } else {
-                cg.w("Err(_) => {}".into());
-            }
-            cg.w("Ok(_) => {}".into());
-            cg.indent -= 1;
-            cg.w("}".into());
-            cg.indent -= 1;
-            cg.w("}".into());
-            if let Some(f) = finally {
-                emit_stmts_owned(cg, f, top_level)?;
+                // 正常走完：catch 接住过就是 Ok；没接住的错误在这里才往外抛
+                cg.w("_ => { if __fv.is_err() { return __fv; } }".into());
+                cg.indent -= 1;
+                cg.w("}".into());
             }
             Ok(())
         }
@@ -2081,7 +2487,7 @@ fn emit_stmt(cg: &mut Cg, s: &Stmt, top_level: bool) -> Result<(), AotError> {
                 let v = emit_expr(cg, e)?;
                 cg.w(format!("out_line(&show(&[({}).clone()]));", v));
             }
-            cg.w("let __ans_v = ask_line()?;".to_string());
+            cg.w(format!("let __ans_v = ask_line({}, {})?;", s.span.line, s.span.col));
             cg.assign_var("ans", "__ans_v");
             cg.assign_var("__last_ans", "__ans_v");
             Ok(())
@@ -2122,8 +2528,7 @@ fn emit_assign(cg: &mut Cg, target: &Target, op: AssignOp, value: &Expr, line: u
     if let (Target::Var(name), AssignOp::Set) = (target, op) {
         if let ExprKind::Bin { op: Op::Add, a, b } = &value.kind {
             if let ExprKind::Var(vn) = &a.kind {
-                if vn == name && cg.is_local(name) && !cg.is_int_var(name) {
-                    let l = fmt_local(name);
+                if vn == name && !cg.is_int_var(name) && !cg.cells.contains(name.as_ref()) {
                     let rhs = emit_expr(cg, b)?;
                     /* 右边是变量时要 clone（那个变量后面还要用）；是临时值就直接搬，省一次分配 */
                     let rhs_expr = if matches!(b.kind, ExprKind::Var(_)) {
@@ -2131,13 +2536,29 @@ fn emit_assign(cg: &mut Cg, target: &Target, op: AssignOp, value: &Expr, line: u
                     } else {
                         rhs
                     };
+                    if cg.is_local(name) {
+                        let l = fmt_local(name);
+                        cg.w(format!(
+                            "{{ let __t = {}; if !str_append_val(&mut {}, &__t) {{ {} = (arith(Op::Add, &{}, &__t)){}.clone(); }} }}",
+                            rhs_expr,
+                            l,
+                            l,
+                            l,
+                            em_ln(line, 1)
+                        ));
+                        return Ok(());
+                    }
+                    /* 顶层变量：值在 g.v[槽] 里。先把它搬出来（槽位临时置空），
+                     * 引用计数就变回 1，字符串能原地追加；不是字符串再按老路走 arith。 */
+                    let i = cg.slot_of(name);
                     cg.w(format!(
-                        "{{ let __t = {}; if !str_append_val(&mut {}, &__t) {{ {} = (arith(Op::Add, &{}, &__t)){}.clone(); }} }}",
+                        "{{ let __t = {}; let mut __s = std::mem::replace(&mut g.v[{}], V::Null); \
+                         if !str_append_val(&mut __s, &__t) {{ __s = (arith(Op::Add, &__s, &__t)){}.clone(); }} \
+                         g.v[{}] = __s; }}",
                         rhs_expr,
-                        l,
-                        l,
-                        l,
-                        em_ln(line, 1)
+                        i,
+                        em_ln(line, 1),
+                        i
                     ));
                     return Ok(());
                 }
@@ -2147,6 +2568,22 @@ fn emit_assign(cg: &mut Cg, target: &Target, op: AssignOp, value: &Expr, line: u
     let val = emit_expr(cg, value)?;
     let compound = op.to_op();
     match target {
+        Target::Deref(p) => {
+            // *p = v / *p += v：先取指针，再走 VM 同款 compound_value
+            let pp = emit_expr(cg, p)?;
+            let ln = line;
+            match compound {
+                Some(o) => cg.w(format!(
+                    "{{ let __p = ({}).clone(); let __cur = ptr_get(g, &__p, {}, 1)?; let __nv = compound_value({}, __cur, &({})){}; ptr_set(g, &__p, __nv, {}, 1)?; }}",
+                    pp, ln, bop_code(o), val, em_ln(line, 1), ln
+                )),
+                None => cg.w(format!(
+                    "ptr_set(g, &({}).clone(), ({}).clone(), {}, 1)?;",
+                    pp, val, ln
+                )),
+            }
+            Ok(())
+        }
         Target::Var(name) => {
             if cg.is_int_var(name) {
                 let cur = cg.read_int(name);
@@ -2223,6 +2660,17 @@ fn emit_assign(cg: &mut Cg, target: &Target, op: AssignOp, value: &Expr, line: u
             }
             if cg.is_local(name) {
                 let l = fmt_local(name);
+                if cg.cells.contains(name.as_ref()) {
+                    // 被捕获的变量存在共享 cell 里：读—算—写都经过 cell，外面立刻看得见
+                    match compound {
+                        Some(o) => cg.w(format!(
+                            "{{ let __old = cell_get(&{}); cell_set(&{}, compound_value({}, __old, &({})){}); }}",
+                            l, l, bop_code(o), val, em_ln(line, 1)
+                        )),
+                        None => cg.w(format!("cell_set(&{}, ({}).clone());", l, val)),
+                    }
+                    return Ok(());
+                }
                 match compound {
                     Some(o) => {
                         // 复合赋值走 VM 的同一个实现：字符串能就地追加（O(1) 摊还），整数有快路径
@@ -2297,6 +2745,7 @@ fn emit_args(cg: &mut Cg, args: &[Expr]) -> Result<Vec<String>, AotError> {
 /// 纯字面量 → JSON 子集字符串（给 parse_data 用）。有一处不是字面量就返回 None。
 fn data_json(e: &Expr) -> Option<String> {
     match &e.kind {
+        ExprKind::Int(n) => Some(format!("{}", n)),
         ExprKind::Num(f) => {
             if !f.is_finite() {
                 return None;
@@ -2367,6 +2816,12 @@ fn json_str(s: &str) -> String {
 fn int_expr(cg: &mut Cg, e: &Expr) -> Option<String> {
     let fm = cg.float_mode;
     match &e.kind {
+        // 浮点特化函数里，整数字面量也要按 f64 发射（否则 i64 * f64 编不过）
+        ExprKind::Int(n) => Some(if fm {
+            format!("{}f64", n)
+        } else {
+            format!("{}i64", n)
+        }),
         ExprKind::Num(f) => {
             if fm {
                 // 浮点模式任意数字字面量都收（{:?} 输出合法 Rust 字面量）
@@ -2575,6 +3030,7 @@ fn emit_expr(cg: &mut Cg, e: &Expr) -> Result<String, AotError> {
         return Ok(format!("V::Int({})", x));
     }
     match &e.kind {
+        ExprKind::Int(n) => Ok(format!("V::Int({}i64)", n)),
         ExprKind::Num(f) => Ok(num_lit(*f)),
         ExprKind::Str(s) => Ok(format!("V::str({})", lit_str(s))),
         ExprKind::Bool(b) => Ok(format!("V::Bool({})", b)),
@@ -2582,6 +3038,9 @@ fn emit_expr(cg: &mut Cg, e: &Expr) -> Result<String, AotError> {
         ExprKind::Var(name) => {
             // 局部/全局变量优先（名字可能和内建重合）
             if cg.is_local(name) {
+                if cg.cells.contains(name.as_ref()) {
+                    return Ok(format!("cell_get(&{})", fmt_local(name)));
+                }
                 return Ok(fmt_local(name));
             }
             if let Some(i) = cg.gslots.get(name.as_ref()) {
@@ -2589,6 +3048,21 @@ fn emit_expr(cg: &mut Cg, e: &Expr) -> Result<String, AotError> {
             }
             // 函数名 / 内建名 → 一等公民函数值
             if cg.meta.contains_key(name) || crate::builtins::is_builtin(name) {
+                // 捕获了外层变量的嵌套函数：抬成顶层函数后必须带捕获实参才能跑，
+                // 当值传出去就无从携带 → 明确报错，绝不发射一个会算错的半残值。
+                if cg.caps.get(name).map(|c| !c.is_empty()).unwrap_or(false) {
+                    return Err(AotError {
+                        message: format!(
+                            "函数「{}」用到了外层变量（{}），AOT 里只能直接调用，不能当值传来传去",
+                            name,
+                            cg.caps
+                                .get(name)
+                                .map(|c| c.iter().map(|x| x.to_string()).collect::<Vec<_>>().join("、"))
+                                .unwrap_or_default()
+                        ),
+                        line: e.span.line,
+                    });
+                }
                 cg.uses_dcall = true;
                 return Ok(format!("V::Native({})", lit_str(name)));
             }
@@ -2687,7 +3161,39 @@ fn emit_expr(cg: &mut Cg, e: &Expr) -> Result<String, AotError> {
             match op {
                 Op::Neg => Ok(format!("{{ let __a = ({}).clone(); neg(&__a){} }}", aa, em(e))),
                 Op::Not => Ok(format!("{{ let __a = ({}).clone(); V::Bool(!t(&__a)) }}", aa)),
-                Op::Addr | Op::Deref => Err(AotError::unsupported("指针（& / *）", e.span.line)),
+                Op::Addr => match &a.kind {
+                    ExprKind::Var(n) => {
+                        if cg.is_local(n) {
+                            // 局部变量：绑到它的 cell 上（&x 之后 *p 改的就是 x 本身）
+                            if !cg.cells.contains(n.as_ref()) {
+                                return Err(AotError::msg(format!(
+                                    "内部错误：{} 没有按可寻址变量处理（第 {} 行）",
+                                    n, e.span.line
+                                )));
+                            }
+                            Ok(format!("ptr_of_cell({}.clone())", fmt_local(n)))
+                        } else {
+                            let i = cg.slot_of(n);
+                            Ok(format!("ptr_of_global({})", i))
+                        }
+                    }
+                    ExprKind::Idx { obj: b, index: ix } => {
+                        let bb = emit_expr(cg, b)?;
+                        let xx = emit_expr(cg, ix)?;
+                        Ok(format!(
+                            "ptr_of_index(&({}).clone(), want_int_at(&({}).clone(), {}, {})?, {}, {})?",
+                            bb, xx, e.span.line, e.span.col, e.span.line, e.span.col
+                        ))
+                    }
+                    _ => Err(AotError::unsupported("& 只能作用于变量或列表元素", e.span.line)),
+                },
+                Op::Deref => {
+                    let aa = emit_expr(cg, a)?;
+                    Ok(format!(
+                        "ptr_get(g, &({}).clone(), {}, {})?",
+                        aa, e.span.line, e.span.col
+                    ))
+                }
                 Op::BitNot => Err(AotError::unsupported("按位取反 ~", e.span.line)),
                 _ => Ok(format!("{{ let __a = ({}).clone(); arith(Op::{:?}, &V::Int(0), &__a){} }}", aa, op, em(e))),
             }
@@ -2799,7 +3305,7 @@ fn emit_expr(cg: &mut Cg, e: &Expr) -> Result<String, AotError> {
                 if cg.split {
                     // 分块模式：方法分派在运行时里（块里不知道有哪些类）
                     return Ok(format!(
-                        "{{ let __recv = ({}).clone(); {}call_method(g, &__recv, {}, vec![{}], {}, {})? }}",
+                        "{{ let __recv = ({}).clone(); {}call_method(g, &__recv, {}, &[{}], {}, {})? }}",
                         oo,
                         bindp,
                         lit_str(name),
@@ -2809,7 +3315,7 @@ fn emit_expr(cg: &mut Cg, e: &Expr) -> Result<String, AotError> {
                     ));
                 }
                 Ok(format!(
-                    "{{ let __recv = ({}).clone(); {}mcall(g, &__recv, {}, vec![{}], {}, {})? }}",
+                    "{{ let __recv = ({}).clone(); {}mcall(g, &__recv, {}, &[{}], {}, {})? }}",
                     oo,
                     bindp,
                     lit_str(name),
@@ -2933,15 +3439,21 @@ fn emit_call(cg: &mut Cg, name: &str, args: &[Expr], e: &Expr) -> Result<String,
     if let Some(m) = meta_clone {
         // 分块模式：函数在别的块里 → 走运行时注册表（间接调用，块内调用仍是直接调用）
         if cg.split && cg.chunk_of.get(name).copied().unwrap_or(usize::MAX) != cg.my_chunk {
+            // 捕获了外层变量的嵌套函数只能在自己块里直接调用：注册表是按名字调，
+            // 拿不到调用方的捕获值。
+            if cg.caps.get(name).map(|c| !c.is_empty()).unwrap_or(false) {
+                return Err(AotError {
+                    message: format!(
+                        "函数「{}」用到了外层变量，跨块调用不支持（把它留在同一个块里）",
+                        name
+                    ),
+                    line: e.span.line,
+                });
+            }
             let mut args: Vec<String> = aa.iter().map(|a| format!("({}).clone()", a)).collect();
-            for i in aa.len()..m.arity {
-                match m.defaults.get(i).and_then(|d| d.clone()) {
-                    Some(d) => {
-                        let dv = emit_expr(cg, &d)?;
-                        args.push(dv);
-                    }
-                    None => args.push("V::Null".into()),
-                }
+            // 缺的补 Null，默认值在函数入口算（见 render_fn 的 __n 前言）
+            for _ in aa.len()..m.arity {
+                args.push("V::Null".into());
             }
             return Ok(format!(
                 "call_named(g, {}, vec![{}]){}",
@@ -2951,42 +3463,82 @@ fn emit_call(cg: &mut Cg, name: &str, args: &[Expr], e: &Expr) -> Result<String,
             ));
         }
         let fname = rust_fn_name(name);
+        // 实参比形参多：VM 会明确指出"只接受 N 个参数"，AOT 以前照样按实际实参个数
+        // 发射 Rust 调用，结果 rustc 报 E0061（参数个数对不上）→ 整份代码回落 VM。
+        // 这里在发射阶段就按 VM 的口径报出来，多传参数在编译期一次说清。
+        if aa.len() > m.arity {
+            let mm: &str = name.as_ref();
+            if mm.starts_with("__new_") && m.arity == 0 {
+                let cls = mm.trim_start_matches("__new_").trim_end_matches('_');
+                return Err(AotError {
+                    message: format!(
+                        "类 {} 没有 init 方法，不能接收参数（先在类里写 function init(…)）",
+                        cls
+                    ),
+                    line: e.span.line,
+                });
+            }
+            return Err(AotError {
+                message: format!(
+                    "函数 {} 只接受 {} 个参数，实际给了 {} 个",
+                    mm,
+                    m.arity,
+                    aa.len()
+                ),
+                line: e.span.line,
+            });
+        }
+        // 实参比形参少、而缺的那些参数又没默认值：VM 会明确报错（以前静默补 null）。
+        // 这里在发射阶段按同一口径拦住，别让"少传参数"的脚本在 AOT 下算出个假结果。
+        let req_args = m.defaults.iter().rposition(|d| d.is_none()).map(|i| i + 1).unwrap_or(0);
+        if aa.len() < req_args {
+            let mm: &str = name.as_ref();
+            return Err(AotError {
+                message: format!(
+                    "函数 {} 需要 {} 个参数，实际给了 {} 个（缺第 {} 个）",
+                    mm,
+                    req_args,
+                    aa.len(),
+                    aa.len() + 1
+                ),
+                line: e.span.line,
+            });
+        }
         // 实参统一先绑定局部再传：嵌套调用实参（h(g) 作为 f(g, …) 的实参）
         // 会和外层调用的两阶段借用撞车（E0499）。V 是 Rc 构造，clone 廉价。
         let mut pre = String::new();
         for (i, a) in aa.iter().enumerate() {
             pre.push_str(&format!("let __a{} = ({}).clone();\n", i, a));
         }
+        // 被调函数里"被别人捕获的参数"按 Cell 收：调用方要现做一个 cell 包起来
+        let pm: CellMarks = cg.cell_marks.get(name).cloned().unwrap_or_default();
         let mut call = format!("{}(g", fname);
         for i in 0..aa.len() {
-            call.push_str(&format!(", __a{}", i));
-        }
-        // 缺的参数用默认值表达式在调用点求值（和 VM 的 defaults 同一来源）；
-        // 没写默认值的补 Null。默认值表达式同样先绑定（可能含调用）。
-        for i in aa.len().min(m.arity)..m.arity {
-            match m.defaults.get(i).and_then(|d| d.clone()) {
-                Some(d) => {
-                    // 默认值目前只在**调用点**求值。要是它引用了被调函数自己的参数
-                    // （`fn area(w, h = w)`），调用点根本没有 w —— 以前这里报一句
-                    // "变量没有定义"，看着像用户代码写错，其实是 AOT 的能力缺口。
-                    let dv = emit_expr(cg, &d).map_err(|e| {
-                        if e.message.contains("没有定义") {
-                            AotError {
-                                message: format!(
-                                    "AOT 暂不支持：参数默认值引用了前一个参数（{}），默认值只能在调用点算，调用点没有这个参数",
-                                    e.message
-                                ),
-                                line: e.line.max(d.span.line),
-                            }
-                        } else {
-                            e
-                        }
-                    })?;
-                    pre.push_str(&format!("let __d{} = ({});\n", i, dv));
-                    call.push_str(&format!(", __d{}", i));
-                }
-                None => call.push_str(", V::Null"),
+            if pm.params.get(i).copied().unwrap_or(false) {
+                call.push_str(&format!(", cell_new(__a{})", i));
+            } else {
+                call.push_str(&format!(", __a{}", i));
             }
+        }
+        // 缺的参数：一律补 Null，由被调函数入口按 __n 自己算默认值。
+        // 这样默认值可以引用前一个参数，间接调用（函数值/注册表）也是同一套语义。
+        let has_def = m.defaults.iter().any(|d| d.is_some());
+        for i in aa.len()..m.arity {
+            if pm.params.get(i).copied().unwrap_or(false) {
+                call.push_str(", cell_new(V::Null)");
+            } else {
+                call.push_str(", V::Null");
+            }
+        }
+        // 捕获变量：抬升后的嵌套函数以"尾部同名参数"收外层局部变量，调用点按同顺序塞值。
+        // 这些变量在两边都是 Cell，传的是同一个 Rc —— 所以嵌套函数改了外层也看得见。
+        if let Some(caps) = cg.caps.get(name).cloned() {
+            for c in &caps {
+                call.push_str(&format!(", {}.clone()", fmt_local(c)));
+            }
+        }
+        if has_def {
+            call.push_str(&format!(", {}i64", aa.len()));
         }
         call.push(')');
         return Ok(format!("{{ {}{}? }}", pre, call));
@@ -3149,7 +3701,13 @@ fn emit_for_range(
 
     cg.w("{".into());
     cg.indent += 1;
-    cg.w(format!("let __rf = ({}); let __rt = ({}); let __rs = ({});", from_c, to_c, step_c));
+    // 三个边界都在循环块里算，而块可能整段被外层循环反复执行：
+    // 裸变量（`for i in 0 to n`）如果直接搬，就变成"第一次搬走、第二次借已搬走的值"，
+    // rustc 报 E0382。统一 clone，V 只是 Rc 自增，代价可以忽略。
+    cg.w(format!(
+        "let __rf = ({}).clone(); let __rt = ({}).clone(); let __rs = ({}).clone();",
+        from_c, to_c, step_c
+    ));
     cg.w("match (__rf.as_int(), __rt.as_int(), __rs.as_int()) {".into());
     cg.indent += 1;
     // 整数快路径
@@ -3344,10 +3902,12 @@ pub fn has_fn(name: &str) -> bool {
 }
 
 /// 方法调用：沿 __base 链找 __m_类_方法，找到就带着 self 调；找不到退回字典内建方法
-pub fn call_method(g: &mut Globals, o: &V, name: &str, args: Vec<V>, ln: u32, cl: u32) -> R<V> {
+pub fn call_method(g: &mut Globals, o: &V, name: &str, args: &[V], ln: u32, cl: u32) -> R<V> {
     if let V::Dict(d) = o {
-        if let Some(cv) = d.borrow().get("__cls") {
-            let mut cur = cv.to_display();
+        /* borrow guard 必须先放掉再分派：以前 `if let Some(cv) = d.borrow().get(...)`
+         * 会把 guard 包住整个块，方法体里改自己字段就 RefCell already borrowed 崩掉。 */
+        let cls0 = d.borrow().get("__cls").map(|v| v.to_display());
+        if let Some(mut cur) = cls0 {
             let mut guard = 0;
             loop {
                 guard += 1;
@@ -3358,18 +3918,19 @@ pub fn call_method(g: &mut Globals, o: &V, name: &str, args: Vec<V>, ln: u32, cl
                 if has_fn(&mname) {
                     let mut a: Vec<V> = Vec::with_capacity(args.len() + 1);
                     a.push(o.clone());
-                    a.extend(args);
+                    a.extend_from_slice(args);
                     return call_named(g, &mname, a).map_err(|m| fe(ln, cl, m));
                 }
-                match d.borrow().get("__base") {
-                    Some(b) => cur = b.to_display(),
+                let base0 = d.borrow().get("__base").map(|v| v.to_display());
+                match base0 {
+                    Some(b) => cur = b,
                     None => break,
                 }
             }
-            return dict_method(d, name, &args).map_err(|m| fe(ln, cl, m));
+            return dict_method(d, name, args).map_err(|m| fe(ln, cl, m));
         }
     }
-    method_plain(o, name, &args).map_err(|m| fe(ln, cl, m))
+    method_plain(o, name, args).map_err(|m| fe(ln, cl, m))
 }
 
 /// FNV-1a：分块要稳定（不能用 RandomState，否则每次编译块的归属都不一样，缓存全废）
@@ -3548,8 +4109,10 @@ fn render_fn_split(
     params: &[crate::ast::Param],
     body: &[Stmt],
     lambdas: &HashMap<(u32, u32), Rc<str>>,
+    caps: &HashMap<Rc<str>, Vec<Rc<str>>>,
+    cell_marks: &HashMap<Rc<str>, CellMarks>,
 ) -> Result<String, AotError> {
-    let int_locals = classify_int_vars(body);
+    let mut int_locals = classify_int_vars(body);
     let mut fcg = Cg {
         meta: meta.clone(),
         globals: globals.to_vec(),
@@ -3572,6 +4135,9 @@ fn render_fn_split(
         split: true,
         my_chunk,
         chunk_of: chunk_of.clone(),
+        caps: caps.clone(),
+            cell_marks: cell_marks.clone(),
+            cells: HashSet::new(),
     };
     for g in globals {
         fcg.slot_of(g);
@@ -3581,12 +4147,44 @@ fn render_fn_split(
     for p in params {
         locals.insert(Rc::clone(&p.name));
     }
+    let my_caps: Vec<Rc<str>> = caps.get(name).cloned().unwrap_or_default();
+    for c in &my_caps {
+        locals.insert(Rc::clone(c));
+    }
+    let my_marks: CellMarks = cell_marks.get(name).cloned().unwrap_or_default();
+    let mut cells: HashSet<Rc<str>> = my_caps.iter().cloned().collect();
+    for l in &my_marks.locals {
+        cells.insert(Rc::clone(l));
+    }
+    for (i, f) in my_marks.params.iter().enumerate() {
+        if *f {
+            if let Some(p) = params.get(i) {
+                cells.insert(Rc::clone(&p.name));
+            }
+        }
+    }
+    for n in addr_names(body) {
+        cells.insert(Rc::clone(&n));
+    }
+    for c in &cells {
+        int_locals.remove(c);
+    }
+    fcg.cells = cells.clone();
     fcg.locals = Some(locals.clone());
 
+    let has_def = params.iter().any(|p| p.default.is_some());
     let mut sig = String::new();
     sig.push_str(&format!("#[allow(unused_mut)]\npub fn {}(g: &mut Globals", rust_fn_name(name)));
     for p in params {
-        sig.push_str(&format!(", mut c_{}: V", sanitize(&p.name)));
+        let ty = if cells.contains(&p.name) { "Cell" } else { "V" };
+        sig.push_str(&format!(", mut c_{}: {}", sanitize(&p.name), ty));
+    }
+    for c in &my_caps {
+        sig.push_str(&format!(", mut c_{}: Cell", sanitize(c)));
+    }
+    // 同单文件：有默认值的函数多收实参个数，缺的在入口补（默认值可引用前参）
+    if has_def {
+        sig.push_str(", __n: i64");
     }
     sig.push_str(") -> R<V> {\n");
     sig.push_str(&format!("    let _guard = enter({})?;\n", lit_str(name)));
@@ -3597,8 +4195,13 @@ fn render_fn_split(
         if params.iter().any(|p| &p.name == l) {
             continue;
         }
+        if my_caps.iter().any(|c| c == l) {
+            continue;
+        }
         if int_locals.contains(l) {
             decls.push(format!("    let mut {}: i64 = 0;", fmt_local(l)));
+        } else if cells.contains(l) {
+            decls.push(format!("    let {}: Cell = cell_new(V::Null);", fmt_local(l)));
         } else {
             decls.push(format!("    let mut {}: V = V::Null;", fmt_local(l)));
         }
@@ -3607,6 +4210,29 @@ fn render_fn_split(
     for d in decls {
         fcg.out.push_str(&d);
         fcg.out.push('\n');
+    }
+
+    if has_def {
+        for (i, p) in params.iter().enumerate() {
+            if let Some(d) = &p.default {
+                let dv = emit_expr(&mut fcg, d)?;
+                if cells.contains(&p.name) {
+                    fcg.w(format!(
+                        "if __n <= {} as i64 {{ cell_set(&{}, ({}).clone()); }}",
+                        i,
+                        fmt_local(&p.name),
+                        dv
+                    ));
+                } else {
+                    fcg.w(format!(
+                        "if __n <= {} as i64 {{ {} = ({}).clone(); }}",
+                        i,
+                        fmt_local(&p.name),
+                        dv
+                    ));
+                }
+            }
+        }
     }
 
     emit_stmt_slice(&mut fcg, body, false)?;
@@ -3660,6 +4286,9 @@ fn render_fn_int(
         chunk_of: HashMap::new(),
             try_stack: Vec::new(),
             lambdas: lambdas.clone(),
+            caps: HashMap::new(),
+            cell_marks: HashMap::new(),
+            cells: HashSet::new(),
     };
     for g in globals {
         fcg.slot_of(g);
@@ -3709,6 +4338,8 @@ pub fn emit_split(prog: &Program, bin: &str, dep_path: &str) -> Result<Vec<Split
 
     let mut fns: Vec<(Rc<str>, Vec<crate::ast::Param>, Vec<Stmt>)> = Vec::new();
     scan_body(&prog.body, &mut fns)?;
+    let caps = collect_caps(&prog.body);
+    let cell_marks = collect_cell_marks(&prog.body, &caps);
 
     // 内联函数（fn(x) return …）：编译成隐藏函数并登记（分块模式同样支持）
     let top_stmts0: Vec<Stmt> = prog
@@ -3750,7 +4381,12 @@ pub fn emit_split(prog: &Program, bin: &str, dep_path: &str) -> Result<Vec<Split
         .filter(|s| !matches!(s.kind, StmtKind::FuncDef { .. }))
         .cloned()
         .collect();
-    let int_globals = classify_int_vars(&top_stmts);
+    /* 被 & 取过地址的全局变量不能进整型快路径（g.gi 不是 Value，指针指不到），
+     * 让它留在 g.v 的值槽里，&x / *p 才对得上同一个变量。 */
+    let mut int_globals = classify_int_vars(&top_stmts);
+    for n in addr_names(&prog.body) {
+        int_globals.remove(&n);
+    }
     let mut gi_sorted: Vec<Rc<str>> = int_globals.iter().cloned().collect();
     gi_sorted.sort();
     let gi_list0 = gi_sorted.clone();
@@ -3822,6 +4458,8 @@ pub fn emit_split(prog: &Program, bin: &str, dep_path: &str) -> Result<Vec<Split
                 params,
                 fbody,
                 &lambda_map,
+                &caps,
+                &cell_marks,
             )?);
             body.push('\n');
         }
@@ -3829,16 +4467,32 @@ pub fn emit_split(prog: &Program, bin: &str, dep_path: &str) -> Result<Vec<Split
         // 函数表（跨块调用用）
         body.push_str("pub static TABLE: &[(&str, usize, FnPtr)] = &[\n");
         for (i, (name, params, _)) in list.iter().enumerate() {
+            // 捕获了外层变量的嵌套函数不能进注册表（注册表按名字调，拿不到捕获值）
+            if caps.get(name).map(|c| !c.is_empty()).unwrap_or(false) {
+                continue;
+            }
             body.push_str(&format!("    ({}, {}, __w{}),\n", lit_str(name), params.len(), i));
         }
         body.push_str("];\n\n");
 
         // 统一签名的包装（注册表里的函数都是 fn(&mut Globals, Vec<V>) -> R<V>）
         for (i, (name, params, _)) in list.iter().enumerate() {
+            if caps.get(name).map(|c| !c.is_empty()).unwrap_or(false) {
+                continue;
+            }
             body.push_str(&format!("fn __w{}(g: &mut Globals, a: Vec<V>) -> R<V> {{\n", i));
             let mut call = format!("{}(g", rust_fn_name(name));
             for j in 0..params.len() {
-                call.push_str(&format!(", a.get({}).cloned().unwrap_or(V::Null)", j));
+                let v = format!("a.get({}).cloned().unwrap_or(V::Null)", j);
+                if cell_marks.get(name).map(|m| m.params.get(j).copied().unwrap_or(false)).unwrap_or(false) {
+                    call.push_str(&format!(", cell_new({})", v));
+                } else {
+                    call.push_str(&format!(", {}", v));
+                }
+            }
+            // 有默认值的函数：把"实际给了几个实参"传进去，缺的在函数入口补
+            if meta.get(name).map(|m| m.defaults.iter().any(|d| d.is_some())).unwrap_or(false) {
+                call.push_str(", a.len() as i64");
             }
             call.push(')');
             body.push_str(&format!("    {}\n}}\n", call));
@@ -3870,6 +4524,9 @@ pub fn emit_split(prog: &Program, bin: &str, dep_path: &str) -> Result<Vec<Split
         locals: None,
         try_stack: Vec::new(),
             lambdas: lambda_map.clone(),
+            caps: caps.clone(),
+            cell_marks: cell_marks.clone(),
+            cells: HashSet::new(),
         uses_mcall: false,
         uses_dcall: false,
         whole_int: false,
@@ -3896,6 +4553,8 @@ pub fn emit_split(prog: &Program, bin: &str, dep_path: &str) -> Result<Vec<Split
         classes: &HashSet<Rc<str>>,
         chunk_of: &HashMap<Rc<str>, usize>,
         lambdas: &HashMap<(u32, u32), Rc<str>>,
+        caps: &HashMap<Rc<str>, Vec<Rc<str>>>,
+        cell_marks: &HashMap<Rc<str>, CellMarks>,
     ) -> Cg {
         Cg {
             meta: meta.clone(),
@@ -3919,6 +4578,9 @@ pub fn emit_split(prog: &Program, bin: &str, dep_path: &str) -> Result<Vec<Split
             split: true,
             my_chunk: usize::MAX,
             chunk_of: chunk_of.clone(),
+            caps: caps.clone(),
+            cell_marks: cell_marks.clone(),
+            cells: HashSet::new(),
         }
     }
 
@@ -3942,6 +4604,7 @@ pub fn emit_split(prog: &Program, bin: &str, dep_path: &str) -> Result<Vec<Split
         if big && extractable {
             let mut dcg = make_top_cg(
                 &meta, &globals, &gslots0, &int_globals, &gi_list0, &gi_slots0, &classes, &chunk_of, &lambda_map,
+                &caps, &cell_marks,
             );
             // 取出要算的表达式
             let expr: &Expr = match &st.kind {
@@ -4029,7 +4692,7 @@ pub fn emit_split(prog: &Program, bin: &str, dep_path: &str) -> Result<Vec<Split
                             cur_count = 0;
                         }
                     } else {
-                        let mut c = make_top_cg(&meta, &globals, &gslots0, &int_globals, &gi_list0, &gi_slots0, &classes, &chunk_of, &lambda_map);
+                        let mut c = make_top_cg(&meta, &globals, &gslots0, &int_globals, &gi_list0, &gi_slots0, &classes, &chunk_of, &lambda_map, &caps, &cell_marks);
                         c.w(line.clone());
                         cur = Some(c);
                         cur_count = 1;
@@ -4043,7 +4706,7 @@ pub fn emit_split(prog: &Program, bin: &str, dep_path: &str) -> Result<Vec<Split
             TopItem::Inline(st) => {
                 if group_top {
                     if cur.is_none() {
-                        cur = Some(make_top_cg(&meta, &globals, &gslots0, &int_globals, &gi_list0, &gi_slots0, &classes, &chunk_of, &lambda_map));
+                        cur = Some(make_top_cg(&meta, &globals, &gslots0, &int_globals, &gi_list0, &gi_slots0, &classes, &chunk_of, &lambda_map, &caps, &cell_marks));
                         cur_count = 0;
                     }
                     {
@@ -4058,7 +4721,7 @@ pub fn emit_split(prog: &Program, bin: &str, dep_path: &str) -> Result<Vec<Split
                 } else {
                     {
                         let c = cur.get_or_insert_with(|| {
-                            make_top_cg(&meta, &globals, &gslots0, &int_globals, &gi_list0, &gi_slots0, &classes, &chunk_of, &lambda_map)
+                            make_top_cg(&meta, &globals, &gslots0, &int_globals, &gi_list0, &gi_slots0, &classes, &chunk_of, &lambda_map, &caps, &cell_marks)
                         });
                         emit_stmt(c, st, true)?;
                     }
@@ -4100,7 +4763,7 @@ pub fn emit_split(prog: &Program, bin: &str, dep_path: &str) -> Result<Vec<Split
     app.push_str(ALLOW);
     app.push_str("use copper_rt::*;\n\n");
     if uses_mcall {
-        app.push_str(&gen_mcall(&methods, true));
+        app.push_str(&gen_mcall(&methods, true, &meta));
         app.push('\n');
     }
     if uses_dcall {
@@ -4140,9 +4803,9 @@ pub fn emit_split(prog: &Program, bin: &str, dep_path: &str) -> Result<Vec<Split
             app.push_str(&format!("        copper_init{}::run(&mut g)?;\n", k));
         }
         app.push_str("        Ok(())\n    })();\n");
-        app.push_str("    if let Err(e) = __r {\n        out_flush();\n        use std::io::Write as _; let _ = std::io::stdout().flush();\n        eprintln!(\"出错（第 {} 行）：{}\", e.span.line, e.message);\n        std::process::exit(1);\n    }\n    out_flush();\n    }).unwrap();\n    __h.join().unwrap();\n}\n");
+        app.push_str("    if let Err(e) = __r {\n        out_flush();\n        eprintln!(\"\\n运行出错：第 {} 行：{}\", e.span.line, e.message);\n        std::process::exit(1);\n    }\n    out_flush();\n    }).unwrap();\n    __h.join().unwrap();\n}\n");
     } else {
-        app.push_str("    match run_top(&mut g) {\n        Ok(_) => {}\n        Err(e) => {\n            use std::io::Write as _; let _ = std::io::stdout().flush();\n            eprintln!(\"出错（第 {} 行）：{}\", e.span.line, e.message);\n            std::process::exit(1);\n        }\n    }\n    }).unwrap();\n    __h.join().unwrap();\n}\n");
+        app.push_str("    match run_top(&mut g) {\n        Ok(_) => { out_flush(); }\n        Err(e) => {\n            out_flush();\n            eprintln!(\"\\n运行出错：第 {} 行：{}\", e.span.line, e.message);\n            std::process::exit(1);\n        }\n    }\n    }).unwrap();\n    __h.join().unwrap();\n}\n");
     }
 
     let mut app_deps = String::from("copper_rt = { path = \"../rt\" }\n");
@@ -4190,52 +4853,71 @@ pub fn emit_split(prog: &Program, bin: &str, dep_path: &str) -> Result<Vec<Split
     Ok(files)
 }
 
-fn gen_mcall(methods: &[(String, String, usize)], split: bool) -> String {
+fn gen_mcall(methods: &[(String, String, usize)], split: bool, meta: &HashMap<Rc<str>, FnMeta>) -> String {
     let mut s = String::new();
-    s.push_str("fn mcall(g: &mut Globals, o: &V, name: &str, args: Vec<V>, ln: u32, cl: u32) -> R<V> {\n");
+    s.push_str("fn mcall(g: &mut Globals, o: &V, name: &str, args: &[V], ln: u32, cl: u32) -> R<V> {\n");
     s.push_str("    if let V::Dict(d) = o {\n");
-    s.push_str("        if let Some(cv) = d.borrow().get(\"__cls\") {\n");
-    s.push_str("            let mut cur = cv.to_display();\n");
+    /* 借阅必须在**调用方法之前**结束：以前写成 `if let Some(cv) = d.borrow().get(...)`，
+     * 那个 borrow guard 会活到整个 if-let 块结束，连里面的 return fname(g, o.clone(), …) 都包着。
+     * 结果是"方法里改自己的字段"必炸 RefCell already borrowed，例如
+     *   class A / int x / fn bump() x = x + 1
+     * 现在先把类名/父类名拷成 String 再放掉 guard，方法体里怎么改都不冲突。 */
+    s.push_str("        let __cls0 = d.borrow().get(\"__cls\").map(|v| v.to_display());\n");
+    s.push_str("        if let Some(mut cur) = __cls0 {\n");
     s.push_str("            loop {\n");
     s.push_str("                match (cur.as_str(), name) {\n");
     for (cls, meth, n) in methods {
-        let fname = rust_fn_name(&format!("__m_{}_{}", cls, meth));
+        let mname: Rc<str> = Rc::from(format!("__m_{}_{}", cls, meth));
+        let fname = rust_fn_name(&mname);
+        let dfl = meta.get(&mname).map(|m| m.defaults.clone()).unwrap_or_default();
+        let has_def = dfl.iter().any(|d| d.is_some());
+        let req = dfl.iter().rposition(|d| d.is_none()).map(|i| i + 1).unwrap_or(0);
+        let guard = if has_def {
+            format!("args.len() >= {} && args.len() <= {}", req, n)
+        } else {
+            format!("args.len() == {}", n)
+        };
         if split {
-            // 分块模式：方法函数在某个块里，走注册表
+            // 分块模式：方法函数在某个块里，走注册表（包装层补 Null / 传实参个数）
             s.push_str(&format!(
-                "                    (\"{}\", \"{}\") if args.len() == {} => {{\n                        let mut __a = vec![o.clone()];\n                        __a.extend(args);\n                        return call_named(g, {}, __a).map_err(|m| fe(ln, cl, m));\n                    }}\n",
-                cls,
-                meth,
-                n,
-                lit_str(&format!("__m_{}_{}", cls, meth))
+                "                    (\"{}\", \"{}\") if {} => {{\n                        let mut __a = vec![o.clone()];\n                        __a.extend_from_slice(args);\n                        for _ in __a.len()..{} {{ __a.push(V::Null); }}\n                        return call_named(g, {}, __a).map_err(|m| fe(ln, cl, m));\n                    }}\n",
+                cls, meth, guard, *n + 1, lit_str(&mname.to_string())
             ));
         } else {
             let mut call = String::from("g, o.clone()");
             for i in 0..*n {
-                call.push_str(&format!(", args[{}].clone()", i));
+                call.push_str(&format!(", args.get({}).cloned().unwrap_or(V::Null)", i));
+            }
+            if has_def {
+                call.push_str(", args.len() as i64");
             }
             s.push_str(&format!(
-                "                    (\"{}\", \"{}\") if args.len() == {} => return {}({}),\n",
-                cls, meth, n, fname, call
+                "                    (\"{}\", \"{}\") if {} => return {}({}),\n",
+                cls, meth, guard, fname, call
             ));
         }
     }
     s.push_str("                    _ => {}\n");
     s.push_str("                }\n");
-    s.push_str("                match d.borrow().get(\"__base\") {\n");
-    s.push_str("                    Some(b) => cur = b.to_display(),\n");
+    s.push_str("                let __base0 = d.borrow().get(\"__base\").map(|v| v.to_display());\n");
+    s.push_str("                match __base0 {\n");
+    s.push_str("                    Some(b) => cur = b,\n");
     s.push_str("                    None => break,\n");
     s.push_str("                }\n");
     s.push_str("            }\n");
-    s.push_str("            return dict_method(d, name, &args).map_err(|m| fe(ln, cl, m));\n");
+    s.push_str("            return dict_method(d, name, args).map_err(|m| fe(ln, cl, m));\n");
     s.push_str("        }\n");
     s.push_str("    }\n");
-    s.push_str("    method_plain(o, name, &args).map_err(|m| fe(ln, cl, m))\n");
+    s.push_str("    method_plain(o, name, args).map_err(|m| fe(ln, cl, m))\n");
     s.push_str("}\n");
     s
 }
 
-fn gen_dcall(meta: &HashMap<Rc<str>, FnMeta>) -> String {
+fn gen_dcall(
+    meta: &HashMap<Rc<str>, FnMeta>,
+    caps: &HashMap<Rc<str>, Vec<Rc<str>>>,
+    cell_marks: &HashMap<Rc<str>, CellMarks>,
+) -> String {
     let mut s = String::new();
     s.push_str("fn dcall(g: &mut Globals, f: &V, args: Vec<V>, ln: u32, cl: u32) -> R<V> {\n");
     s.push_str("    match f {\n");
@@ -4250,6 +4932,18 @@ fn gen_dcall(meta: &HashMap<Rc<str>, FnMeta>) -> String {
         // lambda（__lambda_行_列）就是要被动态调用的，必须生成臂；
         // 其余 __ 开头的是类内部函数，不走动态调用
         if name.starts_with("__") && !name.starts_with("__lambda_") {
+            continue;
+        }
+        // 捕获了外层变量的嵌套函数：动态调用拿不到捕获值，不生成臂
+        if caps.get(name).map(|c| !c.is_empty()).unwrap_or(false) {
+            continue;
+        }
+        // 参数是 Cell（被别人捕获）的函数：动态路的实参是 V，塞不进 Cell，不生成臂
+        if cell_marks
+            .get(name)
+            .map(|m| m.params.iter().any(|x| *x))
+            .unwrap_or(false)
+        {
             continue;
         }
         let fname = rust_fn_name(name);
@@ -4283,9 +4977,18 @@ fn gen_dcall(meta: &HashMap<Rc<str>, FnMeta>) -> String {
         let mut params = String::new();
         params.push_str("g");
         for i in 0..m.arity {
-            params.push_str(&format!(", args[{}].clone()", i));
+            params.push_str(&format!(", args.get({}).cloned().unwrap_or(V::Null)", i));
         }
-        s.push_str(&format!("        (\"{}\", {}) => {}({}),\n", name, m.arity, fname, params));
+        // 有默认值的函数：按"实参个数"放行（少了不报错，缺的在函数入口补）
+        if m.defaults.iter().any(|d| d.is_some()) {
+            let req = m.defaults.iter().rposition(|d| d.is_none()).map(|i| i + 1).unwrap_or(0);
+            s.push_str(&format!(
+                "        (\"{}\", n) if n >= {} && n <= {} => {}({}, n as i64),\n",
+                name, req, m.arity, fname, params
+            ));
+        } else {
+            s.push_str(&format!("        (\"{}\", {}) => {}({}),\n", name, m.arity, fname, params));
+        }
     }
     // data.* 高阶函数臂：转发到 hof_dispatch（prelude 的运行时实现，
     // 回调经 hof_call → dcall_by_name 静态表调用）
@@ -4301,7 +5004,7 @@ fn gen_dcall(meta: &HashMap<Rc<str>, FnMeta>) -> String {
         ("data.find_index", 2),
     ] {
         s.push_str(&format!(
-            "        (\"{}\", {}) => hof_dispatch(g, \"{}\", args.clone(), ln, cl).unwrap_or_else(|| call_builtin(\"{}\", &args)),\n",
+            "        (\"{}\", {}) => hof_dispatch(g, \"{}\", args.clone(), ln, cl).unwrap_or_else(|| call_builtin(\"{}\", &args).map_err(|m| fe(ln, cl, m))),\n",
             hn, harity, hn, hn
         ));
     }
@@ -4323,11 +5026,163 @@ const PRELUDE: &str = r#"// ── 运行时前奏：全部复用 float-lang 的
 pub use std::rc::Rc;
 pub use float_lang::builtins::{call_builtin, str_method, list_method, dict_method};
 pub use float_lang::value::Dict;
+pub use float_lang::value::{MemBlock, PtrTarget};
+pub use float_lang::error::FloatError;
 pub use float_lang::bytecode::Op;
 pub use float_lang::vm::{arith, compare, compound_value, index_get, index_set, member_get, member_set, slice_value};
 
 thread_local! {
     pub static DEPTH: std::cell::Cell<u32> = std::cell::Cell::new(0);
+}
+
+/* 捕获单元：嵌套函数要按引用共享外层变量（改了外层也要看得见），
+ * 所以被捕获的变量存成"一格的 cell"，函数之间传的是同一个 Rc。 */
+pub type Cell = Rc<std::cell::RefCell<Vec<V>>>;
+pub fn cell_new(v: V) -> Cell {
+    Rc::new(std::cell::RefCell::new(vec![v]))
+}
+pub fn cell_get(c: &Cell) -> V {
+    c.borrow()[0].clone()
+}
+pub fn cell_set(c: &Cell, v: V) {
+    c.borrow_mut()[0] = v;
+}
+
+/* throw / catch 的值语义（对齐 VM 的 error_value）：
+ * - throw 抛什么，catch 就拿到什么（原样传，不做包装）；
+ * - 运行时错误则给一张中文键的小字典（message/消息/line/行/file/类型）。
+ * 抛出的值放在 THROWN 里随错误一起穿出闭包——错误类型本身不带值，所以用这条通道。 */
+thread_local! {
+    pub static THROWN: std::cell::RefCell<Option<V>> = std::cell::RefCell::new(None);
+}
+pub fn throw_err(v: V, ln: u32, cl: u32) -> FloatError {
+    let msg = disp(&v);
+    THROWN.with(|t| *t.borrow_mut() = Some(v));
+    fe(ln, cl, msg)
+}
+fn strip_line_prefix(m: &str) -> &str {
+    // 形如「第 12 行：xxx」→ 只留 xxx（跟 VM 的 strip_line_prefix 同一口径）
+    if let Some(rest) = m.strip_prefix('第') {
+        if let Some(pos) = rest.find("行：") {
+            let tail = &rest[pos + 2..];
+            return tail.strip_prefix('：').unwrap_or(tail);
+        }
+    }
+    m
+}
+pub fn catch_bind(e: &FloatError) -> V {
+    if let Some(v) = THROWN.with(|t| t.borrow_mut().take()) {
+        return v;
+    }
+    let raw = strip_line_prefix(&e.message);
+    let mut d = Dict::new();
+    d.set(Rc::from("message"), V::string(raw.to_string()));
+    d.set(Rc::from("消息"), V::string(raw.to_string()));
+    d.set(Rc::from("line"), V::Int(e.span.line as i64));
+    d.set(Rc::from("行"), V::Int(e.span.line as i64));
+    d.set(Rc::from("file"), V::string(e.span.file.to_string()));
+    d.set(Rc::from("类型"), V::string(String::from("运行时错误")));
+    V::Dict(Rc::new(std::cell::RefCell::new(d)))
+}
+
+/* 指针：&变量 直接绑到那个变量所在的 cell 上（读写都回到变量本身），
+ * &全局变量 绑到全局槽，&列表[i] 共享列表的 Vec。和 VM 是同一套 MemBlock，
+ * 所以 *p / *p = x / *p += x / 越界 / free 后访问的中文报错完全一致。 */
+pub fn ptr_of_cell(c: Cell) -> V {
+    V::Ptr(Rc::new(std::cell::RefCell::new(MemBlock {
+        target: PtrTarget::Cells(c),
+        idx: 0,
+        owned: false,
+        freed: false,
+        base: 0,
+    })))
+}
+pub fn ptr_of_global(i: usize) -> V {
+    V::Ptr(Rc::new(std::cell::RefCell::new(MemBlock {
+        target: PtrTarget::Global(i),
+        idx: 0,
+        owned: false,
+        freed: false,
+        base: 0,
+    })))
+}
+/// &列表[i]：和 VM 的 AddrIdx 一样共享同一个 Vec
+pub fn ptr_of_index(base: &V, i: i64, ln: u32, cl: u32) -> R<V> {
+    match base {
+        V::List(l) => {
+            let len = l.borrow().len() as i64;
+            if i < 0 || i >= len {
+                return Err(fe(ln, cl, format!("& 取地址：第 {} 格越界了（这块一共 {} 格）", i, len)));
+            }
+            Ok(V::Ptr(Rc::new(std::cell::RefCell::new(MemBlock {
+                target: PtrTarget::Cells(l.clone()),
+                idx: i as usize,
+                owned: false,
+                freed: false,
+                base: 0,
+            }))))
+        }
+        other => Err(fe(ln, cl, format!("& 只能对列表元素或指针格子取地址，得到 {}", other.to_display()))),
+    }
+}
+pub fn ptr_get(g: &Globals, p: &V, ln: u32, cl: u32) -> R<V> {
+    match p {
+        V::Ptr(pr) => {
+            let b = pr.borrow();
+            if b.freed {
+                return Err(fe(ln, cl, String::from("这块内存已经 free 了，不能再读")));
+            }
+            match &b.target {
+                PtrTarget::Cells(c) => {
+                    let cells = c.borrow();
+                    if b.idx >= cells.len() {
+                        return Err(fe(
+                            ln,
+                            cl,
+                            format!("指针指到第 {} 格，越界了（这块一共 {} 格）", b.idx, cells.len()),
+                        ));
+                    }
+                    Ok(cells[b.idx].clone())
+                }
+                PtrTarget::Global(i) => Ok(g.v.get(*i).cloned().unwrap_or(V::Null)),
+                PtrTarget::Local { .. } => Err(fe(ln, cl, String::from("这个指针指向的变量已经离开作用域了（悬空指针）"))),
+            }
+        }
+        other => Err(fe(ln, cl, format!("* 只能解引用指针，得到 {}（取地址用 &）", other.to_display()))),
+    }
+}
+pub fn ptr_set(g: &mut Globals, p: &V, v: V, ln: u32, cl: u32) -> R<V> {
+    match p {
+        V::Ptr(pr) => {
+            let b = pr.borrow();
+            if b.freed {
+                return Err(fe(ln, cl, String::from("这块内存已经 free 了，不能再写")));
+            }
+            match &b.target {
+                PtrTarget::Cells(c) => {
+                    let len = c.borrow().len();
+                    if b.idx >= len {
+                        return Err(fe(
+                            ln,
+                            cl,
+                            format!("指针指到第 {} 格，越界了（这块一共 {} 格）", b.idx, len),
+                        ));
+                    }
+                    c.borrow_mut()[b.idx] = v.clone_deep();
+                }
+                PtrTarget::Global(i) => {
+                    if *i < g.v.len() {
+                        g.v[*i] = v.clone_deep();
+                    }
+                }
+                PtrTarget::Local { .. } => {
+                    return Err(fe(ln, cl, String::from("这个指针指向的变量已经离开作用域了（悬空指针）")))
+                }
+            }
+            Ok(V::Null)
+        }
+        other => Err(fe(ln, cl, format!("* 只能解引用指针，得到 {}（取地址用 &）", other.to_display()))),
+    }
 }
 
 /// 全局变量容器：v 放任意值，gi 放能证明是整数的变量（不碰 Value 枚举），
@@ -4487,14 +5342,22 @@ pub fn out_flush() {
 
 /// 读一行输入（`ask`）：和 VM 的控制台风格一致——回声非空输入，EOF 给空串。
 /// 只有在终端里才每行 flush（管道/重定向时 flush 是纯 syscall 开销）
-pub fn ask_line() -> R<V> {
+pub fn ask_line(ln: u32, cl: u32) -> R<V> {
     use std::io::{BufRead, IsTerminal, Write};
     if std::io::stdin().is_terminal() {
         out_flush();
         let _ = std::io::stdout().flush();
     }
     let mut s = String::new();
-    let _ = std::io::stdin().lock().read_line(&mut s);
+    match std::io::stdin().lock().read_line(&mut s) {
+        Ok(0) | Err(_) => {
+            /* 错误交回主流程统一打印（带行号、和 VM 同一句文案），
+             * 这里先把攒着的输出冲出去，不能因为出错丢掉前面的 print */
+            out_flush();
+            return Err(fe(ln, cl, "输入已经结束（EOF）：ask 没有拿到答案"));
+        }
+        Ok(_) => {}
+    }
     let t = s.trim_end_matches(['\r', '\n']).to_string();
     if !t.is_empty() {
         out_line(&t);
@@ -4599,6 +5462,8 @@ pub enum CopperIter {
     List(float_lang::value::ListRef, usize),
     Dict(float_lang::value::DictRef, Vec<Rc<str>>, usize),
     Str { s: Rc<String>, i: usize },
+    /// 指针（alloc 块或 &列表[i]）：从当前指向的那格开始往后走
+    Ptr { p: Rc<std::cell::RefCell<MemBlock>>, i: usize },
 }
 
 impl Iterator for CopperIter {
@@ -4621,6 +5486,18 @@ impl Iterator for CopperIter {
                 *i += c.len_utf8();
                 Some(V::string(c.to_string()))
             }
+            CopperIter::Ptr { p, i } => {
+                let m = p.borrow();
+                if m.freed {
+                    return None;
+                }
+                let r = match &m.target {
+                    PtrTarget::Cells(c) => c.borrow().get(m.idx + *i).cloned(),
+                    _ => None,
+                };
+                *i += 1;
+                r
+            }
         }
     }
 }
@@ -4630,6 +5507,13 @@ pub fn iter_src(v: &V) -> Result<CopperIter, String> {
         V::List(l) => Ok(CopperIter::List(Rc::clone(l), 0)),
         V::Dict(d) => Ok(CopperIter::Dict(Rc::clone(d), d.borrow().keys().to_vec(), 0)),
         V::Str(s) => Ok(CopperIter::Str { s: Rc::clone(s), i: 0 }),
+        V::Ptr(p) => {
+            let m = p.borrow();
+            if m.freed {
+                return Err(String::from("这块内存已经 free 了，不能再遍历"));
+            }
+            Ok(CopperIter::Ptr { p: Rc::clone(p), i: 0 })
+        }
         other => Err(format!("{} 不能 for-in 迭代", other.to_display())),
     }
 }

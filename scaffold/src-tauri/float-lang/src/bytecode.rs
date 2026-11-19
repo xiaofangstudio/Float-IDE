@@ -387,7 +387,7 @@ impl Analyzer {
         match &e.kind {
             ExprKind::Var(n) => self.use_name(n),
             ExprKind::SelfRef => self.use_name(&Rc::from("self")),
-            ExprKind::Num(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Null => {}
+            ExprKind::Num(_) | ExprKind::Int(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Null => {}
             ExprKind::List(xs) => for x in xs { self.expr(x); },
             ExprKind::Dict(xs) => for (k, v) in xs { self.expr(k); self.expr(v); },
             ExprKind::Un { a, .. } => self.expr(a),
@@ -699,6 +699,7 @@ impl Compiler {
             ExprKind::Bool(_) => "bool",
             ExprKind::List(_) => "list",
             ExprKind::Dict(_) => "dict",
+            ExprKind::Int(_) => "int",
             ExprKind::Num(v) => {
                 if v.fract() == 0.0 && v.is_finite() { "int" } else { "float" }
             }
@@ -789,6 +790,22 @@ impl Compiler {
         analyzer.block(&prog.body);
         self.lazy_sigs = analyzer.lazy_sigs.clone();
         self.infos = analyzer.infos;
+        // 同名函数定义两次：后一个静默覆盖前一个，调用方完全看不出来。
+        // 编译期直接报，别让人查半天"为什么我的函数没生效"。
+        let mut fn_names: std::collections::HashSet<Rc<str>> = std::collections::HashSet::new();
+        for s in &prog.body {
+            if let StmtKind::FuncDef { name, .. } = &s.kind {
+                if !fn_names.insert(Rc::clone(name)) {
+                    self.err(
+                        format!(
+                            "函数「{}」定义了两次：后一个会覆盖前一个，前一个的函数体等于白写",
+                            name
+                        ),
+                        &s.span,
+                    );
+                }
+            }
+        }
         for s in &prog.body {
             self.stmt(s);
         }
@@ -861,6 +878,39 @@ impl Compiler {
             StmtKind::Assign { target, op, value } => {
                 if *op == AssignOp::Set {
                     self.check_assign_type(target, value, &s.span);
+                    /* `x = x + y` 与 `x += y` 是同一种运算，走同一条融合指令：
+                     * 读槽位 → 算 → 写回槽位，而且值是从槽位"搬"出来的（不是克隆），
+                     * 字符串引用计数为 1 时 VM 就能原地追加（`s = s + "x"` 因此不再 O(n²)）。 */
+                    if let (Target::Var(name), ExprKind::Bin { op: crate::ast::Op::Add, a, b }) =
+                        (target, &value.kind)
+                    {
+                        if matches!(&a.kind, ExprKind::Var(l) if l == name) {
+                            if let Some((is_global, dst)) = slot_parts(self.resolve(name)) {
+                                let flags = is_global as u8;
+                                if let ExprKind::Var(src_name) = &b.kind {
+                                    if let Some((sg, si)) = slot_parts(self.resolve(src_name)) {
+                                        self.emit(Op::CompoundVar {
+                                            bop: 0u8,
+                                            dst,
+                                            src: si,
+                                            flags: flags | ((sg as u8) << 1),
+                                        });
+                                        return;
+                                    }
+                                }
+                                if let Some(v) = literal_of(b) {
+                                    let k = self.konst(v);
+                                    self.emit(Op::CompoundVarConst {
+                                        bop: 0u8,
+                                        dst,
+                                        flags,
+                                        k,
+                                    });
+                                    return;
+                                }
+                            }
+                        }
+                    }
                     self.push_ref(target);
                     self.expr(value);
                     self.emit_set(target);
@@ -1326,13 +1376,22 @@ impl Compiler {
                 self.emit(Op::Return);
             }
             StmtKind::Return(v) => {
+                // 顶层的 return 是这边**有意保留**的写法：等价于"程序到此为止"，
+                // language/samples 里 5 个示例（猜数字、ELIZA、计算器…）都靠它提前收尾。
+                // 所以这里不做拦截——它跟"静默改语义"不是一回事，收尾是写作者的本意。
                 // `return n` 这种最常见：一条指令直接返回
-                if let Some(e) = v {
-                    if let ExprKind::Var(name) = &e.kind {
-                        if let Some(slot) = self.lookup(name) {
-                            if let Some((is_global, idx)) = slot_parts(slot) {
-                                self.emit(Op::ReturnLocal { slot: idx, flags: is_global as u8 });
-                                return;
+                // ⚠ 只在"外面没有 finally"时才能走这条快路：ReturnLocal 是直接出门，
+                // 不会再跑 run_finallies。以前这里无条件快返，导致
+                // `try { int k = 8; return k } finally { print(...) }` 里 finally 被整段跳过，
+                // 而且连个报错都没有——静默漏执行，必须堵死。
+                if self.finallies.is_empty() {
+                    if let Some(e) = v {
+                        if let ExprKind::Var(name) = &e.kind {
+                            if let Some(slot) = self.lookup(name) {
+                                if let Some((is_global, idx)) = slot_parts(slot) {
+                                    self.emit(Op::ReturnLocal { slot: idx, flags: is_global as u8 });
+                                    return;
+                                }
                             }
                         }
                     }
@@ -1880,6 +1939,9 @@ impl Compiler {
     fn expr(&mut self, e: &Expr) {
 
         match &e.kind {
+            ExprKind::Int(n) => {
+                self.emit_const(Value::Int(*n));
+            }
             ExprKind::Num(n) => {
                 let v = if n.fract() == 0.0 && n.abs() < 9.007_199_254_740_992e15 {
                     Value::Int(*n as i64)

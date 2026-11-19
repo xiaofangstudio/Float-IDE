@@ -46,6 +46,8 @@ export type Param = {
   name: string;
   type: TypeName | null;
   def: Expr | null;
+  /** lazy 参数：调用处不立即求值，函数体每次读它时按调用方的环境重算（by-name） */
+  lazy?: boolean;
   line: number;
   col: number;
 };

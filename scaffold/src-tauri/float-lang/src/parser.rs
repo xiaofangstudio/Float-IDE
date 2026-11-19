@@ -507,6 +507,15 @@ impl<'a> ExprParser<'a> {
                 self.pos += 1;
                 let a = self.parse_unary()?;
                 let span = Span::new(self.file, t.line, t.col, a.span.end_col);
+                // `-9223372036854775808`：正字面量 2^63 存不进 i64，只能走 f64；
+                // 取负之后正好是 i64::MIN，这里折成精确整数，别让它变成浮点。
+                if op == Op::Neg {
+                    if let ExprKind::Num(f) = a.kind {
+                        if f == 9_223_372_036_854_775_808.0 {
+                            return Ok(Expr::new(ExprKind::Int(i64::MIN), span));
+                        }
+                    }
+                }
                 return Ok(Expr::new(ExprKind::Un { op, a: Box::new(a) }, span));
             }
         }
@@ -851,7 +860,43 @@ impl<'a> ExprParser<'a> {
         let t = self.bump().cloned().ok_or_else(|| self.err("缺少表达式"))?;
         let span = self.span_of(&t);
         match t.kind {
-            TokKind::Num => Ok(Expr::new(ExprKind::Num(t.num.unwrap_or(f64::NAN)), span)),
+            TokKind::Num => {
+                /* 整数字面量超出 i64：以前会静默变成 f64，后面所有位运算/取模都跟着漂。
+                 * 这里统一在解析期拦住；真要存大数请显式写成小数（加 .0）。 */
+                let txt: &str = t.text.as_ref();
+                let is_pure_int = !txt.contains('.')
+                    && !txt.contains('e')
+                    && !txt.contains('E')
+                    && !txt.contains('x')
+                    && !txt.contains('X');
+                if is_pure_int {
+                    let digits = txt.replace('_', "");
+                    match digits.parse::<i128>() {
+                        // 9223372036854775808 单独放行：`-9223372036854775808` 会被解析成
+                        // "负号 + 正字面量"，这个数正好是 i64::MIN 的绝对值，不能拦。
+                        Ok(v) if v > i64::MAX as i128 && v != i64::MAX as i128 + 1 => {
+                            return Err(self.err(format!(
+                                "整数 {} 超出 64 位整数范围（最大 9223372036854775807）。\
+                                 要存这么大的数请写成小数形式（例如 {}.0），别让它悄悄变成浮点",
+                                txt, txt
+                            )));
+                        }
+                        Err(_) => {
+                            return Err(self.err(format!(
+                                "整数 {} 太长，超出 64 位整数范围（最大 9223372036854775807）",
+                                txt
+                            )));
+                        }
+                        // 能精确表示为 i64 的，原样保留（不要经过 f64，否则 2^53 以上会掉位）
+                        Ok(v) => {
+                            if let Ok(exact) = i64::try_from(v) {
+                                return Ok(Expr::new(ExprKind::Int(exact), span));
+                            }
+                        }
+                    }
+                }
+                Ok(Expr::new(ExprKind::Num(t.num.unwrap_or(f64::NAN)), span))
+            }
             TokKind::Str => Ok(self.string_expr(t.text.clone(), span)),
             TokKind::Ident | TokKind::Kw => {
                 // f{项, 项, …}：逗号拼接字面量。不带引号的项当表达式，每项自动转
@@ -1099,8 +1144,159 @@ pub fn parse_program(file: &str, src: &str) -> Program {
         let body = Vec::new();
         return Program { file, body, errors: p.errors, warnings };
     }
-    let body = p.parse_block(0);
+    let mut body = p.parse_block(0);
+    // 类降级发生在逐行解析时，那时看不到别的类。这里补一遍：
+    // 子类没写 init 的，继承父类的 init（参数和调用一起接过来）；
+    // 顺手校验 `extends` 指向的父类真的存在（以前写错名字会静默当成没继承）。
+    inherit_constructors(&mut body, &file, &mut p.errors);
     Program { file, body, errors: p.errors, warnings }
+}
+
+/// 子类没写 `init` 时，构造器要继承父类的 `init`：
+/// `class Cat extends Animal` 就该能 `new Cat("咪咪", 8)`。
+///
+/// 以前构造器的参数只取**自己**的 init，子类不写 init 就变成零参数构造器，
+/// 而调用点照样传两个实参 —— VM 报"类 Cat 没有 init 方法，不能接收参数"，
+/// AOT 生成的 Rust 直接 E0061（参数个数对不上）。这不是某一份代码的问题，
+/// 是"子类继承父类构造行为"这条规则没落地，所以在这里统一补上。
+fn inherit_constructors(body: &mut [Stmt], file: &Rc<str>, errors: &mut Vec<FloatError>) {
+    use std::collections::HashMap;
+    // 类名 → (init 的参数, init 属于哪个类)
+    let mut inits: HashMap<Rc<str>, (Vec<crate::ast::Param>, Rc<str>)> = HashMap::new();
+    // 类名 → (直接父类, extends 那行所在的 span)
+    let mut bases: HashMap<Rc<str>, (Rc<str>, Span)> = HashMap::new();
+    // 需要补的构造器类名
+    let mut ctors: Vec<Rc<str>> = Vec::new();
+
+    // 类降级的产物可能被包在 Group 里（一行一个 class 也能成块），所以递归扫
+    fn scan(
+        stmts: &[Stmt],
+        inits: &mut HashMap<Rc<str>, (Vec<crate::ast::Param>, Rc<str>)>,
+        bases: &mut HashMap<Rc<str>, (Rc<str>, Span)>,
+        ctors: &mut Vec<Rc<str>>,
+    ) {
+        for s in stmts {
+            match &s.kind {
+                StmtKind::Group(xs) => scan(xs, inits, bases, ctors),
+                StmtKind::FuncDef { name, params, body: fb, .. } => {
+                    let n = name.as_ref();
+                    if let Some(cls) = n.strip_prefix("__init_").and_then(|r| r.strip_suffix('_')) {
+                        // __init_ 的第 0 个参数是 self，构造器的参数表里不该有它
+                        let ps: Vec<crate::ast::Param> = params
+                            .iter()
+                            .filter(|p| p.name.as_ref() != "self")
+                            .cloned()
+                            .collect();
+                        inits.insert(Rc::from(cls), (ps, Rc::from(cls)));
+                    } else if let Some(cls) = n.strip_prefix("__new_").and_then(|r| r.strip_suffix('_')) {
+                        ctors.push(Rc::from(cls));
+                        for st in fb {
+                            if let StmtKind::Assign { target: Target::Idx(_, idx), value, .. } = &st.kind {
+                                if let (ExprKind::Str(k), ExprKind::Str(v)) = (&idx.kind, &value.kind) {
+                                    if k.as_ref() == "__base" {
+                                        bases.insert(Rc::from(cls), (Rc::clone(v), s.span.clone()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    scan(body, &mut inits, &mut bases, &mut ctors);
+
+    /* `class A extends Nope` 且 Nope 根本没定义：以前这条链会被静默当成"没有继承"，
+     * 对象照样建出来、程序退出码 0 —— 典型的"静默改语义"。
+     * 现在统一校验：所有 extends 指向的名字必须是同一份程序里定义过的类。 */
+    for (cls, (parent, sp)) in &bases {
+        if !ctors.iter().any(|c| c.as_ref() == parent.as_ref()) {
+            errors.push(FloatError::new(
+                format!(
+                    "类 {} 继承的父类 {} 不存在（同一份程序里没有这个类，名字写错了吗？）",
+                    cls, parent
+                ),
+                sp.clone(),
+            ));
+        }
+    }
+
+    // 父类自己也可能没 init：一路往上找到第一个有 init 的祖先
+    fn resolve(
+        cls: &Rc<str>,
+        bases: &HashMap<Rc<str>, (Rc<str>, Span)>,
+        inits: &HashMap<Rc<str>, (Vec<crate::ast::Param>, Rc<str>)>,
+    ) -> Option<(Vec<crate::ast::Param>, Rc<str>)> {
+        let mut cur = Rc::clone(cls);
+        for _ in 0..32 {
+            if let Some((ps, owner)) = inits.get(&cur) {
+                return Some((ps.clone(), Rc::clone(owner)));
+            }
+            match bases.get(&cur) {
+                Some((b, _)) => cur = Rc::clone(b),
+                None => return None,
+            }
+        }
+        None
+    }
+
+    fn patch(
+        stmts: &mut [Stmt],
+        inits: &HashMap<Rc<str>, (Vec<crate::ast::Param>, Rc<str>)>,
+        bases: &HashMap<Rc<str>, (Rc<str>, Span)>,
+        target: &Rc<str>,
+    ) {
+        for s in stmts.iter_mut() {
+            match &mut s.kind {
+                StmtKind::Group(xs) => patch(xs, inits, bases, target),
+                StmtKind::FuncDef { name, params, body: fb, .. } => {
+                    if name.as_ref() != format!("__new_{}_", target).as_str() {
+                        continue;
+                    }
+                    // 自己已经有 init 的，本来就接好了（用类名判断，不是构造器函数名）
+                    if inits.contains_key(target.as_ref()) {
+                        continue;
+                    }
+                    let Some((iparams, owner)) = resolve(target, bases, inits) else { continue };
+                    if owner.as_ref() == target.as_ref() {
+                        continue; // 找到的是自己的 init（上面已判过，双保险）
+                    }
+                    if params.is_empty() {
+                        *params = iparams.clone();
+                    }
+                    // 在 return self 之前插入 `__init_父类_(self, …)`
+                    let mut args = vec![Expr::new(ExprKind::Var(Rc::from("self")), s.span.clone())];
+                    for p in &iparams {
+                        args.push(Expr::new(ExprKind::Var(Rc::clone(&p.name)), s.span.clone()));
+                    }
+                    let call = Stmt::new(
+                        StmtKind::ExprStmt(Expr::new(
+                            ExprKind::Call {
+                                callee: Box::new(Expr::new(
+                                    ExprKind::Var(Rc::from(format!("__init_{}_", owner).as_str())),
+                                    s.span.clone(),
+                                )),
+                                args,
+                            },
+                            s.span.clone(),
+                        )),
+                        s.span.clone(),
+                    );
+                    let pos = fb
+                        .iter()
+                        .position(|st| matches!(st.kind, StmtKind::Return(_)))
+                        .unwrap_or(fb.len());
+                    fb.insert(pos, call);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    for cls in ctors {
+        patch(body, &inits, &bases, &cls);
+    }
 }
 
 impl Parser {
@@ -1189,7 +1385,27 @@ impl Parser {
                             k += 1;
                             continue;
                         }
-                        let pname: Rc<str> = Rc::from(toks_l[k].text.as_str());
+                        /* 方法参数和普通函数一样可以带类型 / lazy：
+                         * `fn set(int v)` 以前把 "int" 当成参数名，这个方法就被算成
+                         * 两个参数，调用 `d.set(4)` 直接报"需要 2 个参数"。
+                         * 这里必须先把可选的 lazy 和类型词吃掉，再取真正的参数名。 */
+                        let mut lazy = false;
+                        if toks_l[k].text == "lazy" {
+                            k += 1;
+                            lazy = true;
+                        }
+                        let mut ty: Option<TypeName> = None;
+                        if let Some(t) = toks_l.get(k) {
+                            if t.kind == TokKind::Ident && TYPE_WORDS.contains(&t.text.as_str()) {
+                                ty = TypeName::from_word(&t.text);
+                                k += 1;
+                            }
+                        }
+                        let pname: Rc<str> = match toks_l.get(k) {
+                            Some(t) => Rc::from(t.text.as_str()),
+                            None => return Err(FloatError::new("参数列表没写完", self.line_span(bl))),
+                        };
+                        let pcol = toks_l[k].col;
                         let mut default = None;
                         k += 1;
                         if toks_l.get(k).map(|t| t.text.as_str()) == Some("=") {
@@ -1200,7 +1416,7 @@ impl Parser {
                                 k += 1;
                             }
                         }
-                        params.push(Param { name: pname, ty: None, default, lazy: false, line: bl.no as u32, col: 1 });
+                        params.push(Param { name: pname, ty, default, lazy, line: bl.no as u32, col: pcol });
                     }
                 }
                 // 方法体
@@ -1799,6 +2015,26 @@ impl Parser {
 
     fn parse_body_of(&mut self, indent: usize) -> Vec<Stmt> {
         self.parse_block(indent + 1)
+    }
+
+    /// 控制流关键字的块体不能是空的：`if a == 1` 后面顶格写一句，
+    /// 这句不会进 if，而是变成"下一句普通语句"——条件为假时照样执行，
+    /// 用户看到的就是"条件失效"。这种静默改语义必须报错，不能放过。
+    fn parse_body_required(&mut self, kw: &str, ln: &Line) -> Vec<Stmt> {
+        let start = self.pos;
+        let had_err = self.errors.len();
+        let body = self.parse_body_of(ln.indent);
+        if body.is_empty() && self.pos == start && self.errors.len() == had_err {
+            let span = self.line_span(ln);
+            self.errors.push(FloatError::new(
+                format!(
+                    "{} 后面要有块体：下一行必须比这一行多缩进；顶格写的那句会跑到 {} 外面去（条件为假也照样执行）",
+                    kw, kw
+                ),
+                span,
+            ));
+        }
+        body
     }
 
     /// 块体挤在头部同一行（`if x { print(1) }`）会被静默丢掉，这里定向拦住指路。
@@ -2428,7 +2664,7 @@ impl Parser {
         }
         let cond = cond.ok_or_else(|| FloatError::new("if 后面要跟条件，例如 if (a > 1)", self.line_span(ln)))?;
         self.check_inline_brace_body(ln, "if")?;
-        let mut branches = vec![(Some(cond), self.parse_body_of(ln.indent))];
+        let mut branches = vec![(Some(cond), self.parse_body_required("if", ln))];
         let mut else_body = None;
         self.merge_branches(&mut branches, &mut else_body, ln.indent);
         Ok(Stmt::new(StmtKind::If { branches, else_body }, self.line_span(ln)))
@@ -2478,7 +2714,7 @@ impl Parser {
             }
             self.pos += 1;
             if is_else {
-                *else_body = Some(self.parse_body_of(ln.indent));
+                *else_body = Some(self.parse_body_required("else", &ln));
                 return;
             }
             let cond_src = code.trim_start_matches("elif").trim();

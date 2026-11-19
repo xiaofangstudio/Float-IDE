@@ -93,8 +93,29 @@ fn fail(msg: String, line: u32) -> LangRunResult {
 /// 跑一段脚本。`file` 用于报错显示，也用于解析 import 的相对路径。
 /// `extra` 是 IDE 当前所有打开的缓冲区（路径 → 源码），
 /// 这样"库文件改了还没存盘"也能按新内容跑。
+///
+/// ⚠ 这里必须是 async command + spawn_blocking：Tauri 2 的**同步** command 在
+/// Windows 上是在 UI 主线程里内联执行的（WebView2 的 WebResourceRequested
+/// 事件只在主线程触发，on_message 不换线程）。以前 lang_run 是同步的，
+/// `h.join()` 直接卡死主线程——窗口变灰"未响应"；脚本里一有 ask，VM 发出的
+/// float-input-request 事件投到主线程队列却永远没人处理，输入框弹不出来，
+/// VM 睡死在 rx.recv() 上，join 永不返回：双向死锁，只能重启进程。
+/// 改成 async 后命令跑在 tokio 线程池上，主线程照常泵消息，ask 才能活。
 #[tauri::command]
-pub fn lang_run(
+pub async fn lang_run(
+    app: AppHandle,
+    file: String,
+    source: String,
+    inputs: Vec<String>,
+    extra: Option<std::collections::HashMap<String, String>>,
+) -> LangRunResult {
+    tauri::async_runtime::spawn_blocking(move || lang_run_blocking(app, file, source, inputs, extra))
+        .await
+        .unwrap_or_else(|e| fail(format!("运行线程崩了：{}", e), 0))
+}
+
+/// 真正的运行逻辑（在阻塞线程池里跑，不在主线程）。
+fn lang_run_blocking(
     app: AppHandle,
     file: String,
     source: String,
@@ -132,7 +153,8 @@ pub fn lang_run(
                 }));
                 match rx.recv() {
                     Ok(a) => a,
-                    Err(_) => String::new(), // 界面关了：给空串让脚本继续往下走完
+                    // 界面关了：给空串让脚本继续往下走完
+                    Err(_) => String::new(),
                 }
             });
             let outcome = float_lang::api::run_blocking(

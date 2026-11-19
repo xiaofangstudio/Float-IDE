@@ -31,10 +31,12 @@ esac
 TAG="$os_tag-$arch_tag"
 
 pick() {
-  # $1 = env|self
-  if [ "$1" = "self" ]; then cand="$HERE/copper-self"; else cand="$HERE/copper"; fi
-  if [ -x "$cand" ]; then echo "$cand"; return 0; fi
-  if [ -x "$cand-$TAG" ]; then echo "$cand-$TAG"; return 0; fi
+  # $1 = env|self。优先查按平台分的子目录（bin/<tag>/），再查平铺的兼容路径——
+  # 和 Windows 的 copper.cmd 同一套顺序，不写死某一种布局。
+  if [ "$1" = "self" ]; then name=copper-self; else name=copper; fi
+  if [ -x "$HERE/$TAG/$name" ]; then echo "$HERE/$TAG/$name"; return 0; fi
+  if [ -x "$HERE/$name" ]; then echo "$HERE/$name"; return 0; fi
+  if [ -x "$HERE/$name-$TAG" ]; then echo "$HERE/$name-$TAG"; return 0; fi
   return 1
 }
 
@@ -49,7 +51,14 @@ if ! COPPER=$(pick "$KIND"); then
 fi
 
 : "${COPPER_RT:=$COPPER_HOME/lib/colang_rt.rs}"
-: "${COLANG_CRATE:=$COPPER_HOME/../scaffold/src-tauri/float-lang}"
+# crate 源码：包内 share/float-lang 优先（安装包就是这么铺的），否则按源码树相对路径
+if [ -z "${COLANG_CRATE:-}" ]; then
+  if [ -d "$COPPER_HOME/share/float-lang" ]; then
+    COLANG_CRATE="$COPPER_HOME/share/float-lang"
+  else
+    COLANG_CRATE="$COPPER_HOME/../scaffold/src-tauri/float-lang"
+  fi
+fi
 : "${COLANG_CARGO:=$(command -v cargo || true)}"
 export COPPER_RT COLANG_CRATE COLANG_CARGO
 
@@ -76,13 +85,13 @@ case "$cmd" in
   check|ast|json|stats)
     need_target "$cmd" "${2:-}"
     COLANG_MODE=$cmd; export COLANG_MODE
-    exec "$COPPER"
+    exec "$COPPER" "$COLANG_TARGET"
     ;;
   build)
     need_target build "${2:-}"
     : "${COLANG_OUT:=${TMPDIR:-/tmp}/copper_build}"
     export COLANG_OUT COLANG_MODE=build
-    "$COPPER"
+    "$COPPER" "$COLANG_TARGET"
     [ -x "$COLANG_OUT/target/release/app" ] || exit 1
     if [ "${3:-}" = "-o" ] && [ -n "${4:-}" ]; then
       cp "$COLANG_OUT/target/release/app" "$4"
@@ -95,7 +104,7 @@ case "$cmd" in
     need_target run "${2:-}"
     : "${COLANG_OUT:=${TMPDIR:-/tmp}/copper_build}"
     export COLANG_OUT COLANG_MODE=build
-    "$COPPER"
+    "$COPPER" "$COLANG_TARGET"
     [ -x "$COLANG_OUT/target/release/app" ] || exit 1
     exec "$COLANG_OUT/target/release/app"
     ;;

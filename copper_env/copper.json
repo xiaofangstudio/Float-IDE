@@ -16,6 +16,7 @@
     "linux-x64": {
       "env": "bin/linux-x64/copper",
       "self": "bin/linux-x64/copper-self",
+      "run": "bin/linux-x64/copper-run",
       "status": "ready"
     },
     "macos-arm64": {

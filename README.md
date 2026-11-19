@@ -95,20 +95,30 @@ AOT 会先做一遍保守推断：一个函数的参数、局部变量、返回�
 
 `data.map` / `filter` / `reduce` / `groupby` / `index_by` / `any` / `all` / `find` / `find_index` 九个回调式高阶函数，从「VM 编译期内联展开」补齐成 AOT 的 prelude 运行时实现（`hof_run` / `hof_dispatch`），回调经静态表 / 注册表间接调用；内联 `fn(x) return …` 编译成隐藏函数 `__lambda_行_列`，发射 `V::Native` 引用。这条限制从此取消。
 
-**AOT 不支持什么（编译期明确报，自动回落 VM 跑，结果不变）**
+**AOT 现在也支持指针、嵌套函数与 `ask`**
 
-- 指针 `&` / `*`、`alloc` 之外的裸内存操作
-- `ask`（需要交互宿主）、`wait until`、`time read`
-- 函数里定义具名函数、try 块里带 return/break/continue
+- **指针 `&` / `*`**：被 `&` 取过地址的局部变量在所属函数里存成 `Cell`，指针就是 `ptr_of_cell` / `ptr_of_global` / `ptr_of_index`，`*` 读写走 `ptr_get` / `ptr_set`，与 VM 的别名语义一致。
+- **嵌套函数**：抬成顶层函数并按「捕获值沿子→父逐层上传」的不动点算法生成额外尾部参数；被捕获的变量存成 `Cell`，内层写回外层立刻可见。写在循环 / `if` / `try` 里的函数也算。
+- **`ask`**：生成程序里走 `ask_line` 从标准输入读一行，不再回落。
+
+**AOT 仍不支持什么（编译期明确报，自动回落 VM 跑，结果不变）**
+
+- `alloc` 之外的裸内存操作
+- `wait until`、`time read`
+- try 块里带 return/break/continue
 - 用到这些的脚本会打印「AOT 暂不支持：…（第 N 行）」，然后照常用 VM 出结果
 
 **Copper 环境：编译器从 IDE 里搬出去**
 
-IDE 不再自带一套编译，改为读环境（`commands/copper_env.rs`）。环境里是已经编好的 `copper.exe`（由 `bootstrap/colang.co` AOT 出来的）、自举版 `copper-self.exe` 和运行时前奏 `colang_rt.rs`。
+IDE 不再自带一套编译，改为读环境（`commands/copper_env.rs`）。环境里是按平台分目录的编译器：`bin/windows-x64/`、`bin/linux-x64/`、`bin/macos-*/`，各有 `copper`（AOT 自举出来的）、`copper-self`（自举版）、`copper-run`（跑脚本 / `--repl`）、`copper-embed`（产出焊着脚本的 exe）；外加运行时前奏 `lib/colang_rt.rs` 和 `copper.json` 清单。
 
-查找顺序：`COPPER_HOME` 环境变量 → 用户级 `%APPDATA%\Float\copper`（macOS/Linux 是 `~/.copper`）→ IDE 同级的 `copper_env/`（绿色版）。
+查找顺序：手动指定（`copper_env_set` 存的一行文本）→ `COPPER_HOME` 环境变量 → 用户级 `%APPDATA%\Float\copper`（macOS/Linux 是 `~/.copper`）→ IDE 同级的 `copper_env/`（绿色版）。
 
-找不到就返回 `found = false`，界面提示「先装 Copper 环境」，**不静默退回内置实现**——静默降级会让人以为在用环境，实际没在用。对应命令：`copper_env_info` / `copper_env_compilers` / `copper_build`。
+找不到就返回 `found = false`，界面提示「先装 Copper 环境」，**不静默退回内置实现**；`copper_env_install` 可以直接吃一个环境 zip 包铺到默认位置。
+
+**Linux 版必须在 Linux 上编译**
+
+`copper_env/bin/linux-x64/` 里的四个二进制是在 Linux 上编出来的 ELF，Windows 上交叉编译不了（要走 `cargo` + `colang_rt.rs` 前奏）。对应工具链脚本已入库：`copper_env/scripts/rebuild-linux.sh` 与 `copper_env/scripts/README-Linux.md`——**换机器或清理仓库时不要删这个目录**，删了就得回 Linux 重编。
 
 **大工程：分块 + 增量编译**
 
@@ -760,6 +770,15 @@ F5 交给 Rust 内核跑字节码 VM（快），F6 用内置解释器逐行跑�
 ---
 
 ## 近期更新
+
+### 未发布（2026-11-19）
+
+- **AOT 支持指针、嵌套函数与 `ask`**：`&` 取址的局部变成 `Cell`，`*` 读写走 `ptr_get` / `ptr_set`；嵌套函数抬成顶层并按「捕获值沿子→父上传」的不动点展开，被捕获变量用 `Cell` 共享；`ask` 从标准输入读一行。剩下不支持的只有裸内存、`wait until`、`time read`、try 里带跳转。
+- **整数字面量不再静默变浮点**：超出 `i64` 的整型字面量在解析期就报错并提示改写成小数；`-9223372036854775808` 折成精确 `i64::MIN`，2^53 以上不再掉位。
+- **跨平台内置函数**：新增 `exists` / `isfile` / `isdir` / `filesize` / `getenv` / `pathjoin` / `runcmd` / `osname` / `strfind` / `writefile`（自动建目录），Copper 源码不用再猜路径分隔符或 `2> nul`。
+- **`co` 工具链升级**：`copper-run --repl` 交互模式（变量/函数/类跨行保留、表达式自动打印、写错不污染状态）；`co build` 在无 cargo 时把脚本焊进 exe（`COPPEREMBEDv1` 魔数），双击即跑。
+- **Copper 环境多平台**：`bin/windows-x64`、`bin/linux-x64`、`bin/macos-*` 分目录，新增 `copper-run` / `copper-embed` 两个可执行；环境支持手动指定（`copper_env_set` / `copper_env_clear`）与 zip 一键安装（`copper_env_install`）。
+- **Linux 产物入库**：`copper_env/bin/linux-x64/` 四个 ELF 只能在 Linux 上编译，已连同 `scripts/rebuild-linux.sh`、`scripts/README-Linux.md` 一起提交，清理时不要删。
 
 ### 未发布（2026-11-18）
 

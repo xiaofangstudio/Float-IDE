@@ -75,6 +75,9 @@ pub fn run() {
             // Copper 环境（第 3 步：IDE 读环境，不再自带编译）
             commands::copper_env::copper_env_info,
             commands::copper_env::copper_env_compilers,
+            commands::copper_env::copper_env_set,
+            commands::copper_env::copper_env_clear,
+            commands::copper_env::copper_env_install,
             commands::copper_env::copper_build,
             commands::project::pick_folder,
             commands::project::pick_open_file,
