@@ -26,7 +26,7 @@ jobs:
             bundles: dmg
           - os: ubuntu-22.04
             artifact: Float-IDE-Linux
-            bundles: deb,appimage
+            bundles: deb
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -59,6 +59,13 @@ jobs:
       - name: 构建安装包
         working-directory: scaffold
         run: npm run tauri build -- --bundles ${{ matrix.bundles }}
+
+      # AppImage 需要方形图标与 linuxdeploy，单独一步跑；失败也不挡 deb 上传。
+      - name: 追加构建 AppImage
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        working-directory: scaffold
+        run: npm run tauri build -- --bundles appimage
 
       - name: 收集产物
         shell: bash
