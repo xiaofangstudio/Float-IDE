@@ -115,7 +115,7 @@ for f in copper copper-self copper-run copper-embed; do
 done
 echo
 echo "对照：Windows 这一代 colang.co 的 g1/g2 main.rs SHA256 是"
-echo "  E33AFF98A4AB7D756C4325E58EB9B2AB12B3E635EEF65F8F294DB9917950BCA1"
+echo "  FEA5DA9414B60A626BE9BCA6D4BF62CA6B409CC5CA8C72B9D9A66EBC3A4B9A36"
 echo "Linux 的 main.rs 哈希应当完全等于它（编译产物与平台无关）；不等就说明语义走岔了。"
 
 cat <<'TIP'

@@ -60,6 +60,127 @@ pub type V = float_lang::Value;
 pub type FE = float_lang::FloatError;
 pub type R<T> = Result<T, FE>;
 
+/* ── 捕获单元 + 指针（和 Rust AOT 的 aot.rs 同一套，出厂编译器也必须有） ──
+ * 嵌套函数要按引用共享外层变量（改了外层也要看得见），所以被捕获的变量、
+ * 以及被 & 取过地址的变量，都存成"一格的 cell"，函数之间传的是同一个 Rc。 */
+pub use float_lang::value::{MemBlock, PtrTarget};
+pub type Cell = Rc<std::cell::RefCell<Vec<V>>>;
+
+#[inline]
+pub fn cell_new(v: V) -> Cell {
+    Rc::new(std::cell::RefCell::new(vec![v]))
+}
+#[inline]
+pub fn cell_get(c: &Cell) -> V {
+    c.borrow()[0].clone()
+}
+#[inline]
+pub fn cell_set(c: &Cell, v: V) {
+    c.borrow_mut()[0] = v;
+}
+
+/// &变量：直接绑到那个变量所在的 cell 上（读写都回到变量本身）
+pub fn ptr_of_cell(c: Cell) -> V {
+    V::Ptr(Rc::new(std::cell::RefCell::new(MemBlock {
+        target: PtrTarget::Cells(c),
+        idx: 0,
+        owned: false,
+        freed: false,
+        base: 0,
+    })))
+}
+/// &全局变量：绑到全局槽
+pub fn ptr_of_global(i: usize) -> V {
+    V::Ptr(Rc::new(std::cell::RefCell::new(MemBlock {
+        target: PtrTarget::Global(i),
+        idx: 0,
+        owned: false,
+        freed: false,
+        base: 0,
+    })))
+}
+/// &列表[i]：和 VM 的 AddrIdx 一样共享同一个 Vec
+pub fn ptr_of_index(base: &V, i: i64, ln: u32, cl: u32) -> R<V> {
+    match base {
+        V::List(l) => {
+            let len = l.borrow().len() as i64;
+            if i < 0 || i >= len {
+                return Err(fe(ln, cl, format!("& 取地址：第 {} 格越界了（这块一共 {} 格）", i, len)));
+            }
+            Ok(V::Ptr(Rc::new(std::cell::RefCell::new(MemBlock {
+                target: PtrTarget::Cells(l.clone()),
+                idx: i as usize,
+                owned: false,
+                freed: false,
+                base: 0,
+            }))))
+        }
+        other => Err(fe(ln, cl, format!("& 只能对列表元素或指针格子取地址，得到 {}", other.to_display()))),
+    }
+}
+
+pub fn ptr_get(g: &Globals, p: &V, ln: u32, cl: u32) -> R<V> {
+    match p {
+        V::Ptr(pr) => {
+            let b = pr.borrow();
+            if b.freed {
+                return Err(fe(ln, cl, String::from("这块内存已经 free 了，不能再读")));
+            }
+            match &b.target {
+                PtrTarget::Cells(c) => {
+                    let cells = c.borrow();
+                    if b.idx >= cells.len() {
+                        return Err(fe(
+                            ln,
+                            cl,
+                            format!("指针指到第 {} 格，越界了（这块一共 {} 格）", b.idx, cells.len()),
+                        ));
+                    }
+                    Ok(cells[b.idx].clone())
+                }
+                PtrTarget::Global(i) => Ok(g.v.get(*i).cloned().unwrap_or(V::Null)),
+                PtrTarget::Local { .. } => Err(fe(ln, cl, String::from("这个指针指向的变量已经离开作用域了（悬空指针）"))),
+            }
+        }
+        other => Err(fe(ln, cl, format!("* 只能解引用指针，得到 {}（取地址用 &）", other.to_display()))),
+    }
+}
+
+pub fn ptr_set(g: &mut Globals, p: &V, v: V, ln: u32, cl: u32) -> R<V> {
+    match p {
+        V::Ptr(pr) => {
+            let b = pr.borrow();
+            if b.freed {
+                return Err(fe(ln, cl, String::from("这块内存已经 free 了，不能再写")));
+            }
+            match &b.target {
+                PtrTarget::Cells(c) => {
+                    let len = c.borrow().len();
+                    if b.idx >= len {
+                        return Err(fe(
+                            ln,
+                            cl,
+                            format!("指针指到第 {} 格，越界了（这块一共 {} 格）", b.idx, len),
+                        ));
+                    }
+                    c.borrow_mut()[b.idx] = v.clone_deep();
+                }
+                PtrTarget::Global(i) => {
+                    if *i < g.v.len() {
+                        g.v[*i] = v.clone_deep();
+                    }
+                }
+                PtrTarget::Local { .. } => {
+                    return Err(fe(ln, cl, String::from("这个指针指向的变量已经离开作用域了（悬空指针）")))
+                }
+            }
+            Ok(V::Null)
+        }
+        other => Err(fe(ln, cl, format!("* 只能对指针赋值，得到 {}", other.to_display()))),
+    }
+}
+
+
 /// 方法调用的统一入口：按接收者类型分派到 VM 的同一套实现。
 /// 这样 AOT/自举发射器都不用各自猜方法语义
 pub fn method_call(o: &V, name: &str, args: &[V], ln: u32) -> R<V> {

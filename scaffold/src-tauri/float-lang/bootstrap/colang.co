@@ -2902,10 +2902,33 @@ function g_params(params, out)
 /* ── 上下文 ── */
 
 function g_ctx(globals, locals, fns, fl = null)
-    return {"g": globals, "l": locals, "f": fns, "fl": fl, "t": 0, "b": 0, "err": ""}
+    return {"g": globals, "l": locals, "f": fns, "fl": fl, "t": 0, "b": 0, "err": "", "a": []}
+
+/* 被 & 取过地址的量要存成 cell（一格内存），这样指针读写回到变量本身 */
+function g_addr_scan(items, out)
+    if items == null
+        return ""
+    let text = dump_stmts(items, 0)
+    let needle = "Un(Addr,Var("
+    let i = 0
+    let n = strlen(text)
+    while i < n
+        if substr(text, i, 12) == needle
+            let j = i + 12
+            let name = ""
+            while j < n and substr(text, j, 1) != ")"
+                name = name + substr(text, j, 1)
+                j += 1
+            if not listin(name, out)
+                add name to out
+            i = j
+        i += 1
+    return ""
 
 function g_var(ctx, name, ln)
     if listin(name, ctx["l"])
+        if listin(name, ctx["a"])
+            return "cell_get" + g_lp() + "&c_" + g_id(name) + g_rp()
         return "c_" + g_id(name) + ".clone()"
     let i = g_slot(ctx["g"], name)
     if i < 0
@@ -2921,6 +2944,82 @@ function g_dest(ctx, name, ln)
         ctx["err"] = "第 " + str(ln) + " 行：变量 " + name + " 没有声明（AOT 要求先声明再用）"
         return "c_" + g_id(name)
     return "g.v" + g_ls() + str(i) + g_rs()
+
+/* 写到某个名字上：cell 走 cell_set，普通局部直接赋，全局写槽 */
+function g_store(ctx, name, val, ln, out)
+    if listin(name, ctx["a"]) and listin(name, ctx["l"])
+        g_p(out, "cell_set" + g_lp() + "&c_" + g_id(name) + g_cm() + " " + val + g_rp() + ";")
+        return ""
+    let dest = g_dest(ctx, name, ln)
+    if strlen(ctx["err"]) > 0
+        return ""
+    g_p(out, dest + " = " + val + ";")
+    return ""
+
+/* 复合赋值的运算符 → Op:: 枚举名 */
+function g_opp(op)
+    if op == "Add"
+        return "Op::Add"
+    if op == "Sub"
+        return "Op::Sub"
+    if op == "Mul"
+        return "Op::Mul"
+    if op == "Div"
+        return "Op::Div"
+    if op == "IDiv"
+        return "Op::IDiv"
+    if op == "Mod"
+        return "Op::Mod"
+    if op == "Pow"
+        return "Op::Pow"
+    if op == "BitAnd"
+        return "Op::BitAnd"
+    if op == "BitOr"
+        return "Op::BitOr"
+    if op == "BitXor"
+        return "Op::BitXor"
+    if op == "Shl"
+        return "Op::Shl"
+    if op == "Shr"
+        return "Op::Shr"
+    return "Op::Add"
+
+/* 复合赋值的运算编码（和 vm::compound_value 的约定一致：Add0 Sub1 Mul2 Div3 Mod4 其他5） */
+function g_bop(op)
+    if op == "Add"
+        return "0"
+    if op == "Sub"
+        return "1"
+    if op == "Mul"
+        return "2"
+    if op == "Div"
+        return "3"
+    if op == "Mod"
+        return "4"
+    return "5"
+
+/* &x：局部/参数 → ptr_of_cell，全局 → ptr_of_global，列表元素 → ptr_of_index */
+function g_addr_expr(ctx, t, ln)
+    if t == null
+        ctx["err"] = "第 " + str(ln) + " 行：& 后面缺东西"
+        return "V::Null"
+    let k = t["k"]
+    if k == "Var"
+        let name = t["v"]
+        if listin(name, ctx["l"])
+            if listin(name, ctx["a"])
+                return "ptr_of_cell" + g_lp() + "c_" + g_id(name) + g_dot() + "clone" + g_lp() + g_rp() + g_rp()
+            ctx["err"] = "第 " + str(ln) + " 行：& " + name + " 没被标成 cell（内部错误，请反馈）"
+            return "V::Null"
+        let i = g_slot(ctx["g"], name)
+        if i < 0
+            ctx["err"] = "第 " + str(ln) + " 行：& 的变量 " + name + " 没有声明"
+            return "V::Null"
+        return "ptr_of_global" + g_lp() + str(i) + g_rp()
+    if k == "Idx" or k == "TIdx"
+        return "ptr_of_index" + g_lp() + "&" + g_lp() + g_expr(ctx, t["o"], ln) + g_rp() + g_cm() + " want_int_at" + g_lp() + "&" + g_lp() + g_expr(ctx, t["i"], ln) + g_rp() + g_cm() + " " + str(ln) + g_cm() + " 1" + g_rp() + g_qm() + g_cm() + " " + str(ln) + g_cm() + " 1" + g_rp() + g_qm()
+    ctx["err"] = "第 " + str(ln) + " 行：& 只能对变量或列表元素取地址"
+    return "V::Null"
 
 /* ── 字面量 ── */
 
@@ -2990,9 +3089,9 @@ function g_bin(ctx, op, a, b, ln)
         return "v_bit" + g_lp() + "Op::Shl" + g_cm() + " &" + x + g_cm() + " &" + y + g_rp() + g_map(ln)
     if op == "Shr"
         return "v_bit" + g_lp() + "Op::Shr" + g_cm() + " &" + x + g_cm() + " &" + y + g_rp() + g_map(ln)
-    if op == "And"
+    if op == "And" or op == "And2"
         return g_lo() + " let __l = " + x + "; if t" + g_lp() + "&__l" + g_rp() + " " + g_lo() + " " + y + " " + g_lc() + " else " + g_lo() + " __l " + g_lc() + " " + g_lc()
-    if op == "Or"
+    if op == "Or" or op == "Or2"
         return g_lo() + " let __l = " + x + "; if t" + g_lp() + "&__l" + g_rp() + " " + g_lo() + " __l " + g_lc() + " else " + g_lo() + " " + y + " " + g_lc() + " " + g_lc()
     ctx["err"] = "第 " + str(ln) + " 行：代码生成暂不支持运算符 " + op
     return "V::Null"
@@ -3065,6 +3164,16 @@ function g_fn_arity(fns, fname)
             return len(fns[i]["params"])
         i += 1
     return 0
+
+function g_fn_caps(fns, fname)
+    let i = 0
+    while i < len(fns)
+        if fns[i]["n"] == fname
+            if fns[i]["capts"] != null
+                return fns[i]["capts"]
+            return []
+        i += 1
+    return []
 
 function g_class_code(fns, out)
     let classes = g_cls_list(fns)
@@ -3164,8 +3273,12 @@ function g_expr(ctx, e, ln)
     if k == "Bin"
         return g_bin(ctx, e["op"], e["a"], e["b"], ln)
     if k == "Un"
-        let a = g_expr(ctx, e["a"], ln)
         let op = e["op"]
+        if op == "Addr"
+            return g_addr_expr(ctx, e["a"], ln)
+        if op == "Deref"
+            return "ptr_get" + g_lp() + "g" + g_cm() + " &" + g_lp() + g_expr(ctx, e["a"], ln) + g_rp() + g_dot() + "clone" + g_lp() + g_rp() + g_cm() + " " + str(ln) + g_cm() + " 1" + g_rp() + g_qm()
+        let a = g_expr(ctx, e["a"], ln)
         if op == "Not"
             return "V::Bool" + g_lp() + "!t" + g_lp() + "&" + a + g_rp() + g_rp()
         if op == "Neg"
@@ -3206,6 +3319,12 @@ function g_expr(ctx, e, ln)
                 while i2 < ar
                     call = call + g_cm() + " V::Null"
                     i2 += 1
+                /* 捕获：把外层变量的 cell 一起传进去（读写都回到外层那个变量） */
+                let cp = g_fn_caps(ctx["fl"], nm)
+                let ci2 = 0
+                while ci2 < len(cp)
+                    call = call + g_cm() + " c_" + g_id(cp[ci2]) + g_dot() + "clone" + g_lp() + g_rp()
+                    ci2 += 1
                 call = call + g_rp() + g_qm()
                 let body = ""
                 let j2 = 0
@@ -3305,25 +3424,30 @@ function g_assign(ctx, t, op, v, ln, out)
         return ""
     let tk = t["k"]
     if tk == "TVar"
-        let dest = g_dest(ctx, t["n"], ln)
         if op == "Set"
-            g_p(out, dest + " = " + g_lp() + g_expr(ctx, v, ln) + g_rp() + g_dot() + "clone" + g_lp() + g_rp() + ";")
+            let name = t["n"]
+            /* 与 VM 对齐：对从没声明过的名字直接赋值，就当在当前位置就地声明一个局部变量
+            /* （方岛物语里大量 ps10 / pr10 这种“裸赋值”，VM 能跑，AOT 也必须能跑） */
+            let known = false
+            if listin(name, ctx["l"])
+                known = true
+            if g_slot(ctx["g"], name) >= 0
+                known = true
+            if not known
+                let iv = g_lp() + g_expr(ctx, v, ln) + g_rp() + g_dot() + "clone" + g_lp() + g_rp()
+                if listin(name, ctx["a"])
+                    g_p(out, "let c_" + g_id(name) + ": Cell = cell_new" + g_lp() + iv + g_rp() + ";")
+                else
+                    g_p(out, "let mut c_" + g_id(name) + " = " + iv + ";")
+                let lv = ctx["l"]
+                add name to lv
+                ctx["l"] = lv
+                return ""
+            g_store(ctx, name, g_lp() + g_expr(ctx, v, ln) + g_rp() + g_dot() + "clone" + g_lp() + g_rp(), ln, out)
             return ""
         let cur = g_var(ctx, t["n"], ln)
-        if op == "Add"
-            g_p(out, dest + " = v_add" + g_lp() + "&" + cur + g_cm() + " &" + g_lp() + g_expr(ctx, v, ln) + g_rp() + g_rp() + g_map(ln) + ";")
-            return ""
-        if op == "Sub"
-            g_p(out, dest + " = v_sub" + g_lp() + "&" + cur + g_cm() + " &" + g_lp() + g_expr(ctx, v, ln) + g_rp() + g_rp() + g_map(ln) + ";")
-            return ""
-        if op == "Mul"
-            g_p(out, dest + " = v_mul" + g_lp() + "&" + cur + g_cm() + " &" + g_lp() + g_expr(ctx, v, ln) + g_rp() + g_rp() + g_map(ln) + ";")
-            return ""
-        if op == "Div"
-            g_p(out, dest + " = arith" + g_lp() + "Op::Div" + g_cm() + " &" + cur + g_cm() + " &" + g_lp() + g_expr(ctx, v, ln) + g_rp() + g_rp() + g_map(ln) + ";")
-            return ""
-        if op == "Mod"
-            g_p(out, dest + " = arith" + g_lp() + "Op::Mod" + g_cm() + " &" + cur + g_cm() + " &" + g_lp() + g_expr(ctx, v, ln) + g_rp() + g_rp() + g_map(ln) + ";")
+        if op == "Add" or op == "Sub" or op == "Mul" or op == "Div" or op == "IDiv" or op == "Mod" or op == "Pow" or op == "BitAnd" or op == "BitOr" or op == "BitXor" or op == "Shl" or op == "Shr"
+            g_store(ctx, t["n"], g_cop(op, cur, g_lp() + g_expr(ctx, v, ln) + g_rp(), ln), ln, out)
             return ""
         ctx["err"] = "第 " + str(ln) + " 行：代码生成暂不支持复合赋值 " + op
         return ""
@@ -3342,6 +3466,16 @@ function g_assign(ctx, t, op, v, ln, out)
             return ""
         g_p(out, "  let __cur = member_get" + g_lp() + "&__o" + g_cm() + " " + g_q() + json_esc(t["n"]) + g_q() + g_rp() + g_map(ln) + ";")
         g_p(out, "  member_set" + g_lp() + "&__o" + g_cm() + " " + g_q() + json_esc(t["n"]) + g_q() + g_cm() + " " + g_cop(op, "__cur", g_lp() + g_expr(ctx, v, ln) + g_rp(), ln) + g_rp() + g_map(ln) + "; " + g_lc())
+        return ""
+    if tk == "TDeref"
+        /* *p = v / *p += v：指针写回到它指向的那一格（局部是 cell，全局是槽，列表是同一块 Vec） */
+        let pex = g_expr(ctx, t["e"], ln)
+        if op == "Set"
+            g_p(out, g_lo() + " let __p = " + pex + "; ptr_set" + g_lp() + "g" + g_cm() + " &__p" + g_cm() + " " + g_lp() + g_expr(ctx, v, ln) + g_rp() + g_dot() + "clone" + g_lp() + g_rp() + g_cm() + " " + str(ln) + g_cm() + " 1" + g_rp() + g_qm() + "; " + g_lc())
+            return ""
+        g_p(out, g_lo() + " let __p = " + pex + "; let __cur = ptr_get" + g_lp() + "g" + g_cm() + " &__p" + g_cm() + " " + str(ln) + g_cm() + " 1" + g_rp() + g_qm() + ";")
+        g_p(out, "  let __nv = compound_value" + g_lp() + g_bop(op) + g_cm() + " __cur" + g_cm() + " &" + g_lp() + g_expr(ctx, v, ln) + g_rp() + g_rp() + g_map(ln) + ";")
+        g_p(out, "  ptr_set" + g_lp() + "g" + g_cm() + " &__p" + g_cm() + " __nv" + g_cm() + " " + str(ln) + g_cm() + " 1" + g_rp() + g_qm() + "; " + g_lc())
         return ""
     ctx["err"] = "第 " + str(ln) + " 行：代码生成暂不支持的赋值 " + tk
     return ""
@@ -3390,14 +3524,20 @@ function g_stmt(ctx, s, out)
         if s["init"] != null
             init = g_lp() + g_expr(ctx, s["init"], ln) + g_rp() + g_dot() + "clone" + g_lp() + g_rp()
         if listin(name, ctx["l"])
-            g_p(out, "c_" + g_id(name) + " = " + init + ";")
+            if listin(name, ctx["a"])
+                g_p(out, "cell_set" + g_lp() + "&c_" + g_id(name) + g_cm() + " " + init + g_rp() + ";")
+            else
+                g_p(out, "c_" + g_id(name) + " = " + init + ";")
         else
             /* 块内新声明（for/if/while 体里）且不是全局槽：就地发一个 Rust 局部变量
             /* 并登记进 locals，后面同一块里的引用才认得它 */
             if g_slot(ctx["g"], name) < 0
                 let lv = ctx["l"]
                 add name to lv
-                g_p(out, "let mut c_" + g_id(name) + " = " + init + ";")
+                if listin(name, ctx["a"])
+                    g_p(out, "let c_" + g_id(name) + ": Cell = cell_new" + g_lp() + init + g_rp() + ";")
+                else
+                    g_p(out, "let mut c_" + g_id(name) + " = " + init + ";")
             else
                 g_p(out, g_dest(ctx, name, ln) + " = " + init + ";")
         return ""
@@ -3405,12 +3545,12 @@ function g_stmt(ctx, s, out)
         g_assign(ctx, s["t"], s["op"], s["v"], ln, out)
         return ""
     if k == "IncDec"
-        let dest = g_dest(ctx, s["t"]["n"], ln)
+        let cur = g_var(ctx, s["t"]["n"], ln)
         let one = "V::Int(" + str(s["d"]) + "i64)"
         if s["p"] == "-"
-            g_p(out, dest + " = v_sub" + g_lp() + "&" + dest + g_dot() + "clone" + g_lp() + g_rp() + g_cm() + " &" + one + g_rp() + g_map(ln) + ";")
+            g_store(ctx, s["t"]["n"], g_cop("Sub", cur, one, ln), ln, out)
         else
-            g_p(out, dest + " = v_add" + g_lp() + "&" + dest + g_dot() + "clone" + g_lp() + g_rp() + g_cm() + " &" + one + g_rp() + g_map(ln) + ";")
+            g_store(ctx, s["t"]["n"], g_cop("Add", cur, one, ln), ln, out)
         return ""
     if k == "Expr"
         if s["e"] != null
@@ -3502,7 +3642,8 @@ function g_stmt(ctx, s, out)
             stepexpr = "want_int_at" + g_lp() + "&" + g_lp() + g_expr(ctx, s["step"], ln) + g_rp() + g_cm() + " " + str(ln) + g_cm() + " 1" + g_rp() + g_qm()
         g_p(out, "  let mut __i = __a; let __step = " + stepexpr + ";")
         g_p(out, "  while " + g_lp() + "__step > 0 && __i < __b + " + incl + g_rp() + " || " + g_lp() + "__step < 0 && __i > __b - " + incl + g_rp() + " || __step == 0 " + g_lo())
-        g_p(out, "    " + g_dest(ctx, vname, ln) + " = V::Int(__i);")
+        g_p(out, "    ")
+        g_store(ctx, vname, "V::Int(__i)", ln, out)
         ctx["b"] = ctx["b"] + 1
         g_stmts(ctx, s["body"], out)
         ctx["b"] = ctx["b"] - 1
@@ -3514,7 +3655,7 @@ function g_stmt(ctx, s, out)
         if valname == null or strlen(valname) == 0
             g_p(out, g_lo() + " let __it = iter_src" + g_lp() + "&" + g_lp() + g_expr(ctx, s["iter"], ln) + g_rp() + g_rp() + ".map_err(" + g_pipe() + "m" + g_pipe() + " fe(" + str(ln) + g_cm() + "1" + g_cm() + "m" + g_rp() + g_rp() + g_qm() + ";")
             g_p(out, "  for __x in __it " + g_lo())
-            g_p(out, "    " + g_dest(ctx, vname, ln) + " = __x;")
+            g_store(ctx, vname, "__x", ln, out)
             ctx["b"] = ctx["b"] + 1
             g_stmts(ctx, s["body"], out)
             ctx["b"] = ctx["b"] - 1
@@ -3522,8 +3663,8 @@ function g_stmt(ctx, s, out)
             return ""
         g_p(out, g_lo() + " let __it = iter_pair_src" + g_lp() + "&" + g_lp() + g_expr(ctx, s["iter"], ln) + g_rp() + g_rp() + ".map_err(" + g_pipe() + "m" + g_pipe() + " fe(" + str(ln) + g_cm() + "1" + g_cm() + "m" + g_rp() + g_rp() + g_qm() + ";")
         g_p(out, "  for " + g_lp() + "__k" + g_cm() + " __v" + g_rp() + " in __it " + g_lo())
-        g_p(out, "    " + g_dest(ctx, vname, ln) + " = __k;")
-        g_p(out, "    " + g_dest(ctx, valname, ln) + " = __v;")
+        g_store(ctx, vname, "__k", ln, out)
+        g_store(ctx, valname, "__v", ln, out)
         ctx["b"] = ctx["b"] + 1
         g_stmts(ctx, s["body"], out)
         ctx["b"] = ctx["b"] - 1
@@ -3586,6 +3727,13 @@ function g_fn(globals, fnames, f, fns, out)
     g_params(f["params"], pnames)
     let decls = []
     g_decls(f["body"], decls)
+    /* 从外层捕获来的名字：当作额外的 Cell 参数，函数里读写都回到外层那个变量 */
+    let caps = []
+    if f["capts"] != null
+        let ci = 0
+        while ci < len(f["capts"])
+            add f["capts"][ci] to caps
+            ci += 1
     let locals = []
     let i = 0
     while i < len(pnames)
@@ -3596,11 +3744,41 @@ function g_fn(globals, fnames, f, fns, out)
         if not listin(decls[i], locals)
             add decls[i] to locals
         i += 1
+    i = 0
+    while i < len(caps)
+        if not listin(caps[i], locals)
+            add caps[i] to locals
+        i += 1
     let ctx = g_ctx(globals, locals, fnames, fns)
+    let addrs = []
+    g_addr_scan(f["body"], addrs)
+    /* 捕获来的量一律是 cell；嵌套函数要捕获的本层变量也得是 cell */
+    i = 0
+    while i < len(caps)
+        if not listin(caps[i], addrs)
+            add caps[i] to addrs
+        i += 1
+    if f["kids"] != null
+        let ki = 0
+        while ki < len(f["kids"])
+            let kid = f["kids"][ki]
+            if kid["capts"] != null
+                let cj = 0
+                while cj < len(kid["capts"])
+                    let cn = kid["capts"][cj]
+                    if listin(cn, locals) and not listin(cn, addrs)
+                        add cn to addrs
+                    cj += 1
+            ki += 1
+    ctx["a"] = addrs
     let head = "fn cf_" + g_id(name) + g_lp() + "g: &mut Globals"
     i = 0
     while i < len(f["params"])
         head = head + g_cm() + " mut c_" + g_id(f["params"][i]["n"]) + ": V"
+        i += 1
+    i = 0
+    while i < len(caps)
+        head = head + g_cm() + " c_" + g_id(caps[i]) + ": Cell"
         i += 1
     g_p(out, "#[allow(unused_mut)]")
     g_p(out, head + g_rp() + " -> R<V> " + g_lo())
@@ -3614,10 +3792,20 @@ function g_fn(globals, fnames, f, fns, out)
         if f["params"][i]["def"] != null
             g_p(out, "if let V::Null = c_" + g_id(pnm) + " " + g_lo() + " c_" + g_id(pnm) + " = " + g_expr(ctx, f["params"][i]["def"], f["ln"]) + "; " + g_lc())
         i += 1
+    /* 被取过地址的参数：默认值填完之后再套一层 cell，后续读写都回到这一格 */
+    i = 0
+    while i < len(f["params"])
+        let pnm2 = f["params"][i]["n"]
+        if listin(pnm2, addrs)
+            g_p(out, "let c_" + g_id(pnm2) + ": Cell = cell_new" + g_lp() + "c_" + g_id(pnm2) + g_rp() + ";")
+        i += 1
     i = 0
     while i < len(decls)
         if not listin(decls[i], pnames)
-            g_p(out, "let mut c_" + g_id(decls[i]) + ": V = V::Null;")
+            if listin(decls[i], addrs)
+                g_p(out, "let c_" + g_id(decls[i]) + ": Cell = cell_new" + g_lp() + "V::Null" + g_rp() + ";")
+            else
+                g_p(out, "let mut c_" + g_id(decls[i]) + ": V = V::Null;")
         i += 1
     g_stmts(ctx, f["body"], out)
     if ctx["err"] != "" and g_gen_err == ""
@@ -3677,6 +3865,115 @@ function g_collect_fns(items, out)
         i += 1
     return ""
 
+/* 函数里写的嵌套函数：挂到 owner["kids"]，再递归进这个嵌套函数自己 */
+function g_kids(items, owner)
+    if items == null
+        return ""
+    let i = 0
+    while i < len(items)
+        let s = items[i]
+        let k = s["k"]
+        if k == "FuncDef"
+            /* 先递归认亲、再挂上去：这个语言的字典/列表按值走，晚写的属性挂不上先前那份拷贝 */
+            g_kids(s["body"], s)
+            let kd = owner["kids"]
+            if kd == null
+                kd = []
+            add s to kd
+            owner["kids"] = kd
+        if k == "Group"
+            g_kids(s["list"], owner)
+        if k == "If"
+            let j = 0
+            while j < len(s["branches"])
+                g_kids(s["branches"][j][1], owner)
+                j += 1
+            g_kids(s["else"], owner)
+        if k == "While" or k == "Repeat" or k == "ForRange" or k == "ForIn" or k == "Forever" or k == "WaitUntil"
+            g_kids(s["body"], owner)
+        if k == "Try"
+            g_kids(s["body"], owner)
+            g_kids(s["cbody"], owner)
+            g_kids(s["fin"], owner)
+        i += 1
+    return ""
+
+/* 摊平：一个函数 + 它里面所有嵌套函数（按发现顺序），后面统一发 Rust fn */
+function g_flatten(f, out)
+    if f["kids"] == null
+        return ""
+    let i = 0
+    while i < len(f["kids"])
+        add f["kids"][i] to out
+        g_flatten(f["kids"][i], out)
+        i += 1
+    return ""
+
+/* 一段语句里出现过的所有变量名（靠 AST 文本扫，误报只会让变量多套一层 cell，语义不变） */
+function g_ref_scan(items, out)
+    if items == null
+        return ""
+    let text = dump_stmts(items, 0)
+    let needle = "Var("
+    let i = 0
+    let n = strlen(text)
+    while i < n
+        if substr(text, i, 4) == needle
+            let j = i + 4
+            let name = ""
+            while j < n and substr(text, j, 1) != ")"
+                name = name + substr(text, j, 1)
+                j += 1
+            if not listin(name, out)
+                add name to out
+            i = j
+        i += 1
+    return ""
+
+/* 算一个函数要从外层拿哪些变量（捕获），再递归算它的嵌套函数。
+/* 只认：本函数自己没声明、外层看得见的名字。全局变量不算捕获（所有函数都能直接读）。 */
+function g_caps(f, outer)
+    let own = []
+    g_params(f["params"], own)
+    g_decls(f["body"], own)
+    let vis = []
+    let i = 0
+    while i < len(outer)
+        add outer[i] to vis
+        i += 1
+    i = 0
+    while i < len(own)
+        if not listin(own[i], vis)
+            add own[i] to vis
+        i += 1
+    let refs = []
+    g_ref_scan(f["body"], refs)
+    if getenv("COPPER_DEBUG_CAPS") != ""
+        print("scan " + f["n"] + " refs=" + join(refs, ",") + " own=" + join(own, ",") + " vis=" + join(vis, ","))
+    let caps = []
+    i = 0
+    while i < len(refs)
+        if listin(refs[i], vis)
+            if not listin(refs[i], own)
+                add refs[i] to caps
+        i += 1
+    f["capts"] = caps
+    i = 0
+    while i < len(caps)
+        if not listin(caps[i], vis)
+            add caps[i] to vis
+        i += 1
+    if f["kids"] != null
+        let nk = []
+        i = 0
+        while i < len(f["kids"])
+            let kid = f["kids"][i]
+            g_caps(kid, vis)
+            add kid to nk
+            i += 1
+        f["kids"] = nk
+    return ""
+
 function g_program(globals, fns0, body, rt_text)
     let out = []
     g_p(out, rt_text)
@@ -3697,14 +3994,33 @@ function g_program(globals, fns0, body, rt_text)
     /* 函数可能被 Group 包着（类声明就是），先摊平 */
     let fns = []
     g_collect_fns(body, fns)
-    let fnames = []
+    /* 嵌套函数：先认亲，再摊平成一张函数表（嵌套的也按普通 Rust fn 发，
+    /* 外层被它用到的变量变成额外 Cell 参数传进去） */
     let i = 0
     while i < len(fns)
-        add fns[i]["n"] to fnames
+        g_kids(fns[i]["body"], fns[i])
         i += 1
+    /* 捕获必须在摊平之前算完：字典在这个语言里按值走，摊平时会把当时的内容拷一份，
+    /* 晚算的 capts 传不到函数表里 */
+    let i = 0
+    while i < len(fns)
+        g_caps(fns[i], [])
+        i += 1
+    let allfns = []
     i = 0
     while i < len(fns)
-        g_fn(globals, fnames, fns[i], fns, out)
+        add fns[i] to allfns
+        g_flatten(fns[i], allfns)
+        i += 1
+    let fnames = []
+    i = 0
+    while i < len(allfns)
+        if not listin(allfns[i]["n"], fnames)
+            add allfns[i]["n"] to fnames
+        i += 1
+    i = 0
+    while i < len(allfns)
+        g_fn(globals, fnames, allfns[i], allfns, out)
         i += 1
     if g_gen_err != ""
         print("colang build：" + g_gen_err)
@@ -3719,12 +4035,18 @@ function g_program(globals, fns0, body, rt_text)
     let tvars = []
     g_loop_vars(top, tvars)
     let ctx = g_ctx(globals, tvars, fnames, fns)
+    let taddrs = []
+    g_addr_scan(top, taddrs)
+    ctx["a"] = taddrs
     let head = "fn run_top" + g_lp() + "g: &mut Globals" + g_rp() + " -> R<V> " + g_lo()
     g_p(out, "#[allow(unused_mut)]")
     g_p(out, head)
     let ti = 0
     while ti < len(tvars)
-        g_p(out, "let mut c_" + g_id(tvars[ti]) + ": V = V::Null;")
+        if listin(tvars[ti], taddrs)
+            g_p(out, "let c_" + g_id(tvars[ti]) + ": Cell = cell_new" + g_lp() + "V::Null" + g_rp() + ";")
+        else
+            g_p(out, "let mut c_" + g_id(tvars[ti]) + ": V = V::Null;")
         ti += 1
     g_stmts(ctx, top, out)
     if strlen(ctx["err"]) > 0
