@@ -210,7 +210,7 @@ Copper 保留了一批旧写法做兼容（老 .cw 文件不用改也能跑）�
 
 ### 后端 / 内核
 
-- 🔌 **MCP 工具从 8 个扩到 19 个**：`list_files` / `list_dir` / `read_file` / `write_file` / `create_file` / `delete_file` / `rename_file` / `mkdir` / `search` / `run_script` / `get_diagnostics` / `get_outline` / `project_info` / `open_project` / `get_console` / `read_buffer` / `write_buffer` / `get_settings` / `set_settings`；外部 AI 还能直接读源码缓冲区
+- 🔌 **MCP 工具从 8 个扩到 26 个**：`list_files` / `list_dir` / `read_file` / `write_file` / `create_file` / `delete_file` / `rename_file` / `mkdir` / `search` / `run_script` / `get_diagnostics` / `get_outline` / `project_info` / `open_project` / `get_console` / `read_buffer` / `write_buffer` / `get_settings` / `set_settings`；外部 AI 还能直接读源码缓冲区
 - 👀 **文件监视服务**（`commands/watch.rs`）：轮询 mtime，不引第三方依赖，递归上限 10 层 / 6000 个文件
 - 🪪 **文件关联服务**（`commands/assoc.rs`）：`windows-sys` 直接调注册表 API，Copper 图标编译进程序，注册时释放到磁盘
 - 📂 **单文件打开**：以前「打开」只能选文件夹，现在能直接选 `.co` / `.cw`
@@ -436,7 +436,7 @@ Copper 保留了一批旧写法做兼容（老 .cw 文件不用改也能跑）�
 ### 文档
 
 - [插件开发指南](docs/plugins.md) —— 清单字段、可用 API、权限、离线生态
-- [MCP 服务器](docs/mcp.md) —— 怎么接客户端、19 个工具、协议细节与安全边界
+- [MCP 服务器](docs/mcp.md) —— 怎么接客户端、26 个工具（含一键 run/test/check 与教程 docs）、协议细节与安全边界
 - [语言教程](docs/tutorial.md) —— Copper 从入门到异常处理
 
 ---

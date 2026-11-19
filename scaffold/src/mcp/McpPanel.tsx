@@ -23,6 +23,13 @@ const TOOL_DOC: { name: string; desc: string }[] = [
   { name: 'write_file', desc: '原子写入工程文件' },
   { name: 'search', desc: '全文搜索，返回文件/行号/该行内容' },
   { name: 'run_script', desc: '跑一段代码；传 path 就跑整个工程主文件（含 import），返回输出与带行号的报错' },
+  { name: 'run', desc: '一键运行：可选 VM / AOT，inputs 直接喂给 ask，返回结构化结果' },
+  { name: 'test', desc: '一键测试：跑 tests/ 或 test_*.co、*_test.co，返回通过/失败与每个文件的报错' },
+  { name: 'check', desc: '一键查 bug：单文件或全工程扫语法/语义诊断' },
+  { name: 'docs_list', desc: 'Copper 教程目录（新语言，AI 先看这个）' },
+  { name: 'docs_get', desc: '读某一章教程：讲解 + 示例 + 输出 + 注意点' },
+  { name: 'docs_search', desc: '在教程里搜关键字，返回章节与小节片段' },
+  { name: 'env_info', desc: 'Copper 环境是否就绪、编译器路径、文档位置' },
   { name: 'get_diagnostics', desc: '对 Copper 源文件做语法与语义检查（会摊平 import，跨文件不误报）' },
   { name: 'get_outline', desc: '返回文件的符号大纲' }
 ];

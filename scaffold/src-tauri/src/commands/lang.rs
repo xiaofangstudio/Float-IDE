@@ -49,7 +49,7 @@ fn base_dir(file: &str) -> Option<std::path::PathBuf> {
  * 内核保持零依赖，取网页/发网页的实际 HTTP 实现由这里挂进去（进程内只挂一次）。 */
 static FETCH_INSTALL: std::sync::Once = std::sync::Once::new();
 
-fn ensure_fetch_installed() {
+pub(crate) fn ensure_fetch_installed() {
     FETCH_INSTALL.call_once(|| {
         let agent = ureq::AgentBuilder::new()
             .timeout(std::time::Duration::from_secs(10))

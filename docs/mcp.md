@@ -12,6 +12,19 @@ MCP（Model Context Protocol）让外部 AI 客户端直接操作你的工程：
 - **只监听 `127.0.0.1`**，外部网络访问不到
 - 启动后状态栏会显示 `MCP :17871`
 
+### 无界面模式（给命令行里的 AI）
+
+不打开 IDE 窗口也能跑同一个服务器，直接指向一个工程：
+
+```bash
+"Float IDE\floatide.exe" --mcp 17871 --project D:\proj
+```
+
+也可以用环境变量 `COPPER_MCP_PROJECT` 指定工程。无界面模式下只提供 Rust 侧工具
+（文件、搜索、`run`、`test`、`check`、`docs_*`、`env_info`）；依赖编辑器窗口的
+工具（`run_script`、`get_diagnostics`、`get_outline`、`read_buffer` 等）会明确
+返回「需要 IDE 界面在线」。
+
 ---
 
 ## 2. 接到客户端
@@ -43,6 +56,13 @@ MCP（Model Context Protocol）让外部 AI 客户端直接操作你的工程：
 | `write_file` | 原子写入（先写临时文件再改名） | Rust |
 | `search` | 全文搜索，返回文件 / 行号 / 该行内容 | Rust |
 | `run_script` | `code` 跑一段孤立代码；`path` 跑整个工程主文件（含 import），返回输出、诊断、报错与行号 | 界面 → Rust 内核 |
+| `run` | 一键运行：`mode` 选 `vm` / `aot`，`inputs` 直接喂给 `ask`，返回结构化结果（AOT 会报编译耗时/是否命中缓存） | Rust 内核 |
+| `test` | 一键测试：自动找 `tests/**/*.co`、`test_*.co`、`*_test.co`，逐个跑，返回 `passed / failed` 与每个文件的报错 | Rust 内核 |
+| `check` | 一键查 bug：传 `path` 查单个文件；不传扫全工程，按文件分组返回诊断 | Rust 内核 |
+| `docs_list` | Copper 教程目录（17 章，含摘要与节数） | Rust |
+| `docs_get` | 读某一章教程：讲解 + 示例代码 + 示例输出 + 注意点（Markdown） | Rust |
+| `docs_search` | 教程全文搜索，返回章节/小节与上下文片段 | Rust |
+| `env_info` | Copper 环境是否就绪、编译器路径与文档目录 | Rust |
 | `get_diagnostics` | 对 `.co/.cw` 做语法与语义检查，**会先摊平 import**，诊断带「（在 X 里）」的来源标注 | 界面 → Rust 内核 |
 | `get_outline` | 返回文件的函数 / 类 / 变量大纲 | 界面（TS AST） |
 
@@ -51,6 +71,52 @@ MCP（Model Context Protocol）让外部 AI 客户端直接操作你的工程：
 - `run_script` 只传 `code` = 用 TS 兼容引擎跑一段孤立代码，适合试小片段；
 - `run_script` 传 `path` = 和 **F5 完全一致**：Rust 内核编译执行，import 就地摊平、
   未存盘的缓冲区一起带上、报错行号映射回原文件。改多文件工程要用这条。
+- `run` 读磁盘上的文件（不带未存盘缓冲区），但同一套参数可选 VM / AOT，最适合
+  「改完 → 跑一遍 → 看真实结果」；AOT 首次 10~20 秒，之后按源码内容哈希命中缓存。
+
+`ask` 是语句，答案在变量 `ans` 里：`ask "名字？"` 之后用 `ans`。`run` / `test` 的
+`inputs` 会按顺序喂给这些 `ask`，喂完之后的 `ask` 直接拿空串，不会把调用卡死。
+
+### 3.1 一键测试的约定
+
+Copper 还没有 assert 内置，测试约定很简单：
+
+- 文件放在工程里的 `tests/` 目录，或命名成 `test_*.co` / `*_test.co`；
+- **跑完不报错 = 通过**，要断言失败就主动 `throw "原因"`；
+- 失败会返回 `ok:false`、`error` 和 `error_line`（已映射回原文件）。
+
+```json
+{"jsonrpc":"2.0","id":3,"method":"tools/call",
+ "params":{"name":"test","arguments":{}}}
+```
+
+返回：
+
+```json
+{"total":3,"passed":2,"failed":1,"millis":412,
+ "results":[{"file":"tests/a.co","ok":true,"millis":3,"output":"..."},
+            {"file":"tests/b.co","ok":false,"error":"第 5 行：期望 42 实际 41","error_line":5}]}
+```
+
+### 3.2 让 AI 学会写这门语言
+
+MCP 除了工具，还把 Copper 教程挂成了 **resources**：
+
+| 资源 URI | 内容 |
+| --- | --- |
+| `copper://docs/tutorial` | 教程目录（JSON） |
+| `copper://docs/about` | 关于 Copper（Markdown） |
+| `copper://docs/env` | 环境信息（JSON） |
+| `copper://docs/types`、`copper://docs/control`、`copper://docs/func` 等 | 每一章（Markdown） |
+
+AI 的典型开场：
+
+1. `env_info` —— 确认环境已装、AOT 能编；
+2. `docs_list` —— 看有哪 17 章；
+3. `docs_get {"chapter":"types"}` / `docs_search {"query":"指针"}` —— 学语法；
+4. `run` / `test` / `check` —— 写完立刻验。
+
+也可以直接在客户端里读资源（`resources/list` + `resources/read`），不占工具调用。
 
 `get_diagnostics` 也走 Rust 内核的静态检查：先把所有 import 摊平成一份完整程序，
 再在整份程序上判断。所以「变量放在数据文件里、主文件里用」不会报「还没定义过」，
@@ -114,7 +180,7 @@ curl -s http://127.0.0.1:17871/mcp \
 - 支持单条请求与**批量数组**请求
 - `notifications/*`（无 id）返回 `202`，无响应体
 - 协议版本：`2025-06-18`
-- 已实现方法：`initialize`、`tools/list`、`tools/call`、`resources/list`（空）、`prompts/list`（空）、`ping`
+- 已实现方法：`initialize`、`tools/list`、`tools/call`、`resources/list`、`resources/read`、`prompts/list`、`ping`
 
 ---
 
