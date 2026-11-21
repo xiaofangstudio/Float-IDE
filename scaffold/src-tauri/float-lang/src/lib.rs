@@ -19,6 +19,7 @@
 pub mod aot;
 pub mod api;
 pub mod ast;
+pub mod bigint;
 pub mod builtins;
 pub mod cancel;
 

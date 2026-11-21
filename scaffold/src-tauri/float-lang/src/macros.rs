@@ -71,9 +71,6 @@ fn expand_line(
     file: &str,
     ln: u32,
 ) -> Result<String, FloatError> {
-    if stack.len() > 16 {
-        return Err(cycle_err(file, ln, "别名套得太深（16 层），多半是互相指了"));
-    }
     let chars: Vec<char> = line.chars().collect();
     let mut out = String::with_capacity(line.len());
     let mut i = 0usize;

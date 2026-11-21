@@ -8,8 +8,19 @@ use float_lang::Vm;
 use std::env;
 use std::fs;
 
+#[path = "support/repl_ui.rs"]
+mod repl_ui;
+
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
+    if matches!(
+        args.first().map(|s| s.as_str()),
+        Some("help") | Some("--help") | Some("-h")
+    ) {
+        let mut reader = repl_ui::InputReader::new();
+        repl_ui::help_command(&mut reader, None);
+        return;
+    }
     // 没给脚本参数：看看自己身上是否焊着脚本（co build 在无 cargo 时这样产出的 exe）。
     if args.is_empty() {
         match read_embedded() {
@@ -164,6 +175,46 @@ fn run_capture(src: &str) -> Result<String, String> {
         .unwrap_or_else(|_| Err("交互执行崩了（panic）".to_string()))
 }
 
+/// 这一行是否含“赋值号”（= / += / -= / *= / /= / %=），而不是比较号。
+/// 只看字符串外、括号外的 `=`；`==`、`!=`、`<=`、`>=` 都算比较，不算赋值。
+fn has_assignment_operator(line: &str) -> bool {
+    let mut chars = line.chars().peekable();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut depth = 0usize;
+    let mut prev = '\0';
+    while let Some(c) = chars.next() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' => quote = Some(c),
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            '=' => {
+                let next = chars.peek().copied();
+                let comparison = next == Some('=') || matches!(prev, '!' | '<' | '>');
+                if next == Some('=') {
+                    chars.next();
+                }
+                if !comparison && depth == 0 {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        prev = c;
+    }
+    false
+}
+
 /// 像不像一个"表达式"：没赋值、没块、没声明关键字——那就试着当 print 的参数
 fn looks_like_expr(line: &str) -> bool {
     let t = line.trim();
@@ -179,33 +230,143 @@ fn looks_like_expr(line: &str) -> bool {
     if STMT_HEADS.contains(&first) {
         return false;
     }
-    // 赋值（= / += / -= ...）不算表达式
-    !t.contains('=')
+    // 赋值（= / += / -= ...）不算表达式；比较（== / != / <= / >=）仍然算表达式
+    !has_assignment_operator(t)
+}
+
+/// 清洗终端送来的这一行：去掉 ANSI 控制序列、BOM/零宽字符、裸 CR 和 NUL，
+/// 并剥掉可能被终端回显进来的 `>>>` 提示符。超长输出时提前键入，最容易把
+/// 提示符/光标位置搞乱，这里先把非源码字符清掉再解析。
+fn clean_repl_line(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut it = raw.chars().peekable();
+    while let Some(c) = it.next() {
+        if c == '\u{1b}' {
+            match it.peek().copied() {
+                Some('[') => {
+                    it.next();
+                    // CSI：一直吃到 0x40..0x7e 的终止字符
+                    while let Some(n) = it.next() {
+                        if ('@'..='~').contains(&n) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    it.next();
+                    // OSC：吃到 BEL 或 ESC \
+                    while let Some(n) = it.next() {
+                        if n == '\u{7}' {
+                            break;
+                        }
+                        if n == '\u{1b}' && it.peek() == Some(&'\\') {
+                            it.next();
+                            break;
+                        }
+                    }
+                }
+                _ => {
+                    it.next();
+                }
+            }
+            continue;
+        }
+        if c == '\r' || c == '\n' || c == '\0' || c == '\u{feff}' || c == '\u{200b}'
+            || c == '\u{200c}' || c == '\u{200d}'
+        {
+            continue;
+        }
+        if c.is_control() && c != '\t' {
+            continue;
+        }
+        out.push(c);
+    }
+    // 如果提示符被错误地并进了输入，取最后一个 >>> 后面的内容
+    if let Some(p) = out.rfind(">>>") {
+        out = out[p + 3..].to_string();
+    }
+    out.trim_end().to_string()
+}
+
+/// `print(...)` 后面只剩残留数字或多余右括号时，返回可执行的有效前缀。
+/// 这是给超长数字输出/终端粘行擦屁股，正常 `print(1) x` 不会命中（x 不是数字）。
+fn print_call_prefix(line: &str) -> Option<String> {
+    let s = line.trim_start();
+    let rest = s.strip_prefix("print")?;
+    if !rest.starts_with('(') {
+        return None;
+    }
+    let open = s.find('(')?;
+    let mut depth = 0usize;
+    let mut in_str = false;
+    let mut esc = false;
+    let mut end = None;
+    for (i, c) in s[open..].char_indices() {
+        if in_str {
+            if esc {
+                esc = false;
+            } else if c == '\\' {
+                esc = true;
+            } else if c == '"' {
+                in_str = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => in_str = true,
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    end = Some(open + i + c.len_utf8());
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let end = end?;
+    let tail = s[end..].trim();
+    if tail.is_empty() {
+        return None;
+    }
+    let digit_count = tail.chars().filter(|c| c.is_ascii_digit()).count();
+    let only_tail = tail
+        .chars()
+        .all(|c| c.is_ascii_digit() || c == ')' || c.is_whitespace());
+    if only_tail && (digit_count >= 8 || tail.starts_with(')')) {
+        Some(s[..end].to_string())
+    } else {
+        None
+    }
 }
 
 fn repl() {
-    use std::io::{BufRead, IsTerminal, Write};
-    let tty = std::io::stdin().is_terminal();
-    println!("Copper 交互模式（输入 exit 退出，输入 help 看提示）");
+    let mut reader = repl_ui::InputReader::new();
+    println!("Copper 交互模式（输入 help 看分章节帮助，输入 exit 退出）");
     let mut buf: Vec<String> = Vec::new();
     let mut printed: usize = 0;
-    let stdin = std::io::stdin();
-    let mut lines = stdin.lock().lines();
+    let mut at_line_start = true;
     loop {
-        if tty {
-            print!(">>> ");
-            let _ = std::io::stdout().flush();
+        if reader.is_tty() {
+            // 上一轮输出如果没以换行结束（超长数字被终端截断、或提前键入），
+            // 先把提示符顶到行首，避免 "数字>>> print(...)" 粘成一行。
+            if !at_line_start {
+                println!();
+            }
+            let _ = std::io::Write::flush(&mut std::io::stdout());
         }
-        let raw = match lines.next() {
-            Some(Ok(l)) => l,
-            _ => {
-                if tty {
+        let raw = match reader.read_line(">>> ", true) {
+            Some(l) => l,
+            None => {
+                if reader.is_tty() {
                     println!();
                 }
                 break;
             }
         };
-        let line = raw.trim_end_matches(['\r', '\n']).to_string();
+        let line = clean_repl_line(&raw);
+        at_line_start = true;
         let t = line.trim();
         if t.is_empty() {
             continue;
@@ -213,13 +374,16 @@ fn repl() {
         match t {
             "exit" | "quit" | "退出" | "q" => break,
             "help" | "?" => {
-                println!("  help      这些提示");
-                println!("  exit      退出");
-                println!("  变量/函数/类 跨行留着；表达式会自动打印结果");
-                println!("  print(...) 自己打印；写错的行不会留在状态里");
+                repl_ui::help_command(&mut reader, None);
+                at_line_start = true;
                 continue;
             }
             _ => {}
+        }
+        if let Some(arg) = t.strip_prefix("help ") {
+            repl_ui::help_command(&mut reader, Some(arg));
+            at_line_start = true;
+            continue;
         }
 
         // 先按"表达式"试：包一层 print，值就直接显示出来（跟 python 手敲一样）；
@@ -229,6 +393,12 @@ fn repl() {
         } else {
             vec![line.clone()]
         };
+        let mut attempts = attempts;
+        if let Some(prefix) = print_call_prefix(&line) {
+            if !attempts.iter().any(|a| a == &prefix) {
+                attempts.push(prefix);
+            }
+        }
 
         let mut done = false;
         let mut last_err = String::new();
@@ -240,7 +410,8 @@ fn repl() {
                 Ok(out) => {
                     if out.len() > printed {
                         print!("{}", &out[printed..]);
-                        let _ = std::io::stdout().flush();
+                        at_line_start = out.ends_with('\n');
+                        let _ = std::io::Write::flush(&mut std::io::stdout());
                     }
                     printed = out.len();
                     buf = cand;
@@ -254,6 +425,45 @@ fn repl() {
         }
         if !done {
             println!("出错：{}", last_err);
+            at_line_start = true;
+        }
+    }
+}
+
+#[cfg(test)]
+mod repl_line_tests {
+    use super::*;
+
+    #[test]
+    fn comparisons_are_expressions() {
+        for line in [
+            "a == 1",
+            "a != 1",
+            "a <= 1",
+            "a >= 1",
+            "a==1",
+            "f(a == 1)",
+            "s == \"x=y\"",
+        ] {
+            assert!(looks_like_expr(line), "应当按表达式执行：{line}");
+        }
+    }
+
+    #[test]
+    fn assignments_are_statements() {
+        for line in [
+            "a = 1",
+            "a=1",
+            "a += 1",
+            "a -= 1",
+            "a *= 1",
+            "a /= 1",
+            "a %= 1",
+            "a = f(x == 1)",
+            "s = \"a=b\"",
+            "int a",
+        ] {
+            assert!(!looks_like_expr(line), "应当按语句执行：{line}");
         }
     }
 }

@@ -227,9 +227,9 @@ fn 除零报错() {
 }
 
 #[test]
-fn 无限递归被拦住() {
-    let e = err_of("function f(n)\n    return f(n + 1)\nprint(f(0))");
-    assert!(e.contains("递归太深"), "实际是：{}", e);
+fn 一千层递归不被拦() {
+    let s = out("function f(n)\n    if n <= 0\n        return 0\n    return f(n - 1)\nprint(f(1000))");
+    assert_eq!(s, "0\n");
 }
 
 #[test]
@@ -453,22 +453,19 @@ fn 合理赋值不该被误报() {
     assert_eq!(out("str s = \"a\"\nint n = 2\nprint(s + \"b\", n + 1)"), "ab 3\n");
 }
 
-/* ── 内存护栏 ──────────────────────────────────────────────────────────────
- * `while true { add 1 to xs }` 这类脚本以前会一路把内存吃满，整机开始 swap。
- * 现在必须在撑爆之前明确报错（措辞和 TS 引擎 / limits.rs 保持一致）。 */
+/* ── 不设内存上限：超过旧阈值的容器/字符串也要跑完 ───────────────────── */
 #[test]
-fn 容器与字符串有内存上限() {
-    for (src, what) in [
-        ("list xs = range(2_000_000)\nprint(len(xs))", "列表"),
-        ("print(\"ab\".repeat(20_000_000))", "字符串"),
-        ("print(\"a\" * 20_000_000)", "字符串"),
-        ("list xs = range(1_000_000)\nxs.push(1)", "列表"),
-    ] {
-        let m = err_of(src);
-        assert!(m.contains(what), "报错要写明是哪种对象：{}", m);
-        assert!(m.contains("上限") && m.contains("忘了停"), "报错要给改法：{}", m);
-    }
-    // 正常大小的脚本不能被误杀
+fn 容器与字符串不再有上限() {
+    assert_eq!(out("list xs = range(1_050_000)\nprint(len(xs))"), "1050000\n");
+    assert_eq!(
+        out("string s = \"ab\".repeat(10_000_000)\nprint(len(s))"),
+        "20000000\n"
+    );
+    assert_eq!(out("string s = \"a\" * 20_000_000\nprint(len(s))"), "20000000\n");
+    assert_eq!(
+        out("list xs = range(1_000_000)\nxs.push(1)\nprint(len(xs))"),
+        "1000001\n"
+    );
     assert_eq!(
         out("list xs = [1, 2, 3]\nxs.push(4)\nprint(len(xs))\nprint(\"ab\" * 2)"),
         "4\nabab\n"
@@ -547,8 +544,7 @@ fn 极端表达式不爆栈() {
     assert_eq!(out("print(10 - 3 - 2)"), "5\n");
     assert_eq!(out("print(8 / 4 / 2)"), "1\n");
     assert_eq!(out("print(2 ** 3 ** 2)"), "512\n");
-    // 深括号：超过上限要报「嵌套太深」，不是进程消失。
-    // 必须放大栈线程里跑——测试线程只有 2MB，凑到上限附近本身就会爆栈。
+    // 深括号：不再设嵌套上限，必须正常算出来
     fn run_big(src: String) -> Result<String, String> {
         std::thread::Builder::new()
             .stack_size(64 * 1024 * 1024)
@@ -561,9 +557,8 @@ fn 极端表达式不爆栈() {
             .expect("线程没崩")
     }
     let deep = format!("print({}1{})", "(".repeat(80), ")".repeat(80));
-    let m = run_big(deep).unwrap_err();
-    assert!(m.contains("嵌套太深"), "深括号报错不对：{}", m);
-    // 深缩进块：同上
+    assert_eq!(run_big(deep).unwrap(), "1\n");
+    // 深缩进块：不再拦
     let mut deep_if = String::new();
     for k in 0..220 {
         deep_if.push_str(&"    ".repeat(k));
@@ -571,8 +566,7 @@ fn 极端表达式不爆栈() {
     }
     deep_if.push_str(&"    ".repeat(220));
     deep_if.push_str("print(1)");
-    let m2 = run_big(deep_if).unwrap_err();
-    assert!(m2.contains("嵌套") && m2.contains("太深"), "深 if 报错不对：{}", m2);
+    assert_eq!(run_big(deep_if).unwrap(), "1\n");
 }
 
 

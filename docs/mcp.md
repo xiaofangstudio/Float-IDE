@@ -48,6 +48,8 @@ MCP（Model Context Protocol）让外部 AI 客户端直接操作你的工程：
 
 ## 3. 提供的工具
 
+一共 **27 个**（无界面模式下桥接类工具会自动隐藏，只剩 Rust 侧可执行的）。
+
 | 工具 | 作用 | 在哪执行 |
 | --- | --- | --- |
 | `project_info` | 当前工程名称与根路径 | Rust |
@@ -56,8 +58,9 @@ MCP（Model Context Protocol）让外部 AI 客户端直接操作你的工程：
 | `write_file` | 原子写入（先写临时文件再改名） | Rust |
 | `search` | 全文搜索，返回文件 / 行号 / 该行内容 | Rust |
 | `run_script` | `code` 跑一段孤立代码；`path` 跑整个工程主文件（含 import），返回输出、诊断、报错与行号 | 界面 → Rust 内核 |
-| `run` | 一键运行：`mode` 选 `vm` / `aot`，`inputs` 直接喂给 `ask`，返回结构化结果（AOT 会报编译耗时/是否命中缓存） | Rust 内核 |
-| `test` | 一键测试：自动找 `tests/**/*.co`、`test_*.co`、`*_test.co`，逐个跑，返回 `passed / failed` 与每个文件的报错 | Rust 内核 |
+| `run` | 一键运行：`mode` 选 `vm` / `aot`，`inputs` 直接喂给 `ask`，`timeoutMs` 控制超时（默认 0 = 不限，跑到自然结束；VM 到点置停止标记，AOT 直接杀进程），返回结构化结果（AOT 会报编译耗时/是否命中缓存） | Rust 内核 |
+| `stop` | 停止正在跑的东西：给 VM 置停止标记 + 杀掉 MCP 起的 AOT 子进程 | Rust 内核 |
+| `test` | 一键测试：自动找 `tests/**/*.co`、`test_*.co`、`*_test.co`，逐个跑（不限时，跑到自然结束），返回 `passed / failed` 与每个文件的报错 | Rust 内核 |
 | `check` | 一键查 bug：传 `path` 查单个文件；不传扫全工程，按文件分组返回诊断 | Rust 内核 |
 | `docs_list` | Copper 教程目录（17 章，含摘要与节数） | Rust |
 | `docs_get` | 读某一章教程：讲解 + 示例代码 + 示例输出 + 注意点（Markdown） | Rust |

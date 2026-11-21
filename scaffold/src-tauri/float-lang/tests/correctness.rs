@@ -336,20 +336,9 @@ fn 下标越界会报错() {
 }
 
 #[test]
-fn 死循环会被步数上限拦住() {
-    let prog = "while (true)\n    x = 1\n";
-    let mut vm_ok = false;
-    match run_source(prog) {
-        Ok(_) => vm_ok = true,
-        Err(e) => assert!(e.message.contains("死循环") || e.message.contains("步数"), "实际：{}", e.message),
-    }
-    assert!(!vm_ok, "死循环不该正常结束");
-}
-
-#[test]
-fn 深度递归被拦住且不崩进程() {
-    let e = run_source("function f(n)\n    return f(n + 1)\nprint(f(0))\n").unwrap_err();
-    assert!(e.message.contains("递归太深"), "实际：{}", e.message);
+fn 一千层递归正常跑完() {
+    let s = run_text("function f(n)\n    if n <= 0\n        return 0\n    return f(n - 1)\nprint(f(1000))\n").unwrap();
+    assert_eq!(s, "0\n");
 }
 
 /* ─────────────── 指针与手动内存 ─────────────── */

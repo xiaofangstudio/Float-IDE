@@ -21,11 +21,10 @@ if exist "%COPPER_HOME%\toolchain\bin\cargo.exe" (
   if not defined RUSTFLAGS set "RUSTFLAGS=-C linker=rust-lld"
 )
 
-rem --- compiler resolution: 统一 `colang <版本>.exe`，多份取最新；copper.exe 只作兜底
 set "KIND=env"
 set "EXE="
-for /f "delims=" %%F in ('dir /b /o-n "%HERE%windows-x64\colang *.exe" 2^>nul ^| findstr /v /i "-self"') do if not defined EXE set "EXE=%HERE%windows-x64\%%F"
-if not defined EXE for /f "delims=" %%F in ('dir /b /o-n "%HERE%colang *.exe" 2^>nul ^| findstr /v /i "-self"') do if not defined EXE set "EXE=%HERE%%%F"
+for /f "delims=" %%F in ('dir /b /o-n "%HERE%windows-x64\colang *.exe" 2^>nul ^| findstr /v /i /c:"-self"') do if not defined EXE set "EXE=%HERE%windows-x64\%%F"
+if not defined EXE for /f "delims=" %%F in ('dir /b /o-n "%HERE%colang *.exe" 2^>nul ^| findstr /v /i /c:"-self"') do if not defined EXE set "EXE=%HERE%%%F"
 if not defined EXE set "EXE=%HERE%windows-x64\colang.exe"
 if not exist "%EXE%" set "EXE=%HERE%colang.exe"
 if not exist "%EXE%" set "EXE=%HERE%windows-x64\copper.exe"
@@ -67,6 +66,7 @@ if not exist "%RUNEXE%" set "RUNEXE=%HERE%copper-run.exe"
 set "CMD=%~1"
 if "%CMD%"=="" goto usage
 if /I "%CMD%"=="env"   goto do_env
+if /I "%CMD%"=="help"  goto do_help
 if /I "%CMD%"=="build" goto do_build
 if /I "%CMD%"=="run"   goto do_run
 if /I "%CMD%"=="check" goto do_mode
@@ -85,6 +85,11 @@ echo embed       = %EMBED%
 if exist "%COPPER_HOME%\copper.json" type "%COPPER_HOME%\copper.json"
 if exist "%COPPER%" for %%I in ("%COPPER%") do echo size        = %%~zI bytes
 exit /b 0
+
+:do_help
+if not exist "%RUNEXE%" echo [copper] interpreter not found: %RUNEXE% & exit /b 2
+"%RUNEXE%" --help
+exit /b %ERRORLEVEL%
 
 :need_target
 if "%~2"=="" goto no_target
@@ -163,5 +168,5 @@ if errorlevel 1 exit /b 1
 exit /b %ERRORLEVEL%
 
 :usage
-echo usage: copper [self] build^|run^|check^|ast^|json^|stats^|env  ^<file.co^>
+echo usage: copper [self] build^|run^|check^|ast^|json^|stats^|env^|help  ^<file.co^>
 exit /b 2

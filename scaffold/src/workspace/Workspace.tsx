@@ -277,7 +277,9 @@ export function Workspace({ projectDir, initialFile, onOpenTarget, onExit }: Pro
   const runTokenRef = useRef(0);
 
   const pushLine = useCallback((l: OutLine): void => {
-    setLines((ls) => [...ls.slice(-500), { kind: l.kind, text: l.text, ts: Date.now() }]);
+    /* 不裁剪历史：控制台要能一直往上翻到第一行。
+     * 30MB 的单行巨数以前会被 slice(-500) 顶掉，现在原样保留。 */
+    setLines((ls) => [...ls, { kind: l.kind, text: l.text, ts: Date.now() }]);
   }, []);
   /* AOT 运行（选 AOT 时 F5）：产物是独立 exe，输出逐行从后端推过来。
    * 只认当前这一次 runId，旧进程的尾巴不能糊到新一次运行的控制台上。 */

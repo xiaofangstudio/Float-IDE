@@ -205,7 +205,7 @@ fn 深嵌套不会爆栈() {
         assert_eq!(out, "深嵌套也能跑\n", "{} 层", depth);
     }
 
-    // 再深就该明确报错，而不是把进程栈吃掉
+    // 再深也不再拦：400 层必须正常跑完
     let depth = 400usize;
     let mut src = String::new();
     for i in 0..depth {
@@ -213,9 +213,9 @@ fn 深嵌套不会爆栈() {
         src.push_str("if (true)\n");
     }
     src.push_str(&"    ".repeat(depth));
-    src.push_str("print(\"太深了\")\n");
-    let err = run_big(src).expect_err("超过上限应报错");
-    assert!(err.contains("嵌套太深"), "{}", err);
+    src.push_str("print(\"深也能跑\")\n");
+    let out = run_big(src).expect("400 层不该报错");
+    assert_eq!(out, "深也能跑\n");
 }
 
 #[test]
@@ -292,7 +292,7 @@ fn 五万行单文件() {
 }
 
 #[test]
-fn 超深_import_链给中文报错而不是崩() {
+fn 超深_import_链不再设上限() {
     let dir = tmp_dir("deepimport");
     let base = dir.clone();
     let n = 400;
@@ -306,10 +306,7 @@ fn 超深_import_链给中文报错而不是崩() {
     }
     let main = "import \"d0.cw\"\nprint(\"ok\")\n";
     std::fs::write(dir.join("main.cw"), main).expect("写 main");
-    let e = match run_from("main.cw", main, Some(&base)) {
-        Err(e) => e.message,
-        Ok(_) => panic!("深链该报错"),
-    };
-    assert!(e.contains("import"), "{}", e);
+    let r = run_from("main.cw", main, Some(&base)).expect("400 层 import 不该报错");
+    assert_eq!(r.output.trim(), "ok");
     let _ = std::fs::remove_dir_all(&dir);
 }

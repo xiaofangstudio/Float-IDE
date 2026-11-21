@@ -4,11 +4,9 @@ setlocal EnableExtensions
 set "HERE=%~dp0"
 for %%I in ("%HERE%..") do set "COPPER_HOME=%%~fI"
 set "PLAT=windows-x64"
-rem 编译器统一命名 `colang <大>.<中>.<小>.exe`；同目录有多份时取名字最大的那份（越新越大）。
-rem 解释器叫 colang，不叫 copper；copper.exe 只作旧环境的兜底。
 set "EXE="
-for /f "delims=" %%F in ('dir /b /o-n "%HERE%%PLAT%\colang *.exe" 2^>nul ^| findstr /v /i "-self"') do if not defined EXE set "EXE=%HERE%%PLAT%\%%F"
-if not defined EXE for /f "delims=" %%F in ('dir /b /o-n "%HERE%colang *.exe" 2^>nul ^| findstr /v /i "-self"') do if not defined EXE set "EXE=%HERE%%%F"
+for /f "delims=" %%F in ('dir /b /o-n "%HERE%%PLAT%\colang *.exe" 2^>nul ^| findstr /v /i /c:"-self"') do if not defined EXE set "EXE=%HERE%%PLAT%\%%F"
+if not defined EXE for /f "delims=" %%F in ('dir /b /o-n "%HERE%colang *.exe" 2^>nul ^| findstr /v /i /c:"-self"') do if not defined EXE set "EXE=%HERE%%%F"
 if not defined EXE set "EXE=%HERE%%PLAT%\colang.exe"
 if not exist "%EXE%" set "EXE=%HERE%colang.exe"
 if not exist "%EXE%" set "EXE=%HERE%copper.exe"
@@ -30,6 +28,7 @@ if /I "%~1"=="--version" goto version
 if /I "%~1"=="-v" goto version
 if /I "%~1"=="-V" goto version
 if /I "%~1"=="version" goto version
+if /I "%~1"=="help" goto helpfull
 if /I "%~1"=="-h" goto usage
 if /I "%~1"=="--help" goto usage
 if /I "%~1"=="env" goto delege
@@ -86,6 +85,7 @@ echo   co ast / json / stats script.co  AST / JSON / stats
 echo   co env                      environment details
 echo   co self cmd                 use the self-hosted compiler
 echo   co --version                version only
+echo   co help                     full manual (chapters 1-9)
 echo.
 echo examples:
 echo   co language\samples\01_hello.co
@@ -93,6 +93,11 @@ echo   co build language\samples\01_hello.co -o hello.exe
 rem like python: no args -> banner then interactive prompt
 if exist "%RUN%" ( "%RUN%" --repl )
 exit /b 0
+
+:helpfull
+if not exist "%RUN%" goto norun
+"%RUN%" --help
+exit /b %ERRORLEVEL%
 
 :usage
 call :banner

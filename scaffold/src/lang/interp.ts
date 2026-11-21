@@ -9,7 +9,7 @@
  */
 
 import type { Expr, Program, Span, Stmt, Target, TypeName } from './ast';
-import { LIMITS, growError, guardDict, guardList, guardString } from './limits';
+import { LIMITS, guardDict, guardList, guardString } from './limits';
 import { parseProgram } from './parse';
 import { getBuiltin, emptyDict } from './builtins';
 import { isNamespace } from './stdlib';
@@ -223,9 +223,6 @@ export class Runner {
       ...rawHook,
       output: (l) => {
         this.outBytes += l.text.length * 2;
-        if (this.outBytes > LIMITS.outputBytes) {
-          throw growError('输出', this.outBytes, LIMITS.outputBytes);
-        }
         rawOutput.call(rawHook, l);
       },
     };
@@ -464,13 +461,6 @@ export class Runner {
       }
 
       this.steps++;
-      /* 5000 万步 ≈ 普通笔记本上十几秒的计算量：真死循环照样抓得住，
-       * 但"大数反复减取模""几百万次迭代"这类正经计算不会再被误杀。 */
-      if (this.steps > LIMITS.stepBudget) {
-        this.fail(new FloatError(
-          `执行步数超过上限（${LIMITS.stepBudget} 步），脚本可能陷入死循环（用 out / break / stop 结束）`));
-        return;
-      }
       this.lastNode = y.node;
       this.depth = y.depth;
 
@@ -770,10 +760,8 @@ export class Runner {
 
       case 'waitUntil': {
         yield { kind: 'stmt', node: s, depth };
-        let guard = 0;
         for (;;) {
           if (truthy(yield* this.evalExpr(s.cond, env))) return 'normal';
-          if (++guard > 1_000_000) throw new FloatError('wait until 循环超过 100 万次，可能死循环', s);
           const sig = yield* this.execBlock(s.body, env, depth);
           if (sig === 'break') return 'normal';
           if (sig === 'continue') continue;
@@ -786,7 +774,6 @@ export class Runner {
         const n = toNum(yield* this.evalExpr(s.count, env));
         if (n === null) throw new FloatError('repeat 的次数必须是数字', s);
         const times = Math.trunc(n);
-        if (times > 1_000_000) throw new FloatError('repeat 次数超过 100 万，可能死循环', s);
         for (let k = 0; k < times; k++) {
           const sig = yield* this.execBlock(s.body, env, depth);
           if (sig === 'break') break;
@@ -798,9 +785,7 @@ export class Runner {
 
       case 'forever': {
         yield { kind: 'stmt', node: s, depth };
-        let guard = 0;
         for (;;) {
-          if (++guard > 1_000_000) throw new FloatError('forever 循环超过 100 万次，可能死循环', s);
           const sig = yield* this.execBlock(s.body, env, depth);
           if (sig === 'break') break;
           if (sig === 'continue') continue;
@@ -823,9 +808,7 @@ export class Runner {
          * 这和 if / while 的现有语义、以及 Rust 内核完全一致。 */
         const loopEnv = env;
         const end = s.inclusive ? to + (step > 0 ? 1e-9 : -1e-9) : to;
-        let guard = 0;
         for (let v = from; step > 0 ? v < end : v > end; v += step) {
-          if (++guard > 1_000_000) throw new FloatError('for 循环超过 100 万次，可能死循环', s);
           loopEnv.define(s.varName, v);
           this.env = loopEnv;
           const sig = yield* this.execBlock(s.body, loopEnv, depth);
@@ -852,8 +835,6 @@ export class Runner {
         } else {
           throw new FloatError(`for … in 只能遍历列表、字符串或字典，得到 ${fmtVal(iter)}`, s);
         }
-        if (pairs.length > 1_000_000) throw new FloatError('要遍历的集合超过 100 万个元素', s);
-
         const loopEnv = env;
         for (const [k, v] of pairs) {
           if (s.valueName) {
@@ -1073,10 +1054,8 @@ export class Runner {
   }
 
   private async *loopWhile(s: Extract<Stmt, { k: 'while' }>, env: Env, depth: number): SigGen {
-    let guard = 0;
     for (;;) {
       if (!truthy(yield* this.evalExpr(s.cond, env))) break;
-      if (++guard > 1_000_000) throw new FloatError('while 循环超过 100 万次，可能死循环', s);
       const sig = yield* this.execBlock(s.body, env, depth);
       if (sig === 'break') break;
       if (sig === 'continue') continue;

@@ -15,6 +15,7 @@
 //! 靠专用指令 + 少调度 + 吃透常见模式，而不是运行时编译。
 
 use crate::builtins::{call_builtin, call_method};
+use crate::bigint::BigInt;
 use crate::bytecode::{Chunk, Op};
 use crate::error::{FloatError, Span};
 use crate::value::{Cell, Closure, Dict, PtrTarget, UserFn, Value};
@@ -22,9 +23,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 /// 调用栈深度上限。超过就报「递归太深」，而不是让进程爆栈。
-use crate::limits::{CALL_DEPTH as MAX_DEPTH, MAX_OUTPUT};
-/// 单次运行最多执行多少条指令，防死循环
-const DEFAULT_MAX_STEPS: u64 = 200_000_000;
+use crate::limits::CALL_DEPTH as MAX_DEPTH;
+/// 不设执行步数上限：只保留计数器用于统计，永不因此中止。
+const DEFAULT_MAX_STEPS: u64 = u64::MAX;
 /// 每执行这么多条指令才查一次步数上限（每条都查太浪费）
 const FUEL: u64 = 1 << 20;
 /// 操作数栈容量（值个数）。400 层递归 × 每层几十个局部变量，远用不满。
@@ -964,12 +965,9 @@ impl Vm {
                     if (t as usize) <= ip {
                         fuel -= 1;
                         if fuel == 0 {
-                            self.steps += FUEL;
+                            self.steps = self.steps.saturating_add(FUEL);
                             if crate::cancel::stop_requested() {
                                 return Err(self.err_at(ip, "已停止：界面按了停止"));
-                            }
-                            if self.steps > self.max_steps {
-                                return Err(self.err_at(ip, "执行步数超限，可能是死循环"));
                             }
                             fuel = FUEL;
                         }
@@ -2062,13 +2060,6 @@ impl Vm {
                     }
                     self.out.push_str(&line);
                     self.out.push('\n');
-                    // 输出上限：死循环里不停 print 会先把内存吃光，再谈步数限制就晚了
-                    if self.out.len() > MAX_OUTPUT {
-                        return Err(self.err_at(
-                            ip,
-                            format!("输出超过 {} MB，停下来了（多半是循环里一直在 print）", MAX_OUTPUT / 1048576),
-                        ));
-                    }
                 }
                 Op::Debug { n, level } => {
                     let n = n as usize;
@@ -2093,9 +2084,6 @@ impl Vm {
                     self.out.push(' ');
                     self.out.push_str(&line);
                     self.out.push('\n');
-                    if self.out.len() > MAX_OUTPUT {
-                        return Err(self.err_at(ip, "输出太多（超过 32 MB），停下来了"));
-                    }
                 }
                 Op::TimeRead => {
                     // 距上次 time reset 过了多少秒（毫秒精度，按 float 给）
@@ -2148,12 +2136,9 @@ impl Vm {
                 Op::RangeNext { fail } => {
                     fuel -= 1;
                     if fuel == 0 {
-                        self.steps += FUEL;
+                        self.steps = self.steps.saturating_add(FUEL);
                         if crate::cancel::stop_requested() {
                             return Err(self.err_at(ip, "已停止：界面按了停止"));
-                        }
-                        if self.steps > self.max_steps {
-                            return Err(self.err_at(ip, "执行步数超限，可能是死循环"));
                         }
                         fuel = FUEL;
                     }
@@ -2530,7 +2515,57 @@ fn break_value_cycles(v: &mut Value, keep: Option<&Value>) {
     *v = Value::Null;
 }
 
+fn big_from_value(v: &Value) -> Option<BigInt> {
+    match v {
+        Value::Int(i) => Some(BigInt::from_i64(*i)),
+        Value::Big(b) => Some((**b).clone()),
+        _ => None,
+    }
+}
+
+fn big_value(b: BigInt) -> Value {
+    match b.to_i64() {
+        Some(i) => Value::Int(i),
+        None => Value::Big(Rc::new(b)),
+    }
+}
+
 pub fn arith(op: Op, a: &Value, b: &Value) -> Result<Value, String> {
+    // 任意精度整数：只要有一边是 Big，就整段走大整数，不再退回 f64。
+    // 这是「计算器就该能算」的那条路径：2 ** 100000000 不会变成 Infinity。
+    if matches!(a, Value::Big(_)) || matches!(b, Value::Big(_)) {
+        let x = big_from_value(a).ok_or_else(|| format!("{} 不是整数", a.to_display()))?;
+        let y = big_from_value(b).ok_or_else(|| format!("{} 不是整数", b.to_display()))?;
+        return match op {
+            Op::Add => Ok(big_value(x.add(&y))),
+            Op::Sub => Ok(big_value(x.sub(&y))),
+            Op::Mul => Ok(big_value(x.mul(&y))),
+            Op::Pow => {
+                let e = y.to_i64().ok_or_else(|| "指数太大".to_string())?;
+                if e < 0 {
+                    Ok(Value::Float(x.to_f64().powf(e as f64)))
+                } else if e > u32::MAX as i64 {
+                    Err("指数超出 u32 范围".into())
+                } else {
+                    Ok(big_value(x.pow(e as u32)))
+                }
+            }
+            Op::Div | Op::IDiv | Op::Mod => {
+                let xf = x.to_f64();
+                let yf = y.to_f64();
+                if yf == 0.0 {
+                    return Err("除数不能为 0".into());
+                }
+                Ok(match op {
+                    Op::Div => Value::Float(xf / yf),
+                    Op::IDiv => Value::Float((xf / yf).floor()),
+                    _ => Value::Float(xf % yf),
+                })
+            }
+            _ => Err("不支持的大整数运算".into()),
+        };
+    }
+
     // 指针运算：p + n / p - n / p - q（两个指针相减 = 隔了几格）
     if op == Op::Add || op == Op::Sub {
         if let Value::Ptr(pa) = a {
@@ -2585,15 +2620,15 @@ pub fn arith(op: Op, a: &Value, b: &Value) -> Result<Value, String> {
         return Ok(match op {
             Op::Add => match x.checked_add(y) {
                 Some(v) => Value::Int(v),
-                None => Value::Float(x as f64 + y as f64),
+                None => big_value(BigInt::from_i64(x).add(&BigInt::from_i64(y))),
             },
             Op::Sub => match x.checked_sub(y) {
                 Some(v) => Value::Int(v),
-                None => Value::Float(x as f64 - y as f64),
+                None => big_value(BigInt::from_i64(x).sub(&BigInt::from_i64(y))),
             },
             Op::Mul => match x.checked_mul(y) {
                 Some(v) => Value::Int(v),
-                None => Value::Float(x as f64 * y as f64),
+                None => big_value(BigInt::from_i64(x).mul(&BigInt::from_i64(y))),
             },
             Op::Div => {
                 if y == 0 {
@@ -2618,11 +2653,12 @@ pub fn arith(op: Op, a: &Value, b: &Value) -> Result<Value, String> {
                 Value::Int(floor_div_i64(x, y))
             }
             Op::Pow => {
-                if y >= 0 && y < 63 {
-                    match x.checked_pow(y as u32) {
-                        Some(v) => Value::Int(v),
-                        None => Value::Float((x as f64).powf(y as f64)),
+                // 整数幂一律硬算成任意精度整数；负数指数仍按浮点语义。
+                if y >= 0 {
+                    if y > u32::MAX as i64 {
+                        return Err("指数超出 u32 范围".into());
                     }
+                    big_value(BigInt::from_i64(x).pow(y as u32))
                 } else {
                     Value::Float((x as f64).powf(y as f64))
                 }

@@ -82,7 +82,11 @@ export function TerminalPane({ projectDir }: { projectDir: string }) {
       fontSize: 13,
       theme: termTheme,
       cursorBlink: true,
-      allowProposedApi: true
+      allowProposedApi: true,
+      /* 默认只有 1000 行回滚，30MB 的 2**100000000 按终端宽度折行后
+       * 会有二十多万行，开头必然被顶掉。这里放到 100 万行，
+       * 足够装下 1.2 亿个字符的折行输出，不再由 xterm 丢开头。 */
+      scrollback: 1_000_000
     });
     const fit = new FitAddon();
     term.loadAddon(fit);

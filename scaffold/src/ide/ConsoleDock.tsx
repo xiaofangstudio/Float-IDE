@@ -99,14 +99,14 @@ export function ConsoleDock({ lines, askQuestion, onAnswer, running, stateText, 
               if (l.kind === 'out') {
                 return (
                   <div key={i} className="console-line out">
-                    <span style={{ whiteSpace: 'pre-wrap' }}>{l.text}</span>
+                    <span style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', wordBreak: 'break-word', minWidth: 0 }}>{l.text}</span>
                   </div>
                 );
               }
               return (
                 <div key={i} className={`console-line ${l.kind}`}>
                   <span className="console-tag">{dbgTag ?? (l.kind === 'err' ? '错误' : '信息')}</span>
-                  <span style={{ whiteSpace: 'pre-wrap' }}>{l.text}</span>
+                  <span style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', wordBreak: 'break-word', minWidth: 0 }}>{l.text}</span>
                 </div>
               );
             })}

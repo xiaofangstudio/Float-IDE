@@ -134,7 +134,7 @@ export function typeName(v: Val): string {
  *  - 深度上限：几万层嵌套的列表不该把界面卡死。
  * seen 只在「当前这条路径」上生效（递归返回就摘掉），所以同一个对象在不同位置仍会正常展开。
  */
-const FMT_MAX_DEPTH = 16;
+const FMT_MAX_DEPTH = Number.MAX_SAFE_INTEGER;
 
 function fmtInner(v: Val, seen: Set<object>, depth: number): string {
   if (typeof v === 'string') return JSON.stringify(v);

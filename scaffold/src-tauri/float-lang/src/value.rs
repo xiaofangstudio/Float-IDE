@@ -12,6 +12,7 @@
 //! * 只有"往容器里塞值"才深拷贝（`clone_deep`），这一点 TS 版用 cloneVal 做过
 
 use crate::ast::{Param, Stmt};
+use crate::bigint::BigInt;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -227,6 +228,8 @@ impl Dict {
 pub enum Value {
     Null,
     Int(i64),
+    /// 超出 i64 的整数。不设位数上限，硬算；显示/比较/继续加减乘都支持。
+    Big(Rc<BigInt>),
     Float(f64),
     Bool(bool),
     /// 字符串用 `Rc<String>` 而不是 `Rc<str>`，是为了让 `s += "x"` 能走
@@ -308,7 +311,7 @@ impl Value {
     pub fn type_name(&self) -> &'static str {
         match self {
             Value::Null => "null",
-            Value::Int(_) => "int",
+            Value::Int(_) | Value::Big(_) => "int",
             Value::Float(_) => "float",
             Value::Bool(_) => "bool",
             Value::Str(_) => "str",
@@ -325,6 +328,7 @@ impl Value {
             Value::Null => false,
             Value::Bool(b) => *b,
             Value::Int(i) => *i != 0,
+            Value::Big(b) => !b.is_zero(),
             Value::Float(f) => *f != 0.0 && !f.is_nan(),
             Value::Str(s) => !s.is_empty(),
             Value::List(l) => !l.borrow().is_empty(),
@@ -338,6 +342,7 @@ impl Value {
     pub fn as_num(&self) -> Option<f64> {
         match self {
             Value::Int(i) => Some(*i as f64),
+            Value::Big(b) => Some(b.to_f64()),
             Value::Float(f) => Some(*f),
             Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
             Value::Str(s) => {
@@ -356,6 +361,7 @@ impl Value {
     pub fn as_int(&self) -> Option<i64> {
         match self {
             Value::Int(i) => Some(*i),
+            Value::Big(b) => b.to_i64(),
             Value::Float(f) => Some(*f as i64),
             Value::Bool(b) => Some(if *b { 1 } else { 0 }),
             Value::Str(s) => s.trim().parse::<f64>().ok().map(|x| x as i64),
@@ -369,11 +375,12 @@ impl Value {
     }
 
     fn fmt_rec(&self, seen: &mut Vec<usize>, depth: usize) -> String {
-        const MAX_DEPTH: usize = 16;
+        const MAX_DEPTH: usize = usize::MAX;
         match self {
             Value::Null => "null".to_string(),
             Value::Bool(b) => if *b { "true" } else { "false" }.to_string(),
             Value::Int(i) => i.to_string(),
+            Value::Big(b) => b.to_string(),
             Value::Float(f) => fmt_float(*f),
             Value::Str(s) => s.to_string(),
             Value::Func(f) => format!("<函数 {}>", f.name),
@@ -468,6 +475,7 @@ impl Value {
         match (self, other) {
             (Value::Null, Value::Null) => true,
             (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::Big(a), Value::Big(b)) => a.cmp(b) == std::cmp::Ordering::Equal,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::Func(a), Value::Func(b)) => Rc::ptr_eq(a, b),
@@ -481,8 +489,8 @@ impl Value {
             }
             // 数值跨类型比较：1 == 1.0 成立
             (a, b) => {
-                let an = matches!(a, Value::Int(_) | Value::Float(_));
-                let bn = matches!(b, Value::Int(_) | Value::Float(_));
+                let an = matches!(a, Value::Int(_) | Value::Big(_) | Value::Float(_));
+                let bn = matches!(b, Value::Int(_) | Value::Big(_) | Value::Float(_));
                 if an && bn {
                     return a.as_num() == b.as_num();
                 }

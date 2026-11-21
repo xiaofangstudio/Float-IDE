@@ -19,8 +19,12 @@
 pub mod aot;
 pub mod api;
 pub mod ast;
+pub mod bigint;
 pub mod builtins;
 pub mod cancel;
+
+/// float-lang crate 的绝对路径：IDE 在自己的进程里 AOT 时要用它做依赖路径。
+pub const MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
 pub mod bytecode;
 pub mod error;
 pub mod host;
@@ -73,4 +77,5 @@ impl TypeName {
         })
     }
 }
+
 

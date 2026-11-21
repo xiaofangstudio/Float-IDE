@@ -1,0 +1,1 @@
+fn main(){let p=std::path::PathBuf::from(std::env::args().nth(1).unwrap());let s=std::fs::read_to_string(&p).unwrap();match float_lang::aot::build_exe(&p,&s,float_lang::MANIFEST_DIR,"factory"){Ok(e)=>println!("EXE {}",e.display()),Err(e)=>println!("ERR {e}")}}

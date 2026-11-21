@@ -386,23 +386,20 @@ function hello()
     eq(`${name}（解释不该报错）`, b.err, []);
   };
 
-  /* ── 内存护栏：死循环往容器里塞东西，要在吃满内存前明确报错 ── */
+  /* ── 不再有内存护栏：超过旧上限的容器/字符串也要正常跑完 ── */
   {
-    const guards: [string, string, string][] = [
-      ['超大 range', 'list xs = range(2_000_000)\nprint(len(xs))\n', '列表'],
-      ['超大字符串重复', 'print("ab".repeat(20_000_000))\n', '字符串'],
-      ['字符串乘法超限', 'print("a" * 20_000_000)\n', '字符串'],
-      ['push 撑破列表', 'list xs = range(1_000_000)\nxs.push(1)\n', '列表'],
+    const big: [string, string, string[]][] = [
+      ['range 超过旧 100 万', 'list xs = range(1_050_000)\nprint(len(xs))\n', ['1050000']],
+      ['字符串重复超过旧 16MB', 'string s = "ab".repeat(10_000_000)\nprint(len(s))\n', ['20000000']],
+      ['push 超过旧 100 万', 'list xs = range(1_000_000)\nxs.push(1)\nprint(len(xs))\n', ['1000001']],
     ];
-    for (const [name, src, what] of guards) {
+    for (const [name, src, expect] of big) {
       for (const mode of ['run', 'debug'] as const) {
         const r = await run(src, { mode, timeoutMs: 30_000 });
-        const msg = r.err.join(' ');
-        eq(`${name}（${mode}）报内存护栏`, msg.includes(what) && msg.includes('上限') && msg.includes('忘了停'), true);
+        eq(`${name}（${mode}）不拦截`, r.err.join(' '), '');
+        eq(`${name}（${mode}）结果`, r.out, expect);
       }
     }
-    // 正常大小的脚本不能被误杀
-    await both('护栏不误杀正常脚本', 'list xs = [1, 2, 3]\nxs.push(4)\nprint(len(xs))\nprint("ab" * 2)\n', ['4', 'abab']);
   }
 
   /* ── 表达式链：`+` 串起来之后必须整条吃进同一个表达式 ──
@@ -462,15 +459,14 @@ function hello()
     const deepParen = '('.repeat(200) + '1' + ')'.repeat(200);
     for (const mode of ['run', 'debug'] as const) {
       const r = await run(`print(${deepParen})\n`, { mode });
-      const msg = r.err.join(' ');
-      eq(`深括号（${mode}）明确说嵌套太深`, msg.includes('嵌套太深'), true);
-      eq(`深括号（${mode}）不是栈溢出`, /Maximum call stack/i.test(msg), false);
+      eq(`深括号（${mode}）不再拦`, r.err.join(' '), '');
+      eq(`深括号（${mode}）结果`, r.out, ['1']);
     }
     const deepIf = Array.from({ length: 300 }, (_, k) => '    '.repeat(k) + 'if (true)').join('\n')
       + '\n' + '    '.repeat(300) + 'print(1)\n';
     const rb = await run(deepIf, { mode: 'run' });
-    eq('深 if 明确说嵌套太深', rb.err.join(' ').includes('嵌套太深'), true);
-    eq('深 if 不是栈溢出', /Maximum call stack/i.test(rb.err.join(' ')), false);
+    eq('深 if 不再拦', rb.err.join(' '), '');
+    eq('深 if 结果', rb.out, ['1']);
 
     for (const src of ['print("abc\n', 'print(1\n', 'list xs = [1, 2\n', 'dict d = {"a": 1\n', 'if\n    print(1)\n']) {
       const r = await run(src, { mode: 'run' });
@@ -771,8 +767,9 @@ print(a.nope)
   const cyc2 = await run('list a = [1]\nadd a to a\nlist b = a\nprint("ok")\n');
   eq('自引用列表可拷贝', cyc2.out[0], 'ok');
 
-  const deep = await run('function f(n)\n    return f(n + 1)\n\nprint(f(1))\n');
-  eq('无限递归给出人话提示', deep.err[0]?.includes('递归太深'), true);
+  const deep = await run('function f(n)\n    if n <= 0\n        return 0\n    return f(n - 1)\n\nprint(f(1000))\n');
+  eq('一千层递归不再被 400 层上限拦截', deep.err.join(' '), '');
+  eq('一千层递归结果', deep.out, ['0']);
 
   const noCond = await run('if\n    print(1)\n');
   eq('if 缺条件会被指出', noCond.err.length > 0, true);

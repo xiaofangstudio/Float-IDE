@@ -91,45 +91,39 @@ fn 两万项字符串拼接不会崩且顺序正确() {
 }
 
 #[test]
-fn 几千层括号给可读报错而不是崩() {
-    let src = format!("print({}1{})\n", "(".repeat(3000), ")".repeat(3000));
-    let prog = parser::parse_program("deep.co", &src);
-    assert!(!prog.errors.is_empty(), "这么深应该报错");
-    let msg = prog.errors[0].message.clone();
-    assert!(
-        msg.contains("嵌套太深") || msg.contains("看不懂"),
-        "报错要能看懂：{}",
-        msg
-    );
+fn 深括号不再设上限() {
+    // 解析跟 lang_run / examples/run 一样跑在 64MB 大栈线程上：
+    // debug 构建的默认测试线程只有 2MB，50 层左右就会溢出
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let src = format!("print({}1{})\n", "(".repeat(200), ")".repeat(200));
+            let prog = parser::parse_program("deep.co", &src);
+            assert!(prog.errors.is_empty(), "200 层括号不该报错");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]
-fn 非结合长链有明确上限() {
-    // 一连串减法没法平衡化，超长要报错而不是把栈打穿
-    let src = format!("print({})\n", (0..5000).map(|_| "1").collect::<Vec<_>>().join(" - "));
-    let prog = parser::parse_program("sub.co", &src);
-    assert!(!prog.errors.is_empty(), "超长减法链应该报错");
-    assert!(prog.errors[0].message.contains("算式太长"), "{}", prog.errors[0].message);
-}
-
-#[test]
-fn 死循环刷屏会被输出上限拦住() {
-    // 先把 20 KB 的串攒好，再打 3000 次 = 60 MB，必须被 32 MB 上限拦住
+fn 死循环刷屏不再被输出上限拦住() {
+    // 20 KB × 3000 = 60 MB，旧版会卡在 32 MB，现在必须完整跑完
     let src = r#"
 str s = ""
 for i in range(2000)
     s += "0123456789"
 for i in range(3000)
     print(s)
-print("走不到这里")
+print("走得到这里")
 "#;
     let prog = parser::parse_program("flood.co", src);
     assert!(prog.errors.is_empty(), "{:?}", prog.errors.first().map(|e| e.message.clone()));
     let (chunk, _f, errs) = bytecode::compile(&prog);
     assert!(errs.is_empty());
     let mut vm = Vm::new(chunk);
-    let e = vm.run().expect_err("应该被输出上限拦住");
-    assert!(e.message.contains("输出"), "报错要说清是输出太多：{}", e.message);
+    let o = vm.run().expect("60MB 输出应该允许");
+    assert!(o.output.len() > 32 * 1024 * 1024, "输出只有 {} 字节", o.output.len());
 }
 
 #[test]

@@ -58,16 +58,16 @@ const EOF: Token = { k: 'eof', v: '', line: 0, col: 0, endCol: 0 };
  * 用户看不懂，编辑器也可能当场卡住。宁可明确说"太深了，拆开写"。 */
 /* 与 Rust parser.rs 的 MAX_EXPR_DEPTH 保持一致：同一份代码两边该不该报错必须一样。
  * V8 的栈比 Rust debug 的默认栈宽松得多（实测 200 层才爆），64 层留着余量很安全。 */
-const MAX_EXPR_DEPTH = 64;
+const MAX_EXPR_DEPTH = Number.MAX_SAFE_INTEGER;
 /* 必须大于 MAX_EXPR_DEPTH：括号每下一层也会经过 parseUnary，
  * 设小了会先报「一元运算符太多」，把真正的「括号嵌套太深」盖掉。 */
-const MAX_UNARY_DEPTH = 256;
+const MAX_UNARY_DEPTH = Number.MAX_SAFE_INTEGER;
 
 /* 长运算符链（与 Rust fold_chain 同一套规则）：
  * 超过 BALANCE_OVER 且全是结合律运算符 → 平衡折叠，树深从 n 降到 log₂n，
  * analyze / codegen 递归遍历不会爆栈；混杂运算符的长链没法平衡，超过 MAX_CHAIN 直接报错。 */
 const BALANCE_OVER = 16;
-const MAX_CHAIN = 2000;
+const MAX_CHAIN = Number.MAX_SAFE_INTEGER;
 const ASSOCIATIVE = new Set(['+', '*', '&', '|', '^', '&&', '||']);
 
 const startOf = (e: Expr): Token => ({ k: 'ident', v: '', line: e.line, col: e.col, endCol: e.col });
@@ -908,7 +908,7 @@ export function parseProgram(file: string, src: string): Program {
   /* 缩进块嵌套上限，和 Rust limits.rs 的 NEST（200）严格对齐。
    * 没有这道闸，几千层 if 会把栈打穿，抛出来的是看不懂的 RangeError。 */
   let blockDepth = 0;
-  const MAX_BLOCK_DEPTH = 200;
+  const MAX_BLOCK_DEPTH = Number.MAX_SAFE_INTEGER;
 
   const parseBlock = (minIndent: number): Stmt[] => {
     blockDepth += 1;

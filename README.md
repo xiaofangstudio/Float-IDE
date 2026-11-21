@@ -87,9 +87,9 @@ fib 是 CPython 的 **31 倍**、VM 的 23 倍（整型特化把每层递归压�
 
 AOT 会先做一遍保守推断：一个函数的参数、局部变量、返回值全是整数、且体里没有全局变量、没有字符串/列表/字典混用，就整体编译成 `i64` 版本；浮点同理编译成 `f64` 版本（整型优先）。推断不通过就退回通用 `V` 值路径，**语义一个字不变**，只是慢了。
 
-特化后的递归函数每层只有一个 `u32` 深度计数加几个 `i64` 局部，帧约 100 字节。生成程序把 `main` 跑在 **512MB 虚拟预留的大栈线程**上（按需提交，递归不深几乎不占内存），递归上限因此从 VM 的 16384 层提到 **100 万层**。栈溢出仍由 `INT_CALL_DEPTH` 计数兜底报「递归太深」，不会 abort。
+特化后的递归函数每层只有一个 `u32` 深度计数加几个 `i64` 局部，帧约 100 字节。生成程序把 `main` 跑在 **512MB 虚拟预留的大栈线程**上（按需提交，递归不深几乎不占内存）。**递归不再设层数上限**，`INT_CALL_DEPTH` 不再兜底拦截；栈真的耗尽时由进程自己退出。
 
-**VM 侧同步放宽**：`CALL_DEPTH` 由 400 提到 16384，配套 `lang_run` 与 `examples/check` 都跑在 64MB 栈线程上——这个数字和线程栈是绑定的，新增运行入口必须同样套大栈线程。
+**VM 侧同步放开**：`CALL_DEPTH` 改为不设上限，配套 `lang_run` 与 `examples/check` 仍跑在 64MB 栈线程上——线程栈是物理容量，不是语言层人为限制。
 
 **AOT 现在也支持高阶函数与内联函数**
 
@@ -210,7 +210,7 @@ Copper 保留了一批旧写法做兼容（老 .cw 文件不用改也能跑）�
 
 ### 后端 / 内核
 
-- 🔌 **MCP 工具从 8 个扩到 26 个**：`list_files` / `list_dir` / `read_file` / `write_file` / `create_file` / `delete_file` / `rename_file` / `mkdir` / `search` / `run_script` / `get_diagnostics` / `get_outline` / `project_info` / `open_project` / `get_console` / `read_buffer` / `write_buffer` / `get_settings` / `set_settings`；外部 AI 还能直接读源码缓冲区
+- 🔌 **MCP 工具扩到 27 个**：文件/工程/搜索/诊断之外，新增 `run`（VM/AOT 一键跑，带 `timeoutMs` 超时与 `stop`）、`test`、`check`、`docs_list` / `docs_get` / `docs_search`、`env_info`，教程经 `resources/*` 直接读；另有无界面模式 `floatide --mcp <port> --project <dir>`
 - 👀 **文件监视服务**（`commands/watch.rs`）：轮询 mtime，不引第三方依赖，递归上限 10 层 / 6000 个文件
 - 🪪 **文件关联服务**（`commands/assoc.rs`）：`windows-sys` 直接调注册表 API，Copper 图标编译进程序，注册时释放到磁盘
 - 📂 **单文件打开**：以前「打开」只能选文件夹，现在能直接选 `.co` / `.cw`
@@ -231,7 +231,7 @@ Copper 保留了一批旧写法做兼容（老 .cw 文件不用改也能跑）�
 
 - 🌉 **F6 补上宿主信息**（`commands/host.rs`）：`os.getenv / os.args / os.pid / os.runcmd` 原本只有 Rust 内核（F5）能答，现在 WebView 侧经桥接命令拿到同一份进程信息——同一个脚本 F5 / F6 结果一致，不再一边能跑一边报错
 - 🩺 **状态栏显示 IDE 自身内存占用**（`commands/sysinfo.rs`）：只读当前进程工作集（Working Set），不做统计不采样
-- 📏 **运行上限集中成 `limits.rs` / `limits.ts`**：递归 400 / import 嵌套 100 / 块嵌套 200 / 输出缓存 32MB，三引擎同一张表，报错统一「当前 X（上限 Y）」
+- 📏 **运行上限全部取消**（`limits.rs` / `limits.ts`）：递归、import、块/表达式嵌套、容器、字符串、输出、执行步数都不再拦截；guard 只保留空壳兼容调用点
 - 🔘 **Git 面板新增「提交并推送」**：add -A → commit → push 一条龙，首次推送失败自动建上游，不用开命令行
 - 🌫️ **背景设置入驻偏好设置页**：磨砂程度 / 透明度 / 压暗三个滑杆实时生效，已设置时面板换磨砂
 - 🏝️ **示例第 17 个：《方岛物语》**（`language/samples/main.co`）——文字开放世界游戏，数字选项 + 自由文字指令，配套存档示例与无头冒烟验证器（`tests/_fang_headless.ts`）
@@ -436,7 +436,7 @@ Copper 保留了一批旧写法做兼容（老 .cw 文件不用改也能跑）�
 ### 文档
 
 - [插件开发指南](docs/plugins.md) —— 清单字段、可用 API、权限、离线生态
-- [MCP 服务器](docs/mcp.md) —— 怎么接客户端、26 个工具（含一键 run/test/check 与教程 docs）、协议细节与安全边界
+- [MCP 服务器](docs/mcp.md) —— 怎么接客户端、27 个工具（含一键 run/test/check 与教程 docs）、协议细节与安全边界
 - [语言教程](docs/tutorial.md) —— Copper 从入门到异常处理
 
 ---
@@ -454,7 +454,7 @@ Copper 保留了一批旧写法做兼容（老 .cw 文件不用改也能跑）�
 | **保存撞车** | Ctrl+S 与自动保存同时写同一文件；保存期间继续敲的代码会被标成已保存而丢掉 | 单文件写盘串行化 + 内容快照校验：只有「期间没再改动」才清脏标记 |
 | **语言核心绑死 DOM** | `interp.ts` 直接用 `window`，换个宿主就崩 | 宿主探测（`window` → `globalThis`），同一份运行时在浏览器 / Node 都能跑 |
 | **自引用容器** | `list a = [1]` + `add a to a` 之后 `print a` / 拷贝 / 比较 → 爆栈崩掉 | 环检测：打印成 `[1, …(循环)]`，拷贝与比较保持结构 |
-| **无限递归** | 报一句引擎的 `Maximum call stack size exceeded`，没行列、看不懂 | 分档上限：VM 16384 层、AOT 特化 100 万层，报「递归太深了（超过 N 层）… 多半是 f() 的结束条件没写对」 |
+| **无限递归** | 旧版按层数拦截或报引擎栈溢出 | 语言层不再设递归上限；栈真的耗尽时由进程自己退出，不再伪造「递归太深」错误 |
 | **静默通过的坏代码** | `if` 不写条件 → 整段分支变成永不执行的死代码；顶层 `return` / `out` 被悄悄吞掉 | 全部给出诊断 |
 | **print 语法** | 只有 `print(x)` 能用，`print x` 报「看不懂」 | 括号可选，`print n` / `print a, b` 都可以 |
 
@@ -637,7 +637,7 @@ int low, int high = minmax([])
 - 变量查看器：暂停即快照全部变量（含对象字段、局部与全局）
 - ask 提问：控制台弹出输入行，回答回车继续
 - wait：真实挂起等待，不空转
-- 防死循环：F5 单次运行 2000 万步上限、F6 5000 万步上限，各循环还有迭代守卫，冻结不了界面
+- 不限运行：F5 / F6 都不再设步数、循环次数上限，长计算跑到自然结束；界面仍可用 Shift+F5 / stop 手动停
 
 ### 控制台与终端
 
@@ -784,7 +784,7 @@ F5 交给 Rust 内核跑字节码 VM（快），F6 用内置解释器逐行跑�
 ### 未发布（2026-11-18）
 
 - **AOT 整型 / 浮点函数特化**：参数、局部、返回值全是 `i64`（或 `f64`）且不碰全局的函数，整体编译成原生数值路径，不再层层装箱；推断保守，不通过就退回通用 `V` 路径，语义不变。实测 `fib(30)` 从 33.7 ms 降到 **4.0 ms**。
-- **递归上限跨量级提升**：AOT 特化路径跑在 512MB 虚拟预留大栈线程上，递归上限 **100 万层**（帧约 100B）；VM 侧 `CALL_DEPTH` 400 → **16384**，配套入口统一换 64MB 栈线程，`INT_CALL_DEPTH` 计数兜底不 abort。
+- **递归上限已全部取消**：AOT 特化路径仍跑在 512MB 虚拟预留大栈线程上（物理容量，不是语言阈值）；VM 侧 `CALL_DEPTH` 已改为不设上限，`INT_CALL_DEPTH` 不再兜底拦截。
 - **AOT 支持九个高阶函数与内联函数**：`data.map/filter/reduce/groupby/index_by/any/all/find/find_index` 从「仅 VM 编译期内联」补齐为 AOT prelude 运行时（`hof_run` / `hof_dispatch`）；`fn(x) return …` 编译成隐藏函数 `__lambda_行_列` 并发射 `V::Native`，原来那条「AOT 不支持」的限制取消。
 - **Copper 环境接入**（`commands/copper_env.rs`）：IDE 改读外部工具链——`COPPER_HOME` → 用户级 `%APPDATA%\Float\copper` / `~/.copper` → 同级 `copper_env/`；新增 `copper_env_info` / `copper_env_compilers` / `copper_build` 三个命令，找不到就明说，不静默降级。
 - **自举实验产出**（`float-lang/bootstrap/`）：用 Copper 写的 Copper 编译器 `colang.co`（词法 / 语法 / 代码生成拆成 `copper_lex.co`、`copper_parse.co`、`colang_codegen.co`），经 AOT 编成 exe 后能编自己，二进制与中间导出不入库。
@@ -831,7 +831,7 @@ F5 交给 Rust 内核跑字节码 VM（快），F6 用内置解释器逐行跑�
 ### 1.7.1（2026-11-05）
 
 - **AOT 崩溃根治**：生成函数体时全局槽会动态新增，之前嵌套 `for` 场景下可能越界 panic；现在按最终代码反推「至少需要的槽数」，宁可多开也不崩。
-- **资源上限**：列表（100 万项）、字典（50 万键）、字符串重复等加软上限，超限给一句人话报错，不再卡死或内存爆掉。
+- **资源上限已全部取消**：列表、字典、字符串、输出、执行步数不再有软上限，超限不再报错；内存不够由系统和进程自行处理。
 - **值循环引用防护**：变量快照与查看时主动打破循环引用，避免遍历卡死。
 
 ### 1.7.0（2026-11-04）

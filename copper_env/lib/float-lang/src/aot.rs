@@ -1570,6 +1570,31 @@ fn int_fn_check(
     None
 }
 
+/// 顶层实参里的用户函数调用必须也都特化过。
+/// 否则 `double(outer(5))` 这类写法会被 `double` 的整型路径收下，
+/// 而 `outer` 自己没特化（比如带嵌套函数），到 codegen 才报
+/// 「整型函数调用非整型函数」——直接在推断阶段把 `double` 剔掉更稳。
+fn expr_calls_specialized(
+    e: &Expr,
+    known: &HashSet<Rc<str>>,
+    checks: &HashMap<Rc<str>, Vec<(Rc<str>, usize)>>,
+) -> bool {
+    let mut ok = true;
+    for_each_expr(e, &mut |x| {
+        if !ok {
+            return;
+        }
+        if let ExprKind::Call { callee, .. } = &x.kind {
+            if let ExprKind::Var(n) = &callee.kind {
+                if known.contains(n) && !checks.contains_key(n) {
+                    ok = false;
+                }
+            }
+        }
+    });
+    ok
+}
+
 /// 推断哪些函数可以整体整型特化；通过者标记 FnMeta.int_fn。
 /// 只在单文件模式调用（分块模式的注册表签名固定是 Vec<V>）。
 fn infer_int_fns(
@@ -1612,7 +1637,11 @@ fn infer_int_fns(
             bad.insert(Rc::clone(callee));
             continue;
         }
-        if args.iter().any(|a| !ic_expr(a, &mut top_ic)) {
+        if args.iter().any(|a| !ic_expr(a, &mut top_ic))
+            || args
+                .iter()
+                .any(|a| !expr_calls_specialized(a, &known_set, &checks))
+        {
             bad.insert(Rc::clone(callee));
         }
     }
@@ -1633,6 +1662,46 @@ fn infer_int_fns(
         }
         for b in dropped {
             checks.remove(&b);
+        }
+    }
+
+    // V 世界函数里调用整型特化函数时，实参是 V 局部就装不进 i64（codegen 会报
+    // 「整型实参不是整型形状」）。最典型的是带嵌套函数的 outer 调用 inner(n)：
+    // outer 自己进不了整型集合，n 在它眼里是 V。遇到这种调用点就把被调从
+    // 特化集合里摘掉，让两边都走 V，语义不变、只是慢一点。
+    for (fname, params, body) in fns {
+        if checks.contains_key(fname) {
+            continue;
+        }
+        let mut vnames: HashSet<Rc<str>> = HashSet::new();
+        for p in params {
+            vnames.insert(Rc::clone(&p.name));
+        }
+        let _ = collect_locals(body, &mut vnames);
+        let mut sites: Vec<(Rc<str>, Vec<Expr>)> = Vec::new();
+        collect_call_sites(body, &mut sites);
+        let mut vbad: Vec<Rc<str>> = Vec::new();
+        for (callee, args) in sites {
+            if !checks.contains_key(&callee) {
+                continue;
+            }
+            let has_v = args.iter().any(|a| {
+                let mut hit = false;
+                for_each_expr(a, &mut |x| {
+                    if let ExprKind::Var(n) = &x.kind {
+                        if vnames.contains(n) {
+                            hit = true;
+                        }
+                    }
+                });
+                hit
+            });
+            if has_v {
+                vbad.push(callee);
+            }
+        }
+        for n in vbad {
+            checks.remove(&n);
         }
     }
 
@@ -2114,28 +2183,6 @@ pub fn emit(prog: &Program) -> Result<String, AotError> {
     doc.push(fn_code.join(""));
 
     let out = doc.join("\n");
-
-    /* 体积闸门：生成代码太大时 rustc 会吃几个 G 内存（实测把整台机器顶崩过）。
-     * 超过阈值就直接拒绝，让上层回落 VM —— 结果一样，但不会把用户的电脑拖死。
-     * 想强制走单文件（跨块调用会变成按名字查表的间接调用，慢一档）时，
-     * 可以用 COPPER_AOT_MAX_LINES / COPPER_AOT_MAX_BYTES 临时放宽。 */
-    let max_lines = std::env::var("COPPER_AOT_MAX_LINES")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(4_000);
-    let max_bytes = std::env::var("COPPER_AOT_MAX_BYTES")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(400_000);
-    let lines = out.lines().count();
-    if out.len() > max_bytes || lines > max_lines {
-        return Err(AotError::msg(format!(
-            "脚本太大，AOT 跳过（生成 {} 行代码；超过 {} 行或 {} KB 就改用 VM 跑，免得编译吃爆内存）",
-            lines,
-            max_lines,
-            max_bytes / 1024
-        )));
-    }
 
     Ok(out)
 }
@@ -3645,7 +3692,7 @@ fn emit_call_i64(cg: &mut Cg, e: &Expr) -> Result<String, AotError> {
     // 出错出口的返回值必须和函数签名同类型：浮点特化函数签名是 f64，
     // 这里以前硬写 "return 0"，rustc 直接 E0308（生成代码编不过 → 静默回落 VM）。
     let on_err = if cg.float_mode { "return 0.0" } else { "return 0" };
-    emit_call_i64_code(cg, &name, args, e, "__d + 1", on_err)
+    emit_call_i64_code(cg, &name, args, e, "__d.saturating_add(1)", on_err)
 }
 
 /// 统一的整型调用发射器：生成"i64 进、i64 出"的调用块。
@@ -5280,7 +5327,7 @@ pub fn enter(fname: &str) -> R<DepthGuard> {
             ),
         ));
     }
-    DEPTH.with(|d| d.set(d.get() + 1));
+    DEPTH.with(|d| d.set(d.get().saturating_add(1)));
     Ok(DepthGuard)
 }
 
@@ -5956,3 +6003,141 @@ pub fn hof_run(g: &mut Globals, name: &str, args: Vec<V>, ln: u32, cl: u32, call
     }
 }
 "#;
+
+/* ── 进程内 AOT 构建：IDE 的「AOT 运行」走这条路 ───────────────────────
+ * 为什么不直接调环境里的 colang：环境里那个编译器是自举产物，功能面可能
+ * 落后于当前内核。IDE 自己连着 float-lang，用同一份 emitter 才能保证
+ * "VM 能跑的程序，AOT 也一定能编"。环境仍然负责提供文档与二进制，
+ * 但 IDE 内的 AOT 不再受它能力边界限制。
+ *
+ * 产物按 cache_key 分目录；cargo 的 target 目录全局共享，
+ * float-lang 这类不变的依赖只编一次。
+ * ------------------------------------------------------------------- */
+
+fn aot_cargo() -> std::path::PathBuf {
+    if let Ok(c) = std::env::var("CARGO") {
+        let p = std::path::PathBuf::from(c);
+        if p.is_file() {
+            return p;
+        }
+    }
+    #[cfg(windows)]
+    {
+        if let Ok(home) = std::env::var("USERPROFILE") {
+            let p = std::path::PathBuf::from(home)
+                .join(".cargo")
+                .join("bin")
+                .join("cargo.exe");
+            if p.is_file() {
+                return p;
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            let p = std::path::PathBuf::from(home).join(".cargo").join("bin").join("cargo");
+            if p.is_file() {
+                return p;
+            }
+        }
+    }
+    std::path::PathBuf::from("cargo")
+}
+
+fn aot_exe_suffix() -> &'static str {
+    if cfg!(windows) {
+        ".exe"
+    } else {
+        ""
+    }
+}
+
+pub fn build_exe(
+    script: &std::path::Path,
+    src: &str,
+    manifest_dir: &str,
+    cache_key: &str,
+) -> Result<std::path::PathBuf, String> {
+    use std::process::Command;
+
+    let file = script
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "main.co".into());
+    let base = script.parent();
+    let prepared = crate::api::prepare(&file, src, base)
+        .map_err(|e| format!("预处理失败：{}", e.message))?;
+    let prog = crate::parser::parse_program(&file, &prepared.source);
+    if let Some(e) = prog.errors.first() {
+        return Err(format!("语法有错：{}", e.message));
+    }
+    let stem = script
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "app".into());
+    let safe: String = stem
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .collect();
+
+    let root = std::env::temp_dir().join(format!("copper_ide_aot_{}", cache_key));
+    let shared_target = std::env::temp_dir().join("copper_aot_cache");
+
+    let (dir, single) = match emit(&prog) {
+        Ok(rust_src) => {
+            let dir = root.join("single");
+            std::fs::create_dir_all(dir.join("src")).map_err(|e| e.to_string())?;
+            let manifest = format!(
+                "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nfloat-lang = {{ path = {:?} }}\n\n[[bin]]\nname = \"{}\"\npath = \"src/main.rs\"\n\n[profile.release]\nopt-level = 3\nlto = \"thin\"\ncodegen-units = 1\npanic = \"abort\"\nincremental = false\ndebug = false\nstrip = \"symbols\"\n",
+                safe, manifest_dir, safe
+            );
+            std::fs::write(dir.join("Cargo.toml"), manifest).map_err(|e| e.to_string())?;
+            std::fs::write(dir.join("src").join("main.rs"), rust_src).map_err(|e| e.to_string())?;
+            (dir, true)
+        }
+        Err(e) if e.message.contains("脚本太大") => {
+            let files = emit_split(&prog, &safe, manifest_dir).map_err(|e| e.message)?;
+            let dir = root.join("split");
+            for f in &files {
+                let p = dir.join(&f.rel);
+                if let Some(parent) = p.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+                let same = std::fs::read_to_string(&p).map(|old| old == f.content).unwrap_or(false);
+                if !same {
+                    std::fs::write(&p, &f.content).map_err(|e| e.to_string())?;
+                }
+            }
+            (dir, false)
+        }
+        Err(e) => return Err(e.message),
+    };
+
+    let st = Command::new(aot_cargo())
+        .args(["build", "--release", "-j", "2"])
+        .env("CARGO_TARGET_DIR", &shared_target)
+        .current_dir(&dir)
+        .output()
+        .map_err(|e| format!("cargo 起不来（{}）。AOT 需要本机装 Rust 工具链。", e))?;
+    if !st.status.success() {
+        let err = String::from_utf8_lossy(&st.stderr).to_string();
+        let lines: Vec<&str> = err.lines().filter(|l| l.trim_start().starts_with("error")).collect();
+        let tail: Vec<&str> = err.lines().rev().take(25).collect();
+        let msg = if lines.is_empty() {
+            tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+        } else {
+            lines.join(" | ")
+        };
+        return Err(format!("cargo build 失败：\n{}", msg));
+    }
+    let built = shared_target
+        .join("release")
+        .join(format!("{}{}", safe, aot_exe_suffix()));
+    if !built.is_file() {
+        return Err(format!("编译完了但找不到产物（{}，single={}）", built.display(), single));
+    }
+    let dest = root.join(format!("{}{}", safe, aot_exe_suffix()));
+    std::fs::copy(&built, &dest).map_err(|e| format!("复制产物失败：{}", e))?;
+    Ok(dest)
+}

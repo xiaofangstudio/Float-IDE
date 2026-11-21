@@ -633,10 +633,19 @@ fn tool_specs() -> Vec<(String, Value)> {
                         "path": { "type": "string", "description": "工程内 .co 文件（相对工程根）" },
                         "mode": { "type": "string", "enum": ["vm", "aot"], "default": "vm" },
                         "inputs": { "type": "array", "items": { "type": "string" }, "description": "按顺序喂给 ask 的答案" },
-                        "forceRebuild": { "type": "boolean", "description": "mode=aot 时强制重编（默认按内容哈希命中缓存）" }
+                        "forceRebuild": { "type": "boolean", "description": "mode=aot 时强制重编（默认按内容哈希命中缓存）" },
+                        "timeoutMs": { "type": "number", "default": 0, "description": "超时毫秒；默认 0 = 不超时，跑到自然结束或手动 stop。VM 到点置停止标记，AOT 直接杀进程" }
                     },
                     "required": ["path"]
                 }
+            }),
+        ),
+        (
+            "stop".into(),
+            json!({
+                "name": "stop",
+                "description": "停止正在跑的东西：给 VM 置停止标记（和界面上的停止按钮同一套 cancel），并杀掉 MCP 起的 AOT 子进程（含其 cargo/rustc 子进程树）。没有任务在跑时也会返回 ok。",
+                "inputSchema": { "type": "object", "properties": {} }
             }),
         ),
         (
@@ -935,16 +944,27 @@ fn call_tool(
                 .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
                 .unwrap_or_default();
             let force = args.get("forceRebuild").and_then(|v| v.as_bool()).unwrap_or(false);
+            let timeout_ms = args.get("timeoutMs").and_then(|v| v.as_u64()).unwrap_or(0);
             push(format!("run {p} ({mode})"));
             let r = if mode == "aot" {
-                exec_aot(&abs, &inputs, force)
+                exec_aot(&abs, &inputs, force, timeout_ms)
             } else {
-                exec_vm(&abs, &inputs)
+                exec_vm(&abs, &inputs, timeout_ms)
             };
             match r {
                 Ok(v) => ok_text(v.to_string()),
                 Err(e) => err_text(e),
             }
+        }
+        "stop" => {
+            float_lang::cancel::request_stop();
+            let pid = MCP_AOT_PID.load(Ordering::SeqCst);
+            if pid != 0 {
+                MCP_STOP.store(true, Ordering::SeqCst);
+            }
+            let killed = kill_pid(pid);
+            push(format!("stop（AOT pid={pid} killed={killed}）"));
+            ok_text(json!({ "ok": true, "vm_stopped": true, "aot_killed": killed }).to_string())
         }
         "test" => {
             if root.is_empty() {
@@ -970,7 +990,7 @@ fn call_tool(
             let mut total_ms = 0u128;
             for f in &files {
                 let t = Instant::now();
-                let r = exec_vm(f, &inputs);
+                let r = exec_vm(f, &inputs, 0);
                 let ms = t.elapsed().as_millis();
                 total_ms += ms;
                 let rel = f
@@ -1300,13 +1320,59 @@ fn safe_stem(p: &Path) -> String {
         .collect()
 }
 
+/// 正在跑的 MCP AOT 产物进程号：`stop` 工具和超时都靠它。
+static MCP_AOT_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// `stop` 工具按下时置位：正在跑的 exec_vm / exec_aot 结束后据此报「已手动停止」。
+static MCP_STOP: AtomicBool = AtomicBool::new(false);
+
+fn kill_pid(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status();
+    }
+    MCP_AOT_PID.swap(0, Ordering::SeqCst) == pid
+}
+
 /// VM 跑一次（不经过界面）：ask 依次吃 inputs，吃完给空串，不会阻塞。
-fn exec_vm(file: &Path, inputs: &[String]) -> Result<Value, String> {
+/// `timeout_ms` > 0 时到点会置内核的停止标记（合作式退出），返回 error 说明超时。
+fn exec_vm(file: &Path, inputs: &[String], timeout_ms: u64) -> Result<Value, String> {
+    MCP_STOP.store(false, Ordering::SeqCst);
     let text = std::fs::read_to_string(file).map_err(|e| format!("读文件失败：{e}"))?;
     let file_s = file.to_string_lossy().to_string();
     let base = file.parent().map(|p| p.to_path_buf());
     let ins = inputs.to_vec();
     let start = Instant::now();
+
+    let done = Arc::new(AtomicBool::new(false));
+    if timeout_ms > 0 {
+        let d = done.clone();
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+            while Instant::now() < deadline {
+                if d.load(Ordering::SeqCst) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(40));
+            }
+            if !d.load(Ordering::SeqCst) {
+                float_lang::cancel::request_stop();
+            }
+        });
+    }
+
     let handle = std::thread::Builder::new()
         .name("mcp-run".into())
         .stack_size(64 * 1024 * 1024)
@@ -1347,16 +1413,43 @@ fn exec_vm(file: &Path, inputs: &[String]) -> Result<Value, String> {
     let mut v = handle
         .join()
         .map_err(|_| "运行线程崩了（可能是脚本太深或内核 bug）".to_string())?;
+    done.store(true, Ordering::SeqCst);
     let ms = start.elapsed().as_millis() as u64;
+    let timed_out = timeout_ms > 0 && ms >= timeout_ms;
+    let stopped = MCP_STOP.swap(false, Ordering::SeqCst);
+    if stopped && !timed_out {
+        v = json!({
+            "ok": false,
+            "mode": "vm",
+            "output": "",
+            "reports": [],
+            "error": "已手动停止（stop 工具）",
+            "error_line": 0,
+            "steps": 0
+        });
+    }
+    if timed_out {
+        v = json!({
+            "ok": false,
+            "mode": "vm",
+            "output": "",
+            "reports": [],
+            "error": format!("运行超时（{timeout_ms} ms），已请求停止；死循环请检查循环条件"),
+            "error_line": 0,
+            "steps": 0
+        });
+    }
     if let Some(obj) = v.as_object_mut() {
         obj.insert("millis".into(), json!(ms));
+        obj.insert("timed_out".into(), json!(timed_out));
     }
     Ok(v)
 }
 
 /// AOT 跑一次：进程内 emitter 编成原生 exe，再把 inputs 从 stdin 喂进去。
-fn exec_aot(file: &Path, inputs: &[String], force: bool) -> Result<Value, String> {
+fn exec_aot(file: &Path, inputs: &[String], force: bool, timeout_ms: u64) -> Result<Value, String> {
     use std::process::{Command, Stdio};
+    MCP_STOP.store(false, Ordering::SeqCst);
     let text = std::fs::read_to_string(file).map_err(|e| format!("读文件失败：{e}"))?;
     let hash = format!("mcp{:x}", fnv1a(&text));
     let cache_root = std::env::temp_dir().join(format!("copper_ide_aot_{hash}"));
@@ -1378,31 +1471,78 @@ fn exec_aot(file: &Path, inputs: &[String], force: bool) -> Result<Value, String
     }
 
     let start = Instant::now();
-    let mut child = Command::new(&exe)
-        .stdin(Stdio::piped())
+    let mut cmd = Command::new(&exe);
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::commands::hide_console_window(&mut cmd);
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("启动 AOT 产物失败：{e}"))?;
+    MCP_AOT_PID.store(child.id(), Ordering::SeqCst);
     if let Some(mut sin) = child.stdin.take() {
         for line in inputs {
             let _ = writeln!(sin, "{line}");
         }
     }
-    let out = child
-        .wait_with_output()
-        .map_err(|e| format!("等待 AOT 产物失败：{e}"))?;
+    /* 输出边跑边读：管道缓冲满了进程会卡住，不能等退出后再读。
+     * 同时按 timeout_ms 轮询，到点直接 kill（AOT 产物是独立进程，能硬停）。 */
+    let mut so = child.stdout.take();
+    let mut se = child.stderr.take();
+    let out_h = std::thread::spawn(move || {
+        let mut buf = String::new();
+        if let Some(r) = so.as_mut() {
+            let _ = r.read_to_string(&mut buf);
+        }
+        buf
+    });
+    let err_h = std::thread::spawn(move || {
+        let mut buf = String::new();
+        if let Some(r) = se.as_mut() {
+            let _ = r.read_to_string(&mut buf);
+        }
+        buf
+    });
+
+    let mut timed_out = false;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break Some(st),
+            Ok(None) => {
+                if timeout_ms > 0 && start.elapsed() >= Duration::from_millis(timeout_ms) {
+                    let _ = child.kill();
+                    timed_out = true;
+                    break child.wait().ok();
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(_) => break None,
+        }
+    };
+    MCP_AOT_PID.store(0, Ordering::SeqCst);
+    let stopped = MCP_STOP.swap(false, Ordering::SeqCst);
     let ms = start.elapsed().as_millis() as u64;
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let stdout = out_h.join().unwrap_or_default();
+    let stderr = err_h.join().unwrap_or_default();
+    let ok = !timed_out && status.as_ref().map(|s| s.success()).unwrap_or(false);
+    let code = status.and_then(|s| s.code());
     Ok(json!({
-        "ok": out.status.success(),
+        "ok": ok,
         "mode": "aot",
-        "exit_code": out.status.code(),
+        "exit_code": code,
         "output": stdout,
         "stderr": stderr,
-        "error": if out.status.success() { Value::Null } else { json!(stderr) },
+        "error": if ok {
+            Value::Null
+        } else if timed_out {
+            json!(format!("运行超时（{timeout_ms} ms），已强制结束"))
+        } else if stopped {
+            json!("已手动停止（stop 工具）")
+        } else {
+            json!(stderr)
+        },
         "millis": ms,
+        "timed_out": timed_out,
         "compiled": compiled,
         "compile_ms": compile_ms,
         "exe": exe.to_string_lossy()
@@ -1719,7 +1859,7 @@ mod tests {
         for want in [
             "project_info", "list_files", "read_file", "write_file",
             "search", "run_script", "get_diagnostics", "get_outline",
-            "run", "test", "check", "docs_list", "docs_get", "docs_search", "env_info",
+            "run", "stop", "test", "check", "docs_list", "docs_get", "docs_search", "env_info",
         ] {
             assert!(names.contains(&want), "缺少工具 {want}");
         }
@@ -1820,7 +1960,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("main.co");
         std::fs::write(&f, "print(1 + 2)\nask \"名字？\"\nprint(\"hi \" + ans)\n").unwrap();
-        let v = exec_vm(&f, &["小方".to_string()]).expect("运行不该失败");
+        let v = exec_vm(&f, &["小方".to_string()], 10_000).expect("运行不该失败");
         assert_eq!(v["ok"], true);
         assert!(v["output"].as_str().unwrap_or("").contains('3'));
         assert!(v["output"].as_str().unwrap_or("").contains("hi 小方"));

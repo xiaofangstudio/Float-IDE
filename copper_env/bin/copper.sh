@@ -58,6 +58,8 @@ if ! COPPER=$(pick "$KIND"); then
 fi
 
 : "${COPPER_RT:=$COPPER_HOME/lib/colang_rt.rs}"
+RUN="$HERE/$TAG/copper-run"
+[ -x "$RUN" ] || RUN="$HERE/copper-run"
 # crate 源码：包内 share/float-lang 优先（安装包就是这么铺的），否则按源码树相对路径
 if [ -z "${COLANG_CRATE:-}" ]; then
   if [ -d "$COPPER_HOME/share/float-lang" ]; then
@@ -70,7 +72,7 @@ fi
 export COPPER_RT COLANG_CRATE COLANG_CARGO
 
 cmd=${1:-}
-[ -n "$cmd" ] || { echo "用法：copper [self] build|run|check|ast|json|stats|env <file.co>" >&2; exit 2; }
+[ -n "$cmd" ] || { echo "用法：copper [self] build|run|check|ast|json|stats|env|help <file.co>" >&2; exit 2; }
 
 need_target() {
   [ -n "${2:-}" ] || { echo "[copper] 缺少源文件" >&2; exit 2; }
@@ -80,6 +82,10 @@ need_target() {
 }
 
 case "$cmd" in
+  help)
+    [ -x "$RUN" ] || { echo "[copper] 找不到 copper-run" >&2; exit 2; }
+    exec "$RUN" --help
+    ;;
   env)
     echo "COPPER_HOME = $COPPER_HOME"
     echo "compiler    = $COPPER ($KIND)"
@@ -116,7 +122,7 @@ case "$cmd" in
     exec "$COLANG_OUT/target/release/app"
     ;;
   *)
-    echo "用法：copper [self] build|run|check|ast|json|stats|env <file.co>" >&2
+    echo "用法：copper [self] build|run|check|ast|json|stats|env|help <file.co>" >&2
     exit 2
     ;;
 esac

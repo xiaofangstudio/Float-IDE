@@ -134,10 +134,6 @@ pub fn call_builtin(name: &str, args: &[Value]) -> R<Value> {
             if n < 0 {
                 return Err(format!("alloc 要一个不小于 0 的格子数，实际是 {}", n));
             }
-            // 一亿个格子已经远超脚本能用的范围，直接拦住，免得把进程吃光
-            if n > 10_000_000 {
-                return Err(format!("alloc 一次要了 {} 格，太多了（上限 1000 万格）", n));
-            }
             Ok(Value::alloc(n as usize))
         }
         "free" => {

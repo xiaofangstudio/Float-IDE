@@ -23,10 +23,18 @@ pick() {  # pick <平台路径> <平铺兼容路径>
 }
 
 # 编译器统一命名 `colang <版本>.exe`（Linux 无 .exe 后缀）：同目录多份取版本最大的
+sort_versions() {  # GNU sort -V on Linux; portable numeric fallback on macOS (BSD sort has no -V)
+  if sort -V </dev/null >/dev/null 2>&1; then
+    sort -V
+  else
+    awk '{v=$0; sub(/^.* /,"",v); split(v,a,"."); printf "%010d %010d %010d %s\n", a[1]+0,a[2]+0,a[3]+0,$0}' | sort | cut -d" " -f4-
+  fi
+}
+
 newest() {  # newest <前缀 glob> <排除词> <兜底>
   local hit
-  hit="$(ls -1 "$HERE/$PLAT/"$1* 2>/dev/null | grep -v -- "$2" | sort -V | tail -1 || true)"
-  [ -n "$hit" ] || hit="$(ls -1 "$HERE/"$1* 2>/dev/null | grep -v -- "$2" | sort -V | tail -1 || true)"
+  hit="$(ls -1 "$HERE/$PLAT/${1}"* 2>/dev/null | grep -v -- "$2" | sort_versions | tail -1 || true)"
+  [ -n "$hit" ] || hit="$(ls -1 "$HERE/${1}"* 2>/dev/null | grep -v -- "$2" | sort_versions | tail -1 || true)"
   [ -n "$hit" ] || hit="$(pick "$3" "$3")"
   echo "$hit"
 }
@@ -56,6 +64,7 @@ case "$cmd" in
     echo "  co env                             环境详情"
     echo "  co self 子命令                      强制用自举版编译器"
     echo "  co --version                       只打版本"
+    echo "  co help                            完整手册（1-9 章）"
     # 跟 Windows 的 co.cmd 一致：不给参数就进交互模式（像 python 那样）
     [ -x "$RUN" ] && exec "$RUN" --repl
     exit 0
@@ -69,7 +78,10 @@ case "$cmd" in
     echo "  home        : $COPPER_HOME"
     exit 0
     ;;
-  -h|--help|help)
+  help)
+    exec "$RUN" --help
+    ;;
+  -h|--help)
     exec "$HERE/copper.sh" --help 2>/dev/null || { echo "co <脚本.co> | co build | co check | co env"; exit 0; }
     ;;
   env)

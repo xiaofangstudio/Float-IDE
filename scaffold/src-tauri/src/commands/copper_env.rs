@@ -120,7 +120,9 @@ fn home_candidates() -> Vec<(PathBuf, &'static str)> {
             out.push((PathBuf::from(home).join(".copper"), "user"));
         }
     }
-    // 绿色版：跟着 IDE 走
+    // 绿色版：只在开发构建里认，避免安装版升级后还去读旧的 `<exe>/copper_env`
+    // （1.9.7 及更早的安装目录里残留着内置环境，会掩盖用户新装的环境）。
+    #[cfg(debug_assertions)]
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             out.push((dir.join("copper_env"), "bundled"));
@@ -569,10 +571,61 @@ fn crate_dir() -> Option<PathBuf> {
     None
 }
 
-/// 用环境里的编译器把 `.co` 编成原生 exe。
+/// 把 `.co` 编成原生 exe。
 /// `out_dir` 为空时：产物放到源文件旁边的 `<stem>.exe`。
+///
+/// 主路径是**进程内内核 emitter**（和 F5 的 AOT 同一份代码），保证
+/// 「VM 能跑的，导出的 exe 也能跑」；`use_self=true` 才强制走环境里的自举编译器，
+/// 那条路的 emitter 能力面落后，只用于验证自举本身。
 #[tauri::command]
 pub fn copper_build(file: String, out_dir: Option<String>, use_self: Option<bool>) -> Result<CopperBuildResult, String> {
+    let src = Path::new(&file);
+    if !src.is_file() {
+        return Err(format!("找不到源文件：{}", file));
+    }
+    let stem = src.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "app".into());
+    let dest = match out_dir.clone() {
+        Some(d) if !d.trim().is_empty() => {
+            let dir = PathBuf::from(d);
+            std::fs::create_dir_all(&dir).map_err(|e| format!("建输出目录失败：{}", e))?;
+            dir.join(format!("{}{}", stem, exe_suffix()))
+        }
+        _ => src.parent().unwrap_or(Path::new(".")).join(format!("{}{}", stem, exe_suffix())),
+    };
+    let started = std::time::Instant::now();
+
+    /* 1) 进程内构建（默认）：用当前内核的 emitter 生成 Rust 再编。
+     * 不依赖环境里那个能力面落后的自举编译器。 */
+    if !use_self.unwrap_or(false) {
+        let text = std::fs::read_to_string(src).map_err(|e| format!("读源文件失败：{e}"))?;
+        let key = format!("build-{}", aot_hash(src));
+        match float_lang::aot::build_exe(src, &text, float_lang::MANIFEST_DIR, &key) {
+            Ok(built) => {
+                if let Some(parent) = dest.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                std::fs::copy(&built, &dest).map_err(|e| format!("复制产物失败：{e}"))?;
+                return Ok(CopperBuildResult {
+                    ok: true,
+                    exe: dest.display().to_string(),
+                    log: format!("内核 AOT（进程内 emitter）\n产物：{}", built.display()),
+                    compiler: "float-lang（进程内）".into(),
+                    millis: started.elapsed().as_millis() as u64,
+                });
+            }
+            Err(e) => {
+                return Ok(CopperBuildResult {
+                    ok: false,
+                    exe: String::new(),
+                    log: format!("内核 AOT 失败：{e}"),
+                    compiler: "float-lang（进程内）".into(),
+                    millis: started.elapsed().as_millis() as u64,
+                });
+            }
+        }
+    }
+
+    // 2) 显式要求自举编译器：走环境
     let env = resolve_env();
     if !env.found {
         return Err(format!(
@@ -593,19 +646,10 @@ pub fn copper_build(file: String, out_dir: Option<String>, use_self: Option<bool
     if !rt.is_file() {
         return Err(format!("环境里缺运行时前奏：{}", rt.display()));
     }
-    /* 内核源码目录只有"自举编译器"才需要；分发的环境包里编译器自带运行时，
-     * 用户机器上不一定有 float-lang 源码，所以这里是可选参数，不再是硬门槛。 */
     let cratep = crate_dir();
     let cargo = find_cargo().ok_or("找不到 cargo（可设 COLANG_CARGO 指定绝对路径）")?;
-    let src = Path::new(&file);
-    if !src.is_file() {
-        return Err(format!("找不到源文件：{}", file));
-    }
-    let stem = src.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "app".into());
     let build_root = std::env::temp_dir().join("copper_build").join(format!("{}-{}", stem, std::process::id()));
     std::fs::create_dir_all(&build_root).map_err(|e| format!("建临时目录失败：{}", e))?;
-
-    let started = std::time::Instant::now();
     let mut cmd = Command::new(&compiler);
     cmd.env("COPPER_RT", &rt);
     if let Some(c) = &cratep {
@@ -633,15 +677,7 @@ pub fn copper_build(file: String, out_dir: Option<String>, use_self: Option<bool
             millis: started.elapsed().as_millis() as u64,
         });
     }
-    // 产物落地：默认靠近源文件
-    let dest = match out_dir {
-        Some(d) if !d.trim().is_empty() => {
-            let dir = PathBuf::from(d);
-            std::fs::create_dir_all(&dir).map_err(|e| format!("建输出目录失败：{}", e))?;
-            dir.join(format!("{}{}", stem, exe_suffix()))
-        }
-        _ => src.parent().unwrap_or(Path::new(".")).join(format!("{}{}", stem, exe_suffix())),
-    };
+    // 产物落地（dest 已在函数开头按 out_dir 算好）
     if let Some(parent) = dest.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -1076,7 +1112,7 @@ fn aot_run_blocking(
     file: String,
     force: bool,
 ) -> Result<AotRunResult, String> {
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
     use tauri::Emitter;
 
@@ -1121,11 +1157,13 @@ fn aot_run_blocking(
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     );
-    let mut child = Command::new(&exe)
-        .env("COPPER_ASK_MARK", "1")
+    let mut cmd = Command::new(&exe);
+    cmd.env("COPPER_ASK_MARK", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::commands::hide_console_window(&mut cmd);
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("启动 AOT 产物失败：{e}"))?;
 
